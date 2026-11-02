@@ -299,32 +299,48 @@ def render_global_theme(theme_mode: str):
 
         /* ====================================================
         SCROLLABLE SELECTBOX DROPDOWN MENUS
-        Supports long lists such as PDF page selection.
-        Only the inner BaseWeb menu scrolls.
+        One scrollbar only for long PDF page lists.
         ==================================================== */
 
-        /* Outer popup: no scrolling here */
+        /* This is the actual BaseWeb list menu. */
         [role="listbox"] {{
             background: {colours["surface"]} !important;
             color: {colours["text"]} !important;
             border: 1px solid {colours["border"]} !important;
             border-radius: 10px !important;
-            overflow: hidden !important;
+
+            /* One scrollable container only. */
+            max-height: 340px !important;
+            overflow-x: hidden !important;
+            overflow-y: auto !important;
+
+            overscroll-behavior: contain !important;
             box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18) !important;
         }}
 
-        [role="listbox"] > div::-webkit-scrollbar-track {{
+        /* Do not make child elements independently scrollable. */
+        [role="listbox"] > div {{
+            max-height: none !important;
+            overflow: visible !important;
+        }}
+
+        /* Chrome / Edge scrollbar styling. */
+        [role="listbox"]::-webkit-scrollbar {{
+            width: 10px;
+        }}
+
+        [role="listbox"]::-webkit-scrollbar-track {{
             background: {colours["surface_secondary"]} !important;
             border-radius: 999px;
         }}
 
-        [role="listbox"] > div::-webkit-scrollbar-thumb {{
+        [role="listbox"]::-webkit-scrollbar-thumb {{
             background: {colours["border"]} !important;
             border: 2px solid {colours["surface_secondary"]} !important;
             border-radius: 999px;
         }}
 
-        [role="listbox"] > div::-webkit-scrollbar-thumb:hover {{
+        [role="listbox"]::-webkit-scrollbar-thumb:hover {{
             background: {colours["border_hover"]} !important;
         }}
 
