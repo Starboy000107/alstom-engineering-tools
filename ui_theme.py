@@ -241,15 +241,47 @@ def render_global_theme(theme_mode: str):
             color: {colours["muted"]} !important;
         }}
 
-        [role="listbox"] {{
+        [role="listbox"] {
             background: {colours["surface"]} !important;
             color: {colours["text"]} !important;
             border: 1px solid {colours["border"]} !important;
             border-radius: 10px !important;
-            overflow: hidden !important;
+            overflow-x: hidden !important;
+            overflow-y: auto !important;
+            max-height: 320px !important;
             box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18) !important;
-        }}
+        }
 
+        /* Allow long Streamlit/BaseWeb select menus,
+        such as PDF page selection, to scroll. */
+        [role="listbox"] > div {
+            overflow-y: auto !important;
+            max-height: 320px !important;
+        }
+
+        /* Professional scrollbar styling */
+        [role="listbox"]::-webkit-scrollbar,
+        [role="listbox"] > div::-webkit-scrollbar {
+            width: 10px;
+        }
+
+        [role="listbox"]::-webkit-scrollbar-track,
+        [role="listbox"] > div::-webkit-scrollbar-track {
+            background: {colours["surface_secondary"]};
+            border-radius: 999px;
+        }
+
+        [role="listbox"]::-webkit-scrollbar-thumb,
+        [role="listbox"] > div::-webkit-scrollbar-thumb {
+            background: {colours["border"]};
+            border-radius: 999px;
+            border: 2px solid {colours["surface_secondary"]};
+        }
+
+        [role="listbox"]::-webkit-scrollbar-thumb:hover,
+        [role="listbox"] > div::-webkit-scrollbar-thumb:hover {
+            background: {colours["border_hover"]};
+        }
         [role="option"] {{
             background: {colours["surface"]} !important;
             color: {colours["text"]} !important;
