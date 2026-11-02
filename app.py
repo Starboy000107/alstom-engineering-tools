@@ -38,7 +38,7 @@ def main():
             "Light",
             "Dark",
         ],
-        index=0,
+        index=1,
         key="global_theme_mode",
     )
 
