@@ -297,12 +297,53 @@ def render_global_theme(theme_mode: str):
             color: {colours["muted"]} !important;
         }}
 
+        /* ====================================================
+        SCROLLABLE SELECTBOX DROPDOWN MENUS
+        Supports long lists such as PDF page selection.
+        ==================================================== */
+
         [role="listbox"] {{
             background: {colours["surface"]} !important;
             color: {colours["text"]} !important;
             border: 1px solid {colours["border"]} !important;
             border-radius: 10px !important;
+            overflow-x: hidden !important;
+            overflow-y: auto !important;
+            max-height: 360px !important;
+            overscroll-behavior: contain !important;
             box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18) !important;
+        }}
+
+        /* Different Streamlit/BaseWeb versions place the actual
+        scrolling container one level below the listbox. */
+        [role="listbox"] > div {{
+            overflow-x: hidden !important;
+            overflow-y: auto !important;
+            max-height: 360px !important;
+        }}
+
+        /* Scrollbar for Chrome, Edge, and Streamlit Cloud. */
+        [role="listbox"]::-webkit-scrollbar,
+        [role="listbox"] > div::-webkit-scrollbar {{
+            width: 10px;
+        }}
+
+        [role="listbox"]::-webkit-scrollbar-track,
+        [role="listbox"] > div::-webkit-scrollbar-track {{
+            background: {colours["surface_secondary"]} !important;
+            border-radius: 999px;
+        }}
+
+        [role="listbox"]::-webkit-scrollbar-thumb,
+        [role="listbox"] > div::-webkit-scrollbar-thumb {{
+            background: {colours["border"]} !important;
+            border: 2px solid {colours["surface_secondary"]} !important;
+            border-radius: 999px;
+        }}
+
+        [role="listbox"]::-webkit-scrollbar-thumb:hover,
+        [role="listbox"] > div::-webkit-scrollbar-thumb:hover {{
+            background: {colours["border_hover"]} !important;
         }}
 
         [role="option"] {{
