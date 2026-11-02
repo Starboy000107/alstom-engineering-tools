@@ -100,17 +100,194 @@ def initialize_ct_loop_state():
         if key not in st.session_state:
             st.session_state[key] = value
 
+def render_ct_loop_styles():
+    """
+    CT Loop page-specific professional styling.
+    The shared Light/Dark/Night styling is applied from ui_theme.py.
+    """
+
+    st.markdown(
+        """
+        <style>
+        .ct-professional-header {
+            position: relative;
+            overflow: hidden;
+            background: linear-gradient(
+                135deg,
+                #102A43 0%,
+                #163D5A 58%,
+                #1C587D 100%
+            );
+            border-radius: 18px;
+            padding: 30px 34px;
+            margin-bottom: 26px;
+            box-shadow: 0 12px 30px rgba(16,42,67,.22);
+            color: white;
+        }
+
+        .ct-professional-header-inner {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .ct-professional-icon {
+            width: 68px;
+            height: 68px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: white;
+            color: #102A43 !important;
+            border-radius: 14px;
+            font-size: 34px;
+            flex-shrink: 0;
+        }
+
+        .ct-professional-header h1 {
+            margin: 0;
+            color: white !important;
+            font-size: 30px;
+            font-weight: 750;
+        }
+
+        .ct-professional-header p {
+            margin: 8px 0 0;
+            color: #D9EAF5 !important;
+            font-size: 15px;
+        }
+
+        .ct-header-tag {
+            display: inline-block;
+            margin-top: 15px;
+            padding: 5px 11px;
+            border: 1px solid rgba(255,255,255,.25);
+            border-radius: 20px;
+            color: #EAF5FB !important;
+            background: rgba(255,255,255,.10);
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: .6px;
+            text-transform: uppercase;
+        }
+
+        .ct-information-card,
+        .ct-upload-panel,
+        .ct-review-card,
+        .ct-log-card {
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 22px 25px;
+            margin-bottom: 24px;
+            box-shadow: 0 8px 25px rgba(16,42,67,.08);
+        }
+
+        .ct-information-card {
+            border-top: 4px solid var(--blue);
+        }
+
+        .ct-upload-panel {
+            border-top: 4px solid var(--teal);
+        }
+
+        .ct-review-card {
+            border-top: 4px solid var(--green);
+        }
+
+        .ct-card-title {
+            font-size: 18px;
+            font-weight: 750;
+            margin-bottom: 8px;
+        }
+
+        .ct-card-description {
+            font-size: 14px;
+            line-height: 1.65;
+        }
+
+        .ct-section-heading {
+            margin-top: 20px;
+            margin-bottom: 8px;
+            font-size: 21px;
+            font-weight: 750;
+        }
+
+        .ct-footer {
+            margin-top: 45px;
+            padding-top: 18px;
+            border-top: 1px solid var(--border);
+            font-size: 12px;
+            line-height: 1.7;
+            text-align: center;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 def render_ct_loop_extractor_app():
     initialize_ct_loop_state()
+    render_ct_loop_styles()
 
-    st.title("CT Loop Drawing Extractor")
+    st.markdown(
+        """
+        <div class="ct-professional-header">
+            <div class="ct-professional-header-inner">
+                <div class="ct-professional-icon">🚆</div>
 
-    st.warning(
-        "This application creates candidate CT-loop checklist entries "
-        "using PDF text and visible wire tracing. Every terminal reference "
-        "and link must be independently verified against the controlled "
-        "drawing before approval or site use."
+                <div>
+                    <h1>CT Loop Drawing Extractor</h1>
+
+                    <p>
+                        Controlled drawing review and CT-loop checklist
+                        candidate generation platform
+                    </p>
+
+                    <span class="ct-header-tag">
+                        Engineering drawing verification workflow
+                    </span>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+        <div class="ct-information-card">
+            <div class="ct-card-title">
+                🚆 Generate CT-loop checklist candidates
+            </div>
+
+            <div class="ct-card-description">
+                Upload a controlled CT-loop drawing PDF. The application
+                identifies candidate terminal-pair relationships and creates
+                checklist rows for engineering review. All generated entries
+                must be checked against the controlled drawing before issue,
+                approval, or site use.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+        <div class="ct-upload-panel">
+            <div class="ct-card-title">
+                Controlled CT-loop drawing PDF
+            </div>
+
+            <div class="ct-card-description">
+                Upload the controlled PDF drawing to extract candidate
+                CT-loop checklist entries.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     uploaded_pdf = st.file_uploader(
@@ -291,6 +468,20 @@ def render_ct_loop_extractor_app():
     render_ct_loop_review_area(
         pdf_bytes=pdf_bytes,
         checklist=checklist,
+    )
+    
+    st.markdown(
+        """
+        <div class="ct-footer">
+            <strong>CT Loop Drawing Extractor</strong>
+            <br>
+            Alstom engineering document review tool
+            &nbsp;|&nbsp;
+            Verify all generated checklist entries against the
+            controlled drawing before use.
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
 
