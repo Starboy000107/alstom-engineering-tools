@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import logging
 import tempfile
@@ -16,8 +17,19 @@ from extractors.ct_loop_extractor import (
 )
 
 
+APP_NAME = "drawing_extractor"
+
 LOG_FILE_NAME = "drawing_extractor.log"
-LOG_DIRECTORY = Path("/tmp/alstom_drawing_extractor_logs")
+
+LOG_DIRECTORY = Path(
+    "/tmp/alstom_drawing_extractor_logs"
+)
+
+ICON_PATH = (
+    Path(__file__).parent
+    / "img"
+    / "page_icon.png"
+)
 
 
 def configure_logging() -> logging.Logger:
@@ -25,7 +37,7 @@ def configure_logging() -> logging.Logger:
     Configure server-side Drawing Extractor logging.
     """
 
-    logger = logging.getLogger("drawing_extractor")
+    logger = logging.getLogger(APP_NAME)
 
     if logger.handlers:
         return logger
@@ -58,10 +70,39 @@ def configure_logging() -> logging.Logger:
 LOGGER = configure_logging()
 
 
+def get_drawing_extractor_logo_html() -> str:
+    """
+    Returns the shared page icon as HTML.
+
+    Uses the same image as the Master Drawing List Generator:
+        img/page_icon.png
+    """
+
+    if not ICON_PATH.exists():
+        return (
+            '<div class="extractor-professional-icon">'
+            "📐"
+            "</div>"
+        )
+
+    encoded_icon = base64.b64encode(
+        ICON_PATH.read_bytes()
+    ).decode("utf-8")
+
+    return f"""
+    <img
+        src="data:image/png;base64,{encoded_icon}"
+        class="extractor-professional-logo"
+        alt="Alstom Engineering Tools"
+    >
+    """
+
+
 def render_extractor_html(html: str):
     """
-    Renders HTML without Streamlit treating indented HTML
-    as a visible code block.
+    Render HTML after removing Python indentation.
+
+    This prevents Streamlit from displaying HTML as a code block.
     """
 
     content = textwrap.dedent(html).strip()
@@ -77,9 +118,10 @@ def render_extractor_html(html: str):
 
 def render_drawing_extractor_styles():
     """
-    Drawing Extractor-specific style.
+    Drawing Extractor-specific styling.
 
-    Shared Light / Dark / Night styling is handled by ui_theme.py.
+    Global Light / Dark / Night theme styling is supplied by
+    ui_theme.py after the tool page is rendered.
     """
 
     css = """
@@ -93,7 +135,7 @@ def render_drawing_extractor_styles():
             #163D5A 58%,
             #1C587D 100%
         );
-        border-radius: 18px;
+        border-radius: 22px;
         padding: 30px 34px;
         margin-bottom: 26px;
         box-shadow: 0 12px 30px rgba(16,42,67,.22);
@@ -108,17 +150,24 @@ def render_drawing_extractor_styles():
         gap: 20px;
     }
 
-    .extractor-professional-icon {
+    .extractor-professional-icon,
+    .extractor-professional-logo {
         width: 68px;
         height: 68px;
+        object-fit: contain;
+        background: white;
+        padding: 8px;
+        border-radius: 16px;
+        box-sizing: border-box;
+        flex-shrink: 0;
+    }
+
+    .extractor-professional-icon {
         display: flex;
         align-items: center;
         justify-content: center;
-        background: white;
         color: #102A43 !important;
-        border-radius: 14px;
         font-size: 34px;
-        flex-shrink: 0;
     }
 
     .extractor-professional-header h1 {
@@ -137,9 +186,9 @@ def render_drawing_extractor_styles():
     .extractor-header-tag {
         display: inline-block;
         margin-top: 15px;
-        padding: 5px 11px;
+        padding: 6px 12px;
         border: 1px solid rgba(255,255,255,.25);
-        border-radius: 20px;
+        border-radius: 999px;
         color: #EAF5FB !important;
         background: rgba(255,255,255,.10);
         font-size: 11px;
@@ -153,9 +202,9 @@ def render_drawing_extractor_styles():
     .extractor-upload-panel {
         background: var(--surface, #FFFFFF);
         border: 1px solid var(--border, #D9E2EC);
-        border-radius: 14px;
+        border-radius: 18px;
         padding: 22px 25px;
-        margin-bottom: 24px;
+        margin-bottom: 20px;
         box-shadow: 0 8px 25px rgba(16,42,67,.08);
     }
 
@@ -193,6 +242,84 @@ def render_drawing_extractor_styles():
         line-height: 1.7;
         text-align: center;
     }
+
+    /* ================================================
+       Rounded Streamlit controls and containers
+       ================================================ */
+
+    /* Select box: Select drawing extraction type */
+    [data-testid="stSelectbox"] > div,
+    [data-baseweb="select"] > div {
+        border-radius: 16px !important;
+    }
+
+    [data-baseweb="select"] > div {
+        overflow: hidden;
+    }
+
+    /* Dropdown menu */
+    [role="listbox"] {
+        border-radius: 16px !important;
+        overflow: hidden;
+    }
+
+    /* File uploader */
+    [data-testid="stFileUploader"] {
+        border-radius: 18px !important;
+        overflow: hidden;
+        padding: 12px !important;
+    }
+
+    [data-testid="stFileUploaderDropzone"] {
+        border-radius: 14px !important;
+    }
+
+    [data-testid="stFileUploaderFile"] {
+        border-radius: 14px !important;
+    }
+
+    /* Buttons */
+    .stButton > button,
+    .stDownloadButton > button {
+        border-radius: 14px !important;
+    }
+
+    /* Progress bar */
+    [data-testid="stProgress"] > div {
+        border-radius: 999px !important;
+        overflow: hidden;
+    }
+
+    /* Processing logs and other expanders */
+    [data-testid="stExpander"] {
+        border-radius: 16px !important;
+        overflow: hidden;
+    }
+
+    /* Information, warning, error and success messages */
+    [data-testid="stAlert"] {
+        border-radius: 14px !important;
+    }
+
+    /* Data editor */
+    [data-testid="stDataEditor"] {
+        border-radius: 18px !important;
+        overflow: hidden;
+    }
+
+    /* Code area inside Processing logs */
+    [data-testid="stCode"] {
+        border-radius: 14px !important;
+        overflow: hidden;
+    }
+
+    /* Text, number and text-area input controls */
+    [data-testid="stTextInput"] > div,
+    [data-testid="stNumberInput"] > div,
+    [data-testid="stTextArea"] > div {
+        border-radius: 14px !important;
+        overflow: hidden;
+    }
     </style>
     """
 
@@ -203,6 +330,10 @@ def render_drawing_extractor_styles():
 
 
 def calculate_sha256(file_bytes: bytes) -> str:
+    """
+    Return a SHA-256 checksum for the uploaded PDF.
+    """
+
     return hashlib.sha256(file_bytes).hexdigest()
 
 
@@ -211,7 +342,7 @@ def render_pdf_page(
     page_number: int,
 ) -> bytes:
     """
-    Renders a selected PDF page to PNG for preview.
+    Render the selected PDF page as a PNG image.
     """
 
     with fitz.open(
@@ -235,7 +366,7 @@ def render_pdf_page(
 
 def get_log_file_bytes() -> bytes:
     """
-    Returns the current Drawing Extractor log file.
+    Return the Drawing Extractor server log file.
     """
 
     log_file = LOG_DIRECTORY / LOG_FILE_NAME
@@ -248,7 +379,7 @@ def get_log_file_bytes() -> bytes:
 
 def initialize_drawing_extractor_state():
     """
-    Initialise Drawing Extractor Streamlit state.
+    Initialise Drawing Extractor-specific Streamlit state.
     """
 
     defaults = {
@@ -264,8 +395,9 @@ def initialize_drawing_extractor_state():
 
 def render_processing_logs():
     """
-    Logs are hidden by default and are visible only when
-    the user manually opens this expander.
+    Processing logs are hidden by default.
+
+    Logs display only when the user opens this expander.
     """
 
     with st.expander(
@@ -297,10 +429,9 @@ def render_processing_logs():
 
 def get_extractor_configuration(extraction_type):
     """
-    Returns the correct processing functions for each
-    drawing extraction type.
+    Return configured functions for the selected extraction type.
 
-    New extraction types can be added here later.
+    Add future drawing extractor types here.
     """
 
     extraction_options = {
@@ -309,41 +440,31 @@ def get_extractor_configuration(extraction_type):
             "excel_function": build_ct_loop_excel,
             "review_function": render_ct_loop_review_area,
         },
-
-        # Future options:
-        #
-        # "Signal Cable": {
-        #     "extract_function": extract_signal_cable_pdf,
-        #     "excel_function": build_signal_cable_excel,
-        #     "review_function": render_signal_cable_review_area,
-        # },
-        #
-        # "Relay Circuit": {
-        #     "extract_function": extract_relay_pdf,
-        #     "excel_function": build_relay_excel,
-        #     "review_function": render_relay_review_area,
-        # },
     }
 
-    return extraction_options.get(extraction_type)
+    return extraction_options.get(
+        extraction_type
+    )
 
 
 def render_drawing_extractor_app():
     """
     Main Drawing Extractor application.
 
-    Current available extraction type:
+    Current supported extraction type:
     - CT Loop
     """
 
     initialize_drawing_extractor_state()
     render_drawing_extractor_styles()
 
+    logo_html = get_drawing_extractor_logo_html()
+
     render_extractor_html(
-        """
+        f"""
         <div class="extractor-professional-header">
             <div class="extractor-professional-header-inner">
-                <div class="extractor-professional-icon">📐</div>
+                {logo_html}
 
                 <div>
                     <h1>Drawing Extractor</h1>
@@ -365,7 +486,7 @@ def render_drawing_extractor_app():
         """
         <div class="extractor-information-card">
             <div class="extractor-card-title">
-                📐 Engineering drawing data extraction
+                📘 Engineering drawing data extraction
             </div>
 
             <div class="extractor-card-description">
@@ -386,8 +507,8 @@ def render_drawing_extractor_app():
             </div>
 
             <div class="extractor-card-description">
-                CT Loop is currently available. Additional drawing formats
-                can be added to this platform later.
+                CT Loop is currently available. Additional drawing extraction
+                formats can be added to this platform later.
             </div>
         </div>
         """
@@ -480,7 +601,10 @@ def render_drawing_extractor_app():
             level: str = "INFO",
         ):
             """
-            Store logs only; do not show live log text.
+            Store log messages only.
+
+            No Streamlit display call exists in this function,
+            so logs cannot appear during extraction.
             """
 
             timestamp = time.strftime("%H:%M:%S")
@@ -495,16 +619,19 @@ def render_drawing_extractor_app():
 
             if level == "ERROR":
                 LOGGER.error(message)
+
             elif level == "WARNING":
                 LOGGER.warning(message)
+
             elif level == "DEBUG":
                 LOGGER.debug(message)
+
             else:
                 LOGGER.info(message)
 
         def update_progress(value: float):
             """
-            Updates the visible percentage/progress bar only.
+            Update only the visible progress bar percentage.
             """
 
             safe_value = max(
@@ -554,7 +681,10 @@ def render_drawing_extractor_app():
                 progress_callback=update_progress,
             )
 
-            st.session_state.drawing_extractor_checklist = checklist
+            st.session_state.drawing_extractor_checklist = (
+                checklist
+            )
+
             st.session_state.drawing_extractor_debug_images = (
                 debug_images
             )
@@ -637,13 +767,15 @@ def render_drawing_extractor_app():
         "review_function"
     ]
 
+    excel_function = extractor_configuration[
+        "excel_function"
+    ]
+
     review_function(
         pdf_bytes=pdf_bytes,
         checklist=checklist,
         extraction_type=extraction_type,
-        excel_function=extractor_configuration[
-            "excel_function"
-        ],
+        excel_function=excel_function,
     )
 
     render_extractor_html(
@@ -667,9 +799,9 @@ def render_ct_loop_review_area(
     excel_function,
 ):
     """
-    CT Loop-specific drawing review and Excel export area.
+    CT Loop review interface.
 
-    Future extraction types will each have their own review function.
+    Future drawing types should use their own review function.
     """
 
     left_column, right_column = st.columns(
