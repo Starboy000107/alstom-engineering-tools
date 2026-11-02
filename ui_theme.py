@@ -313,19 +313,6 @@ def render_global_theme(theme_mode: str):
             box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18) !important;
         }}
 
-        /* Inner menu: this is the only scrollable element */
-        [role="listbox"] > div {{
-            overflow-x: hidden !important;
-            overflow-y: auto !important;
-            max-height: 360px !important;
-            overscroll-behavior: contain !important;
-        }}
-
-        /* Scrollbar styling for the one inner scrolling menu */
-        [role="listbox"] > div::-webkit-scrollbar {{
-            width: 10px;
-        }}
-
         [role="listbox"] > div::-webkit-scrollbar-track {{
             background: {colours["surface_secondary"]} !important;
             border-radius: 999px;
