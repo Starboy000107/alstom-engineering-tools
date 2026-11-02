@@ -29,7 +29,6 @@ def get_theme_colours(theme_mode: str) -> dict:
             "focus_shadow": "rgba(138, 180, 248, 0.28)",
         }
 
-    # Chrome-inspired Light mode.
     return {
         "app_background": "#F8F9FA",
         "app_background_secondary": "#FFFFFF",
@@ -55,9 +54,9 @@ def get_theme_colours(theme_mode: str) -> dict:
 
 def render_global_theme(theme_mode: str):
     """
-    Applies Chrome-inspired Light/Dark appearance.
+    Applies Chrome-inspired Light/Dark styling.
 
-    Call this after rendering the selected tool:
+    Call this after rendering the selected application:
         render_global_theme(selected_theme)
     """
 
@@ -84,7 +83,7 @@ def render_global_theme(theme_mode: str):
         }}
 
         /* ====================================================
-           APP BACKGROUND / DEFAULT TEXT
+           APPLICATION BACKGROUND
            ==================================================== */
 
         .stApp {{
@@ -103,7 +102,7 @@ def render_global_theme(theme_mode: str):
             color: {colours["text"]};
         }}
 
-        /* Preserve white text in blue professional headers. */
+        /* Keep tool headers white. */
         .professional-header,
         .professional-header *,
         .extractor-professional-header,
@@ -120,11 +119,6 @@ def render_global_theme(theme_mode: str):
             border-right: 1px solid {colours["border"]} !important;
         }}
 
-        [data-testid="stSidebar"] * {{
-            color: {colours["text"]};
-        }}
-
-        /* Sidebar horizontal separators */
         [data-testid="stSidebar"] hr {{
             border-color: {colours["border"]} !important;
         }}
@@ -138,7 +132,8 @@ def render_global_theme(theme_mode: str):
         .workflow-card,
         .extractor-information-card,
         .extractor-selection-panel,
-        .extractor-upload-panel {{
+        .extractor-upload-panel,
+        .extractor-current-type {{
             background: {colours["surface"]} !important;
             border-color: {colours["border"]} !important;
             color: {colours["text"]} !important;
@@ -149,16 +144,19 @@ def render_global_theme(theme_mode: str):
         .workflow-card:hover,
         .extractor-information-card:hover,
         .extractor-selection-panel:hover,
-        .extractor-upload-panel:hover {{
+        .extractor-upload-panel:hover,
+        .extractor-current-type:hover {{
             border-color: {colours["border_hover"]} !important;
             box-shadow: 0 4px 14px {colours["focus_shadow"]} !important;
-            transition: border-color 0.18s ease, box-shadow 0.18s ease;
+            transition: border-color 0.18s ease,
+                        box-shadow 0.18s ease;
         }}
 
         .information-card-title,
         .upload-panel-title,
         .workflow-card-title,
-        .extractor-card-title {{
+        .extractor-card-title,
+        .extractor-current-type-value {{
             color: {colours["navy"]} !important;
         }}
 
@@ -166,6 +164,8 @@ def render_global_theme(theme_mode: str):
         .upload-panel-description,
         .workflow-card-description,
         .extractor-card-description,
+        .extractor-current-type-label,
+        .extractor-current-type-note,
         .professional-footer,
         .extractor-footer {{
             color: {colours["muted"]} !important;
@@ -173,28 +173,39 @@ def render_global_theme(theme_mode: str):
 
         /* ====================================================
            SELECT BOX
-           Styles only the actual control, not the outer label.
+           This is used later when more than one extraction
+           type becomes available.
            ==================================================== */
 
         [data-testid="stSelectbox"] [data-baseweb="select"] {{
             background: transparent !important;
-            border-radius: 12px !important;
+            border-radius: 10px !important;
         }}
 
         [data-testid="stSelectbox"] [data-baseweb="select"] > div {{
-            min-height: 44px !important;
+            min-height: 42px !important;
             background: {colours["surface_input"]} !important;
             color: {colours["text"]} !important;
             border: 1px solid {colours["border"]} !important;
-            border-radius: 12px !important;
+            border-radius: 10px !important;
             overflow: hidden !important;
             box-shadow: none !important;
-            transition: border-color 0.18s ease, box-shadow 0.18s ease;
+            outline: none !important;
         }}
 
         [data-testid="stSelectbox"] [data-baseweb="select"] > div:hover {{
             background: {colours["surface_hover"]} !important;
             border-color: {colours["border_hover"]} !important;
+        }}
+
+        [data-testid="stSelectbox"]
+        [data-baseweb="select"]
+        > div:focus,
+        [data-testid="stSelectbox"]
+        [data-baseweb="select"]
+        > div:focus-within {{
+            border-color: {colours["blue"]} !important;
+            box-shadow: 0 0 0 2px {colours["focus_shadow"]} !important;
         }}
 
         [data-testid="stSelectbox"]
@@ -211,14 +222,14 @@ def render_global_theme(theme_mode: str):
             color: {colours["text"]} !important;
         }}
 
-        /* Dropdown arrow area */
+        /* Remove dark/black dropdown-arrow corner. */
         [data-testid="stSelectbox"]
         [data-baseweb="select"]
         > div
         > div:last-child {{
-            background: transparent !important;
+            background: {colours["surface_input"]} !important;
             border-left: 1px solid {colours["border"]} !important;
-            border-radius: 0 11px 11px 0 !important;
+            border-radius: 0 9px 9px 0 !important;
         }}
 
         [data-testid="stSelectbox"]
@@ -230,23 +241,11 @@ def render_global_theme(theme_mode: str):
             color: {colours["muted"]} !important;
         }}
 
-        [data-testid="stSelectbox"]
-        [data-baseweb="select"]
-        > div:focus,
-        [data-testid="stSelectbox"]
-        [data-baseweb="select"]
-        > div:focus-within {{
-            border-color: {colours["blue"]} !important;
-            box-shadow: 0 0 0 3px {colours["focus_shadow"]} !important;
-            outline: none !important;
-        }}
-
-        /* Select dropdown menu */
         [role="listbox"] {{
             background: {colours["surface"]} !important;
             color: {colours["text"]} !important;
             border: 1px solid {colours["border"]} !important;
-            border-radius: 12px !important;
+            border-radius: 10px !important;
             overflow: hidden !important;
             box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18) !important;
         }}
@@ -268,10 +267,9 @@ def render_global_theme(theme_mode: str):
         [data-testid="stFileUploader"] {{
             background: {colours["surface_secondary"]} !important;
             border: 1px solid {colours["border"]} !important;
-            border-radius: 14px !important;
+            border-radius: 12px !important;
             overflow: hidden !important;
             padding: 12px !important;
-            transition: border-color 0.18s ease, background 0.18s ease;
         }}
 
         [data-testid="stFileUploader"]:hover {{
@@ -280,15 +278,37 @@ def render_global_theme(theme_mode: str):
         }}
 
         [data-testid="stFileUploaderDropzone"] {{
-            border-radius: 10px !important;
             background: transparent !important;
+            border-radius: 8px !important;
         }}
 
         [data-testid="stFileUploaderFile"] {{
             background: {colours["surface"]} !important;
-            border-radius: 10px !important;
+            border-radius: 8px !important;
         }}
-        
+
+        /* The file uploader Upload/Browse button. */
+        [data-testid="stFileUploader"] button {{
+            background: {colours["blue"]} !important;
+            color: #FFFFFF !important;
+            border: 1px solid {colours["blue"]} !important;
+            border-radius: 8px !important;
+            font-weight: 600 !important;
+            opacity: 1 !important;
+        }}
+
+        [data-testid="stFileUploader"] button:hover {{
+            background: {colours["button_hover"]} !important;
+            border-color: {colours["button_hover"]} !important;
+            color: #FFFFFF !important;
+        }}
+
+        [data-testid="stFileUploader"] button *,
+        [data-testid="stFileUploader"] button svg {{
+            color: #FFFFFF !important;
+            fill: #FFFFFF !important;
+        }}
+
         /* ====================================================
            BUTTONS
            ==================================================== */
@@ -297,7 +317,7 @@ def render_global_theme(theme_mode: str):
             background: {colours["blue"]} !important;
             color: #FFFFFF !important;
             border: 1px solid {colours["blue"]} !important;
-            border-radius: 10px !important;
+            border-radius: 8px !important;
             transition: background 0.18s ease,
                         border-color 0.18s ease,
                         box-shadow 0.18s ease,
@@ -319,7 +339,7 @@ def render_global_theme(theme_mode: str):
             background: {colours["green"]} !important;
             color: #FFFFFF !important;
             border: 1px solid {colours["green"]} !important;
-            border-radius: 10px !important;
+            border-radius: 8px !important;
             transition: background 0.18s ease,
                         border-color 0.18s ease,
                         box-shadow 0.18s ease,
@@ -346,7 +366,7 @@ def render_global_theme(theme_mode: str):
             background: {colours["surface_input"]} !important;
             color: {colours["text"]} !important;
             border-color: {colours["border"]} !important;
-            border-radius: 10px !important;
+            border-radius: 8px !important;
         }}
 
         [data-baseweb="input"] > div:hover {{
@@ -360,13 +380,13 @@ def render_global_theme(theme_mode: str):
         }}
 
         /* ====================================================
-           EXPANDERS, TABLES, ALERTS, CODE AREAS
+           EXPANDERS, TABLES, ALERTS, LOGS
            ==================================================== */
 
         [data-testid="stExpander"] {{
             background: {colours["surface"]} !important;
             border: 1px solid {colours["border"]} !important;
-            border-radius: 12px !important;
+            border-radius: 10px !important;
             overflow: hidden !important;
         }}
 
@@ -381,14 +401,14 @@ def render_global_theme(theme_mode: str):
 
         [data-testid="stDataEditor"] {{
             border: 1px solid {colours["border"]} !important;
-            border-radius: 12px !important;
+            border-radius: 10px !important;
             overflow: hidden !important;
         }}
 
         [data-testid="stMetric"] {{
             background: {colours["surface"]} !important;
             border: 1px solid {colours["border"]} !important;
-            border-radius: 12px !important;
+            border-radius: 10px !important;
         }}
 
         [data-testid="stMetricLabel"],
@@ -402,14 +422,14 @@ def render_global_theme(theme_mode: str):
         }}
 
         [data-testid="stAlert"] {{
-            border-radius: 10px !important;
+            border-radius: 8px !important;
         }}
 
         pre,
         [data-testid="stCode"] {{
             background: {colours["surface_input"]} !important;
             border: 1px solid {colours["border"]} !important;
-            border-radius: 10px !important;
+            border-radius: 8px !important;
             overflow: hidden !important;
         }}
 
@@ -417,10 +437,6 @@ def render_global_theme(theme_mode: str):
         [data-testid="stCode"] * {{
             color: {colours["text"]} !important;
         }}
-
-        /* ====================================================
-           PROGRESS BAR / SEPARATORS
-           ==================================================== */
 
         [data-testid="stProgress"] > div {{
             border-radius: 999px !important;
