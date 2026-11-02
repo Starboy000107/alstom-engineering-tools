@@ -8,20 +8,24 @@ from pathlib import Path
 import fitz
 import streamlit as st
 
-from excel_export import build_excel
-from extractor import extract_pdf
+from exports.ct_loop_excel_export import (
+    build_excel as build_ct_loop_excel,
+)
+from extractors.ct_loop_extractor import (
+    extract_pdf as extract_ct_loop_pdf,
+)
 
 
-LOG_FILE_NAME = "ct_loop_extractor.log"
-LOG_DIRECTORY = Path("/tmp/alstom_ct_loop_logs")
+LOG_FILE_NAME = "drawing_extractor.log"
+LOG_DIRECTORY = Path("/tmp/alstom_drawing_extractor_logs")
 
 
 def configure_logging() -> logging.Logger:
     """
-    Configure CT Loop server-side logging.
+    Configure server-side Drawing Extractor logging.
     """
 
-    logger = logging.getLogger("ct_loop_extractor")
+    logger = logging.getLogger("drawing_extractor")
 
     if logger.handlers:
         return logger
@@ -54,9 +58,10 @@ def configure_logging() -> logging.Logger:
 LOGGER = configure_logging()
 
 
-def render_ct_html(html: str):
+def render_extractor_html(html: str):
     """
-    Renders HTML without it becoming a visible code block.
+    Renders HTML without Streamlit treating indented HTML
+    as a visible code block.
     """
 
     content = textwrap.dedent(html).strip()
@@ -70,17 +75,16 @@ def render_ct_html(html: str):
         )
 
 
-def render_ct_loop_styles():
+def render_drawing_extractor_styles():
     """
-    CT Loop-specific professional styling.
+    Drawing Extractor-specific style.
 
-    Shared Light/Dark/Night theme styling should be applied
-    by app.py / ui_theme.py after this tool is rendered.
+    Shared Light / Dark / Night styling is handled by ui_theme.py.
     """
 
     css = """
     <style>
-    .ct-professional-header {
+    .extractor-professional-header {
         position: relative;
         overflow: hidden;
         background: linear-gradient(
@@ -96,7 +100,7 @@ def render_ct_loop_styles():
         color: white;
     }
 
-    .ct-professional-header-inner {
+    .extractor-professional-header-inner {
         position: relative;
         z-index: 1;
         display: flex;
@@ -104,7 +108,7 @@ def render_ct_loop_styles():
         gap: 20px;
     }
 
-    .ct-professional-icon {
+    .extractor-professional-icon {
         width: 68px;
         height: 68px;
         display: flex;
@@ -117,20 +121,20 @@ def render_ct_loop_styles():
         flex-shrink: 0;
     }
 
-    .ct-professional-header h1 {
+    .extractor-professional-header h1 {
         margin: 0;
         color: white !important;
         font-size: 30px;
         font-weight: 750;
     }
 
-    .ct-professional-header p {
+    .extractor-professional-header p {
         margin: 8px 0 0;
         color: #D9EAF5 !important;
         font-size: 15px;
     }
 
-    .ct-header-tag {
+    .extractor-header-tag {
         display: inline-block;
         margin-top: 15px;
         padding: 5px 11px;
@@ -144,8 +148,9 @@ def render_ct_loop_styles():
         text-transform: uppercase;
     }
 
-    .ct-information-card,
-    .ct-upload-panel {
+    .extractor-information-card,
+    .extractor-selection-panel,
+    .extractor-upload-panel {
         background: var(--surface, #FFFFFF);
         border: 1px solid var(--border, #D9E2EC);
         border-radius: 14px;
@@ -154,28 +159,32 @@ def render_ct_loop_styles():
         box-shadow: 0 8px 25px rgba(16,42,67,.08);
     }
 
-    .ct-information-card {
+    .extractor-information-card {
         border-top: 4px solid var(--blue, #1769C2);
     }
 
-    .ct-upload-panel {
+    .extractor-selection-panel {
         border-top: 4px solid var(--teal, #008F95);
     }
 
-    .ct-card-title {
+    .extractor-upload-panel {
+        border-top: 4px solid var(--green, #167A3D);
+    }
+
+    .extractor-card-title {
         color: var(--navy, #102A43);
         font-size: 18px;
         font-weight: 750;
         margin-bottom: 8px;
     }
 
-    .ct-card-description {
+    .extractor-card-description {
         color: var(--muted, #627D98);
         font-size: 14px;
         line-height: 1.65;
     }
 
-    .ct-footer {
+    .extractor-footer {
         margin-top: 45px;
         padding-top: 18px;
         border-top: 1px solid var(--border, #D9E2EC);
@@ -202,7 +211,7 @@ def render_pdf_page(
     page_number: int,
 ) -> bytes:
     """
-    Renders one PDF page as PNG for browser display.
+    Renders a selected PDF page to PNG for preview.
     """
 
     with fitz.open(
@@ -226,7 +235,7 @@ def render_pdf_page(
 
 def get_log_file_bytes() -> bytes:
     """
-    Provides the CT Loop server log for download.
+    Returns the current Drawing Extractor log file.
     """
 
     log_file = LOG_DIRECTORY / LOG_FILE_NAME
@@ -237,15 +246,15 @@ def get_log_file_bytes() -> bytes:
     return log_file.read_bytes()
 
 
-def initialize_ct_loop_state():
+def initialize_drawing_extractor_state():
     """
-    Initializes all CT Loop-specific state keys.
+    Initialise Drawing Extractor Streamlit state.
     """
 
     defaults = {
-        "ct_checklist": None,
-        "ct_debug_images": {},
-        "ct_processing_logs": [],
+        "drawing_extractor_checklist": None,
+        "drawing_extractor_debug_images": {},
+        "drawing_extractor_processing_logs": [],
     }
 
     for key, value in defaults.items():
@@ -255,10 +264,8 @@ def initialize_ct_loop_state():
 
 def render_processing_logs():
     """
-    Shows logs only when the user opens the expander.
-
-    This is the ONLY function in this file that displays
-    CT Loop processing logs.
+    Logs are hidden by default and are visible only when
+    the user manually opens this expander.
     """
 
     with st.expander(
@@ -266,7 +273,7 @@ def render_processing_logs():
         expanded=False,
     ):
         current_logs = "\n".join(
-            st.session_state.ct_processing_logs
+            st.session_state.drawing_extractor_processing_logs
         )
 
         if current_logs:
@@ -280,37 +287,72 @@ def render_processing_logs():
             )
 
         st.download_button(
-            label="Download full CT-loop log",
+            label="Download full extraction log",
             data=get_log_file_bytes(),
-            file_name="ct_loop_extractor.log",
+            file_name="drawing_extractor.log",
             mime="text/plain",
-            key="ct_download_log",
+            key="drawing_extractor_download_log",
         )
 
 
-def render_ct_loop_extractor_app():
+def get_extractor_configuration(extraction_type):
     """
-    Main CT Loop Drawing Extractor renderer.
+    Returns the correct processing functions for each
+    drawing extraction type.
+
+    New extraction types can be added here later.
     """
 
-    initialize_ct_loop_state()
-    render_ct_loop_styles()
+    extraction_options = {
+        "CT Loop": {
+            "extract_function": extract_ct_loop_pdf,
+            "excel_function": build_ct_loop_excel,
+            "review_function": render_ct_loop_review_area,
+        },
 
-    render_ct_html(
+        # Future options:
+        #
+        # "Signal Cable": {
+        #     "extract_function": extract_signal_cable_pdf,
+        #     "excel_function": build_signal_cable_excel,
+        #     "review_function": render_signal_cable_review_area,
+        # },
+        #
+        # "Relay Circuit": {
+        #     "extract_function": extract_relay_pdf,
+        #     "excel_function": build_relay_excel,
+        #     "review_function": render_relay_review_area,
+        # },
+    }
+
+    return extraction_options.get(extraction_type)
+
+
+def render_drawing_extractor_app():
+    """
+    Main Drawing Extractor application.
+
+    Current available extraction type:
+    - CT Loop
+    """
+
+    initialize_drawing_extractor_state()
+    render_drawing_extractor_styles()
+
+    render_extractor_html(
         """
-        <div class="ct-professional-header">
-            <div class="ct-professional-header-inner">
-                <div class="ct-professional-icon">🚆</div>
+        <div class="extractor-professional-header">
+            <div class="extractor-professional-header-inner">
+                <div class="extractor-professional-icon">📐</div>
 
                 <div>
-                    <h1>CT Loop Drawing Extractor</h1>
+                    <h1>Drawing Extractor</h1>
 
                     <p>
-                        Controlled drawing review and CT-loop checklist
-                        candidate generation platform
+                        Engineering drawing extraction and review platform
                     </p>
 
-                    <span class="ct-header-tag">
+                    <span class="extractor-header-tag">
                         Engineering drawing verification workflow
                     </span>
                 </div>
@@ -319,47 +361,82 @@ def render_ct_loop_extractor_app():
         """
     )
 
-    render_ct_html(
+    render_extractor_html(
         """
-        <div class="ct-information-card">
-            <div class="ct-card-title">
-                🚆 Generate CT-loop checklist candidates
+        <div class="extractor-information-card">
+            <div class="extractor-card-title">
+                📐 Engineering drawing data extraction
             </div>
 
-            <div class="ct-card-description">
-                Upload a controlled CT-loop drawing PDF. The application
-                identifies candidate terminal-pair relationships and creates
-                checklist rows for engineering review. Every generated entry
-                must be checked against the controlled drawing before issue,
-                approval, or site use.
+            <div class="extractor-card-description">
+                Select the drawing extraction type and upload a controlled
+                engineering drawing PDF. All extracted information must be
+                independently reviewed against the controlled drawing before
+                issue, approval, or site use.
             </div>
         </div>
         """
     )
 
-    render_ct_html(
+    render_extractor_html(
         """
-        <div class="ct-upload-panel">
-            <div class="ct-card-title">
-                Controlled CT-loop drawing PDF
+        <div class="extractor-selection-panel">
+            <div class="extractor-card-title">
+                Drawing extraction type
             </div>
 
-            <div class="ct-card-description">
-                Upload the controlled PDF drawing to extract candidate
-                CT-loop checklist entries.
+            <div class="extractor-card-description">
+                CT Loop is currently available. Additional drawing formats
+                can be added to this platform later.
+            </div>
+        </div>
+        """
+    )
+
+    extraction_type = st.selectbox(
+        "Select drawing extraction type",
+        options=[
+            "CT Loop",
+        ],
+        key="drawing_extractor_type",
+    )
+
+    extractor_configuration = get_extractor_configuration(
+        extraction_type
+    )
+
+    if extractor_configuration is None:
+        st.error(
+            "The selected extraction type is not configured."
+        )
+        return
+
+    render_extractor_html(
+        """
+        <div class="extractor-upload-panel">
+            <div class="extractor-card-title">
+                Controlled engineering drawing PDF
+            </div>
+
+            <div class="extractor-card-description">
+                Upload the controlled PDF drawing for the selected
+                extraction type.
             </div>
         </div>
         """
     )
 
     uploaded_pdf = st.file_uploader(
-        "Upload controlled CT-loop drawing PDF",
+        f"Upload controlled {extraction_type} drawing PDF",
         type=["pdf"],
-        key="ct_uploaded_pdf",
+        key="drawing_extractor_uploaded_pdf",
     )
 
     if uploaded_pdf is None:
-        st.info("Upload a PDF to begin.")
+        st.info(
+            "Upload a PDF to begin."
+        )
+
         render_processing_logs()
         return
 
@@ -369,6 +446,7 @@ def render_ct_loop_extractor_app():
         st.error(
             "The uploaded file is not a valid PDF."
         )
+
         render_processing_logs()
         return
 
@@ -380,19 +458,19 @@ def render_ct_loop_extractor_app():
     )
 
     extract_clicked = st.button(
-        "Extract candidate checklist",
+        f"Extract {extraction_type} drawing data",
         type="primary",
-        key="ct_extract_candidate_checklist",
+        key="drawing_extractor_extract_button",
     )
 
     if extract_clicked:
-        # Clear old logs only when a new extraction begins.
-        st.session_state.ct_processing_logs = []
+        st.session_state.drawing_extractor_processing_logs = []
 
-        # This is the only live extraction display.
         progress_bar = st.progress(
             0,
-            text="Preparing extraction... 0%",
+            text=(
+                f"Preparing {extraction_type} extraction... 0%"
+            ),
         )
 
         status_message = st.empty()
@@ -402,11 +480,7 @@ def render_ct_loop_extractor_app():
             level: str = "INFO",
         ):
             """
-            Stores log entries only.
-
-            DO NOT add st.code(), st.write(), st.text(),
-            placeholder.code(), or any Streamlit display call here.
-            Doing so would show logs live during extraction.
+            Store logs only; do not show live log text.
             """
 
             timestamp = time.strftime("%H:%M:%S")
@@ -415,25 +489,22 @@ def render_ct_loop_extractor_app():
                 f"{timestamp} | {level} | {message}"
             )
 
-            st.session_state.ct_processing_logs.append(
+            st.session_state.drawing_extractor_processing_logs.append(
                 formatted_message
             )
 
             if level == "ERROR":
                 LOGGER.error(message)
-
             elif level == "WARNING":
                 LOGGER.warning(message)
-
             elif level == "DEBUG":
                 LOGGER.debug(message)
-
             else:
                 LOGGER.info(message)
 
         def update_progress(value: float):
             """
-            Updates only the visible percentage/progress bar.
+            Updates the visible percentage/progress bar only.
             """
 
             safe_value = max(
@@ -443,7 +514,10 @@ def render_ct_loop_extractor_app():
 
             progress_bar.progress(
                 safe_value,
-                text=f"Extracting PDF... {safe_value}%",
+                text=(
+                    f"Extracting {extraction_type} drawing... "
+                    f"{safe_value}%"
+                ),
             )
 
         temporary_path = None
@@ -451,11 +525,13 @@ def render_ct_loop_extractor_app():
 
         try:
             status_message.info(
-                "Extracting CT-loop checklist candidates. "
+                f"Extracting {extraction_type} drawing data. "
                 "Please wait..."
             )
 
-            add_log("Starting extraction process.")
+            add_log(
+                f"Starting {extraction_type} extraction."
+            )
 
             with tempfile.NamedTemporaryFile(
                 suffix=".pdf",
@@ -468,21 +544,27 @@ def render_ct_loop_extractor_app():
                 f"Temporary PDF created: {temporary_path}"
             )
 
-            checklist, debug_images = extract_pdf(
+            extract_function = extractor_configuration[
+                "extract_function"
+            ]
+
+            checklist, debug_images = extract_function(
                 temporary_path,
                 log_callback=add_log,
                 progress_callback=update_progress,
             )
 
-            st.session_state.ct_checklist = checklist
-            st.session_state.ct_debug_images = debug_images
+            st.session_state.drawing_extractor_checklist = checklist
+            st.session_state.drawing_extractor_debug_images = (
+                debug_images
+            )
 
             elapsed_seconds = (
                 time.perf_counter() - start_time
             )
 
             add_log(
-                "Extraction completed in "
+                f"{extraction_type} extraction completed in "
                 f"{elapsed_seconds:.2f} seconds."
             )
 
@@ -490,18 +572,18 @@ def render_ct_loop_extractor_app():
 
             if checklist.empty:
                 add_log(
-                    "No checklist rows were created.",
+                    "No candidate rows were created.",
                     level="WARNING",
                 )
 
                 status_message.warning(
-                    "Extraction completed, but no checklist "
-                    "candidate rows were found."
+                    "Extraction completed, but no candidate "
+                    "rows were found."
                 )
 
             else:
                 add_log(
-                    "Candidate checklist rows created: "
+                    "Candidate rows created: "
                     f"{len(checklist)}"
                 )
 
@@ -512,7 +594,7 @@ def render_ct_loop_extractor_app():
 
         except Exception as error:
             LOGGER.exception(
-                "Unhandled CT-loop extraction error."
+                "Unhandled drawing extraction error."
             )
 
             add_log(
@@ -537,47 +619,57 @@ def render_ct_loop_extractor_app():
 
     st.divider()
 
-    # Processing logs are collapsed by default.
-    # No logs are shown until this is opened by the user.
     render_processing_logs()
 
-    checklist = st.session_state.ct_checklist
+    checklist = st.session_state.drawing_extractor_checklist
 
     if checklist is None:
         return
 
     if checklist.empty:
         st.error(
-            "No CT-loop candidate rows were found. "
+            "No drawing extraction candidate rows were found. "
             "Open Processing logs to review extraction details."
         )
         return
 
-    render_ct_loop_review_area(
+    review_function = extractor_configuration[
+        "review_function"
+    ]
+
+    review_function(
         pdf_bytes=pdf_bytes,
         checklist=checklist,
+        extraction_type=extraction_type,
+        excel_function=extractor_configuration[
+            "excel_function"
+        ],
     )
 
-    render_ct_html(
+    render_extractor_html(
         """
-        <div class="ct-footer">
-            <strong>CT Loop Drawing Extractor</strong>
+        <div class="extractor-footer">
+            <strong>Drawing Extractor</strong>
             <br>
-            Alstom engineering document review tool
+            Alstom engineering drawing extraction and review tool
             &nbsp;|&nbsp;
-            Verify all generated checklist entries against the
-            controlled drawing before use.
+            Verify all extracted information against the controlled
+            drawing before use.
         </div>
         """
     )
 
 
 def render_ct_loop_review_area(
-    pdf_bytes: bytes,
+    pdf_bytes,
     checklist,
+    extraction_type,
+    excel_function,
 ):
     """
-    Renders PDF review, table editing, and Excel export.
+    CT Loop-specific drawing review and Excel export area.
+
+    Future extraction types will each have their own review function.
     """
 
     left_column, right_column = st.columns(
@@ -598,7 +690,7 @@ def render_ct_loop_review_area(
         selected_page = st.selectbox(
             "PDF page",
             available_pages,
-            key="ct_selected_pdf_page",
+            key="drawing_extractor_selected_pdf_page",
         )
 
         page_image = render_pdf_page(
@@ -608,19 +700,22 @@ def render_ct_loop_review_area(
 
         st.image(
             page_image,
-            caption=f"Controlled PDF page {selected_page}",
+            caption=(
+                f"Controlled {extraction_type} drawing "
+                f"PDF page {selected_page}"
+            ),
             use_container_width=True,
         )
 
         show_debug = st.checkbox(
             "Show detected wire components",
             value=False,
-            key="ct_show_debug",
+            key="drawing_extractor_show_debug",
         )
 
         if show_debug:
             debug_image = (
-                st.session_state.ct_debug_images.get(
+                st.session_state.drawing_extractor_debug_images.get(
                     selected_page
                 )
             )
@@ -633,7 +728,7 @@ def render_ct_loop_review_area(
                 st.image(
                     debug_image,
                     caption=(
-                        "Debug image: coloured components "
+                        "Debug image: detected wire components "
                         "and terminal text boxes."
                     ),
                     use_container_width=True,
@@ -645,7 +740,7 @@ def render_ct_loop_review_area(
         page_filter = st.checkbox(
             "Show selected PDF page only",
             value=True,
-            key="ct_page_filter",
+            key="drawing_extractor_page_filter",
         )
 
         if page_filter:
@@ -660,7 +755,7 @@ def render_ct_loop_review_area(
             use_container_width=True,
             hide_index=True,
             num_rows="dynamic",
-            key="ct_data_editor",
+            key="drawing_extractor_data_editor",
             column_config={
                 "Include": st.column_config.CheckboxColumn(
                     "Include",
@@ -688,11 +783,13 @@ def render_ct_loop_review_area(
 
         if st.button(
             "Save edited rows",
-            key="ct_save_edited_rows",
+            key="drawing_extractor_save_edited_rows",
         ):
             if page_filter:
                 full_data = (
-                    st.session_state.ct_checklist.copy()
+                    st.session_state
+                    .drawing_extractor_checklist
+                    .copy()
                 )
 
                 for index in edited_data.index:
@@ -701,10 +798,12 @@ def render_ct_loop_review_area(
                             edited_data.loc[index, column]
                         )
 
-                st.session_state.ct_checklist = full_data
+                st.session_state.drawing_extractor_checklist = (
+                    full_data
+                )
 
             else:
-                st.session_state.ct_checklist = (
+                st.session_state.drawing_extractor_checklist = (
                     edited_data.copy()
                 )
 
@@ -717,26 +816,28 @@ def render_ct_loop_review_area(
     approved_only = st.checkbox(
         "Export approved rows only",
         value=False,
-        key="ct_approved_only",
+        key="drawing_extractor_approved_only",
     )
 
-    export_data = st.session_state.ct_checklist.copy()
+    export_data = (
+        st.session_state.drawing_extractor_checklist.copy()
+    )
 
     if approved_only:
         export_data = export_data[
             export_data["Review Status"] == "Approved"
         ].copy()
 
-    excel_bytes = build_excel(export_data)
+    excel_bytes = excel_function(export_data)
 
     st.download_button(
-        label="Download CT-loop Excel checklist",
+        label=f"Download {extraction_type} Excel checklist",
         data=excel_bytes,
-        file_name="CT_Loop_Checklist.xlsx",
+        file_name="CT_Loop_Drawing_Extract.xlsx",
         mime=(
             "application/vnd.openxmlformats-officedocument."
             "spreadsheetml.sheet"
         ),
         type="primary",
-        key="ct_download_excel",
+        key="drawing_extractor_download_excel",
     )
