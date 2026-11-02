@@ -264,14 +264,6 @@ def render_drawing_extractor_styles():
         overflow: hidden;
     }
 
-    /* Dropdown menu: allow long PDF-page lists to scroll */
-    [role="listbox"] {
-        border-radius: 16px !important;
-        overflow-x: hidden !important;
-        overflow-y: auto !important;
-        max-height: 360px !important;
-    }
-
     /* File uploader */
     [data-testid="stFileUploader"] {
         border-radius: 18px !important;
@@ -852,29 +844,38 @@ def render_ct_loop_review_area(
             .tolist()
         )
 
+        all_pdf_pages = list(
+            range(
+                1,
+                total_pdf_pages + 1,
+            )
+        )
+
         default_page = (
             pages_with_candidates[0]
             if pages_with_candidates
             else 1
         )
 
-        selected_page = st.number_input(
+        default_index = all_pdf_pages.index(
+            default_page
+        )
+
+        selected_page = st.selectbox(
             "PDF page",
-            min_value=1,
-            max_value=total_pdf_pages,
-            value=default_page,
-            step=1,
-            key="drawing_extractor_selected_pdf_page",
+            options=all_pdf_pages,
+            index=default_index,
+            key="drawing_extractor_selected_pdf_page_dropdown",
             help=(
-                f"Enter or select a PDF page from 1 to {total_pdf_pages}. "
-                "Pages with extracted candidate rows are shown in the "
-                "Engineering Review table."
+                f"Select a PDF page from 1 to {total_pdf_pages}. "
+                "Pages containing extracted candidate rows will display "
+                "their records in the Engineering Review section."
             ),
         )
 
         st.caption(
-            f"PDF pages: 1–{total_pdf_pages} | "
-            f"Pages with extracted candidates: "
+            f"Controlled drawing pages: 1–{total_pdf_pages} | "
+            f"Pages containing extracted candidate records: "
             f"{len(pages_with_candidates)}"
         )
 
