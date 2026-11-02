@@ -8758,7 +8758,7 @@ def render_master_drawing_list_interface():
 
         .information-card,
         .upload-panel {
-            background:#FFFFFF;
+            background:var(--surface, #FFFFFF);
             border:1px solid var(--border);
             border-radius:14px;
             padding:22px 25px;
@@ -8922,7 +8922,7 @@ def render_master_drawing_list_interface():
             padding: 22px;
             border: 2px solid #D9E2EC;
             border-radius: 14px;
-            background: #FFFFFF;
+            background: var(--surface, #FFFFFF);
             box-shadow: 0 5px 16px rgba(16,42,67,.08);
             margin-bottom: 10px;
         }
