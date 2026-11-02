@@ -288,28 +288,7 @@ def render_global_theme(theme_mode: str):
             background: {colours["surface"]} !important;
             border-radius: 10px !important;
         }}
-        /* File uploader Upload/Browse button */
-        [data-testid="stFileUploader"] button {
-            background: {colours["blue"]} !important;
-            color: #FFFFFF !important;
-            border: 1px solid {colours["blue"]} !important;
-            border-radius: 8px !important;
-            font-weight: 600 !important;
-            box-shadow: none !important;
-            opacity: 1 !important;
-        }
-
-        [data-testid="stFileUploader"] button:hover {
-            background: {colours["button_hover"]} !important;
-            border-color: {colours["button_hover"]} !important;
-            color: #FFFFFF !important;
-            opacity: 1 !important;
-        }
-
-        [data-testid="stFileUploader"] button * {
-            color: #FFFFFF !important;
-            fill: #FFFFFF !important;
-        }
+        
         /* ====================================================
            BUTTONS
            ==================================================== */
