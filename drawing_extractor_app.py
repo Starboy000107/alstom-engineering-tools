@@ -851,9 +851,13 @@ def render_ct_loop_review_area(
         )
 
         show_debug = st.checkbox(
-            "Show detected wire components",
+            "Show detected terminal references",
             value=False,
             key="drawing_extractor_show_debug",
+            help=(
+                "Shows the source drawing with red boxes around terminal "
+                "references detected during CT Loop extraction."
+            ),
         )
 
         if show_debug:
@@ -871,8 +875,8 @@ def render_ct_loop_review_area(
                 st.image(
                     debug_image,
                     caption=(
-                        "Debug image: detected wire components "
-                        "and terminal text boxes."
+                        "Detection overlay: red boxes show terminal references "
+                        "identified during CT Loop extraction."
                     ),
                     use_container_width=True,
                 )
