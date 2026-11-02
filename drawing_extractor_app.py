@@ -820,34 +820,50 @@ def render_ct_loop_review_area(
         [1.1, 1.5],
     )
 
-    pages_with_candidates = sorted(
-        checklist["PDF Page"]
-        .dropna()
-        .astype(int)
-        .unique()
-        .tolist()
-    )
-
-    if not pages_with_candidates:
-        st.warning(
-            "No detected drawing pages are available for review."
+    with left_column:
+        st.markdown(
+            """
+            <div class="extractor-review-heading">
+                Source Drawing Review
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-        return
 
-    selected_page = st.selectbox(
-        "Detected drawing page",
-        options=pages_with_candidates,
-        key="drawing_extractor_selected_detected_page",
-        help=(
-            "Only pages where the selected extraction workflow "
-            "detected candidate records are shown."
-        ),
-    )
+        with fitz.open(
+            stream=pdf_bytes,
+            filetype="pdf",
+        ) as pdf_document:
+            total_pdf_pages = len(pdf_document)
 
-    st.caption(
-        f"Detected drawing pages available for review: "
-        f"{len(pages_with_candidates)}"
-    )
+        pages_with_candidates = sorted(
+            checklist["PDF Page"]
+            .dropna()
+            .astype(int)
+            .unique()
+            .tolist()
+        )
+
+        if not pages_with_candidates:
+            st.warning(
+                "No detected drawing pages are available for review."
+            )
+            return
+
+        selected_page = st.selectbox(
+            "Detected drawing page",
+            options=pages_with_candidates,
+            key="drawing_extractor_selected_detected_page",
+            help=(
+                "Only pages where the selected extraction workflow "
+                "detected candidate records are shown."
+            ),
+        )
+
+        st.caption(
+            f"Detected drawing pages available for review: "
+            f"{len(pages_with_candidates)}"
+        )
 
         page_image = render_pdf_page(
             pdf_bytes,
