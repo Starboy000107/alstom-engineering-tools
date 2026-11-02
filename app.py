@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import streamlit as st
 
 from drawing_extractor_app import (
@@ -9,9 +11,20 @@ from master_drawing_list_app import (
 from ui_theme import render_global_theme
 
 
+ICON_PATH = (
+    Path(__file__).parent
+    / "img"
+    / "page_icon.png"
+)
+
+
 st.set_page_config(
     page_title="Alstom Engineering Tools",
-    page_icon="🚆",
+    page_icon=(
+        str(ICON_PATH)
+        if ICON_PATH.exists()
+        else "📘"
+    ),
     layout="wide",
 )
 
@@ -46,12 +59,28 @@ def main():
         "Alstom Engineering Tools Platform"
     )
 
+    # --------------------------------------------------------
+    # Apply theme BEFORE rendering a tool.
+    #
+    # This is important for long processes such as PDF
+    # extraction. The Light/Dark theme is already active
+    # while the progress bar is updating.
+    # --------------------------------------------------------
+    render_global_theme(selected_theme)
+
     if selected_tool == "Master Drawing List Generator":
         render_master_drawing_list_app()
 
     elif selected_tool == "Drawing Extractor":
         render_drawing_extractor_app()
 
+    # --------------------------------------------------------
+    # Apply it once more after the tool.
+    #
+    # The Master Drawing List has its own CSS. Applying the
+    # global theme again ensures Light/Dark mode overrides
+    # its hard-coded colours after it is rendered.
+    # --------------------------------------------------------
     render_global_theme(selected_theme)
 
 
