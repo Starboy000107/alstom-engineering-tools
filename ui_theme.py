@@ -298,10 +298,12 @@ def render_global_theme(theme_mode: str):
         }}
 
         /* ====================================================
-        SELECTBOX DROPDOWN MENU
-        One inner scrolling area only.
+        SCROLLABLE SELECTBOX DROPDOWN MENUS
+        Supports long lists such as PDF page selection.
+        Only the inner BaseWeb menu scrolls.
         ==================================================== */
 
+        /* Outer popup: no scrolling here */
         [role="listbox"] {{
             background: {colours["surface"]} !important;
             color: {colours["text"]} !important;
@@ -311,22 +313,14 @@ def render_global_theme(theme_mode: str):
             box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18) !important;
         }}
 
-        [role="listbox"] > div {{
-            max-height: 320px !important;
-            overflow-x: hidden !important;
-            overflow-y: auto !important;
-        }}
-
-        [role="listbox"] > div::-webkit-scrollbar {{
-            width: 8px;
-        }}
-
         [role="listbox"] > div::-webkit-scrollbar-track {{
             background: {colours["surface_secondary"]} !important;
+            border-radius: 999px;
         }}
 
         [role="listbox"] > div::-webkit-scrollbar-thumb {{
             background: {colours["border"]} !important;
+            border: 2px solid {colours["surface_secondary"]} !important;
             border-radius: 999px;
         }}
 
