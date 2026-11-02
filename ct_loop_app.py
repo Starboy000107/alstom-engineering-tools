@@ -335,7 +335,10 @@ def render_ct_loop_extractor_app():
         st.session_state.ct_processing_logs = []
 
         progress_bar = st.progress(0)
-        log_placeholder = st.empty()
+
+        # Logs are stored in session state and shown only when the
+        # user manually opens the "Processing logs" expander.
+        log_placeholder = None
 
         def add_log(
             message: str,
@@ -360,12 +363,15 @@ def render_ct_loop_extractor_app():
             else:
                 LOGGER.info(message)
 
-            log_placeholder.code(
-                "\n".join(
-                    st.session_state.ct_processing_logs[-100:]
-                ),
-                language="text",
-            )
+            # Do not display logs outside the expandable log panel.
+            # They remain available in st.session_state.ct_processing_logs.
+            if log_placeholder is not None:
+                log_placeholder.code(
+                    "\n".join(
+                        st.session_state.ct_processing_logs[-100:]
+                    ),
+                    language="text",
+                )
 
         def update_progress(value: float):
             progress_bar.progress(
@@ -446,7 +452,7 @@ def render_ct_loop_extractor_app():
 
     with st.expander(
         "Processing logs",
-        expanded=True,
+        expanded=False,
     ):
         current_logs = "\n".join(
             st.session_state.ct_processing_logs
