@@ -820,64 +820,34 @@ def render_ct_loop_review_area(
         [1.1, 1.5],
     )
 
-    with left_column:
-        st.markdown(
-            """
-            <div class="extractor-review-heading">
-                Source Drawing Review
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    pages_with_candidates = sorted(
+        checklist["PDF Page"]
+        .dropna()
+        .astype(int)
+        .unique()
+        .tolist()
+    )
 
-        with fitz.open(
-            stream=pdf_bytes,
-            filetype="pdf",
-        ) as pdf_document:
-            total_pdf_pages = len(pdf_document)
-
-        pages_with_candidates = sorted(
-            checklist["PDF Page"]
-            .dropna()
-            .astype(int)
-            .unique()
-            .tolist()
+    if not pages_with_candidates:
+        st.warning(
+            "No detected drawing pages are available for review."
         )
+        return
 
-        all_pdf_pages = list(
-            range(
-                1,
-                total_pdf_pages + 1,
-            )
-        )
+    selected_page = st.selectbox(
+        "Detected drawing page",
+        options=pages_with_candidates,
+        key="drawing_extractor_selected_detected_page",
+        help=(
+            "Only pages where the selected extraction workflow "
+            "detected candidate records are shown."
+        ),
+    )
 
-        default_page = (
-            pages_with_candidates[0]
-            if pages_with_candidates
-            else 1
-        )
-
-        default_index = all_pdf_pages.index(
-            default_page
-        )
-
-        selected_page = st.selectbox(
-            "PDF page",
-            options=all_pdf_pages,
-            index=default_index,
-            key="drawing_extractor_selected_pdf_page_dropdown",
-            help=(
-                f"Select a PDF page from 1 to {total_pdf_pages}. "
-                "Pages containing extracted candidate rows will display "
-                "their records in the Engineering Review section."
-            ),
-        )
-
-        st.caption(
-            f"Controlled drawing pages: 1–{total_pdf_pages} | "
-            f"Pages containing extracted candidate records: "
-            f"{len(pages_with_candidates)}"
-        )
+    st.caption(
+        f"Detected drawing pages available for review: "
+        f"{len(pages_with_candidates)}"
+    )
 
         page_image = render_pdf_page(
             pdf_bytes,
