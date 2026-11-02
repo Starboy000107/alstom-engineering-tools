@@ -552,7 +552,94 @@ def render_global_theme(theme_mode: str):
             background: {colours["surface_hover"]} !important;
             border-color: {colours["border_hover"]} !important;
         }}
+        /* ====================================================
+           DATA EDITOR / DATAFRAME TOOLBARS
+           Makes toolbar buttons/icons visible in Light and Dark.
+           ==================================================== */
 
+        /* Data editor and dataframe toolbar button containers */
+        [data-testid="stDataEditor"] button,
+        [data-testid="stDataFrame"] button,
+        [data-testid="stElementToolbar"] button,
+        [data-testid="stElementToolbarButton"] button {{
+            background: {colours["surface"]} !important;
+            color: {colours["text"]} !important;
+            border: 1px solid {colours["border"]} !important;
+            border-radius: 7px !important;
+            opacity: 1 !important;
+            box-shadow: none !important;
+        }}
+
+        /* Text within Add Row / Show Columns / Hide Columns etc. */
+        [data-testid="stDataEditor"] button *,
+        [data-testid="stDataFrame"] button *,
+        [data-testid="stElementToolbar"] button *,
+        [data-testid="stElementToolbarButton"] button * {{
+            color: {colours["text"]} !important;
+            opacity: 1 !important;
+        }}
+
+        /* SVG icons:
+           fullscreen, add row, delete row, download, copy,
+           show columns, hide columns, and other table controls */
+        [data-testid="stDataEditor"] button svg,
+        [data-testid="stDataFrame"] button svg,
+        [data-testid="stElementToolbar"] button svg,
+        [data-testid="stElementToolbarButton"] button svg {{
+            fill: {colours["text"]} !important;
+            stroke: {colours["text"]} !important;
+            color: {colours["text"]} !important;
+            opacity: 1 !important;
+        }}
+
+        /* Professional hover state */
+        [data-testid="stDataEditor"] button:hover,
+        [data-testid="stDataFrame"] button:hover,
+        [data-testid="stElementToolbar"] button:hover,
+        [data-testid="stElementToolbarButton"] button:hover {{
+            background: {colours["surface_hover"]} !important;
+            color: {colours["blue"]} !important;
+            border-color: {colours["border_hover"]} !important;
+            box-shadow: 0 1px 5px {colours["focus_shadow"]} !important;
+        }}
+
+        [data-testid="stDataEditor"] button:hover svg,
+        [data-testid="stDataFrame"] button:hover svg,
+        [data-testid="stElementToolbar"] button:hover svg,
+        [data-testid="stElementToolbarButton"] button:hover svg {{
+            fill: {colours["blue"]} !important;
+            stroke: {colours["blue"]} !important;
+            color: {colours["blue"]} !important;
+        }}
+
+        /* Keyboard focus visibility */
+        [data-testid="stDataEditor"] button:focus-visible,
+        [data-testid="stDataFrame"] button:focus-visible,
+        [data-testid="stElementToolbar"] button:focus-visible,
+        [data-testid="stElementToolbarButton"] button:focus-visible {{
+            outline: 2px solid {colours["blue"]} !important;
+            outline-offset: 2px !important;
+            box-shadow: 0 0 0 3px {colours["focus_shadow"]} !important;
+        }}
+
+        /* Data editor toolbar / action bar background */
+        [data-testid="stDataEditor"] [role="toolbar"],
+        [data-testid="stDataFrame"] [role="toolbar"] {{
+            background: {colours["surface_secondary"]} !important;
+            color: {colours["text"]} !important;
+            border-color: {colours["border"]} !important;
+        }}
+
+        /* Generic Streamlit element action toolbar.
+           This includes the fullscreen control shown at the top-right
+           of tables, images, and some Streamlit elements. */
+        [data-testid="stElementToolbar"] {{
+            background: {colours["surface"]} !important;
+            border: 1px solid {colours["border"]} !important;
+            border-radius: 8px !important;
+            opacity: 1 !important;
+        }}
+        
         [data-testid="stProgress"] > div {{
             border-radius: 999px !important;
             overflow: hidden !important;
