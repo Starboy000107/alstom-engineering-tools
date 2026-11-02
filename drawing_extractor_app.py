@@ -838,7 +838,13 @@ def render_ct_loop_review_area(
             unsafe_allow_html=True,
         )
 
-        available_pages = sorted(
+        with fitz.open(
+            stream=pdf_bytes,
+            filetype="pdf",
+        ) as pdf_document:
+            total_pdf_pages = len(pdf_document)
+
+        pages_with_candidates = sorted(
             checklist["PDF Page"]
             .dropna()
             .astype(int)
@@ -846,10 +852,30 @@ def render_ct_loop_review_area(
             .tolist()
         )
 
-        selected_page = st.selectbox(
+        default_page = (
+            pages_with_candidates[0]
+            if pages_with_candidates
+            else 1
+        )
+
+        selected_page = st.number_input(
             "PDF page",
-            available_pages,
+            min_value=1,
+            max_value=total_pdf_pages,
+            value=default_page,
+            step=1,
             key="drawing_extractor_selected_pdf_page",
+            help=(
+                f"Enter or select a PDF page from 1 to {total_pdf_pages}. "
+                "Pages with extracted candidate rows are shown in the "
+                "Engineering Review table."
+            ),
+        )
+
+        st.caption(
+            f"PDF pages: 1–{total_pdf_pages} | "
+            f"Pages with extracted candidates: "
+            f"{len(pages_with_candidates)}"
         )
 
         page_image = render_pdf_page(
