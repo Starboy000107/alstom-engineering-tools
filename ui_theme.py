@@ -122,6 +122,62 @@ def render_global_theme(theme_mode: str):
         [data-testid="stSidebar"] hr {{
             border-color: {colours["border"]} !important;
         }}
+        /* ====================================================
+        SIDEBAR RADIO / TOOL SELECTOR
+        Overrides black radio text from Master Drawing List CSS.
+        ==================================================== */
+
+        [data-testid="stSidebar"]
+        [data-testid="stRadio"]
+        label,
+        [data-testid="stSidebar"]
+        [data-testid="stRadio"]
+        label p,
+        [data-testid="stSidebar"]
+        [data-testid="stRadio"]
+        label span,
+        [data-testid="stSidebar"]
+        [data-testid="stRadio"]
+        div[role="radiogroup"]
+        label,
+        [data-testid="stSidebar"]
+        [data-testid="stRadio"]
+        div[role="radiogroup"]
+        label p,
+        [data-testid="stSidebar"]
+        [data-testid="stRadio"]
+        div[role="radiogroup"]
+        label span {{
+            color: {colours["text"]} !important;
+        }}
+
+        /* Appearance selectbox label */
+        [data-testid="stSidebar"]
+        [data-testid="stSelectbox"]
+        label,
+        [data-testid="stSidebar"]
+        [data-testid="stSelectbox"]
+        label p,
+        [data-testid="stSidebar"]
+        [data-testid="stSelectbox"]
+        label span {{
+            color: {colours["text"]} !important;
+        }}
+
+        /* Sidebar selected radio indicator */
+        [data-testid="stSidebar"]
+        [data-testid="stRadio"]
+        input[type="radio"] {{
+            accent-color: {colours["blue"]} !important;
+        }}
+
+        /* Sidebar captions */
+        [data-testid="stSidebar"]
+        [data-testid="stCaptionContainer"],
+        [data-testid="stSidebar"]
+        [data-testid="stCaptionContainer"] * {{
+            color: {colours["muted"]} !important;
+        }}
 
         /* ====================================================
            APPLICATION CARDS
@@ -496,7 +552,7 @@ def render_global_theme(theme_mode: str):
             background: {colours["surface_hover"]} !important;
             border-color: {colours["border_hover"]} !important;
         }}
-        
+
         [data-testid="stProgress"] > div {{
             border-radius: 999px !important;
             overflow: hidden !important;
