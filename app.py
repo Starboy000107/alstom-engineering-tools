@@ -24,7 +24,6 @@ def main():
         options=[
             "Light",
             "Dark",
-            "Night",
         ],
         index=0,
         key="global_theme_mode",
