@@ -233,47 +233,6 @@ def render_drawing_extractor_styles():
         line-height: 1.65;
     }
     
-    /* Available extraction type display when only one
-       extraction option is currently available. */
-    .extractor-current-type {
-        background: var(--surface-input, #FFFFFF);
-        border: 1px solid var(--border, #DADCE0);
-        border-radius: 14px;
-        padding: 16px 18px;
-        margin-top: -4px;
-        margin-bottom: 24px;
-        box-shadow: 0 2px 8px rgba(60, 64, 67, 0.08);
-    }
-
-    .extractor-current-type:hover {
-        border-color: var(--border-hover, #1A73E8);
-        box-shadow: 0 4px 12px rgba(26, 115, 232, 0.12);
-        transition: border-color 0.18s ease,
-                    box-shadow 0.18s ease;
-    }
-
-    .extractor-current-type-label {
-        color: var(--muted, #5F6368);
-        font-size: 12px;
-        font-weight: 700;
-        letter-spacing: 0.4px;
-        text-transform: uppercase;
-        margin-bottom: 6px;
-    }
-
-    .extractor-current-type-value {
-        color: var(--navy, #202124);
-        font-size: 18px;
-        font-weight: 750;
-    }
-
-    .extractor-current-type-note {
-        color: var(--muted, #5F6368);
-        font-size: 13px;
-        margin-top: 6px;
-        line-height: 1.5;
-    }
-
     .extractor-footer {
         margin-top: 45px;
         padding-top: 18px;
