@@ -232,7 +232,14 @@ def render_drawing_extractor_styles():
         font-size: 14px;
         line-height: 1.65;
     }
-
+    .extractor-review-heading {
+        color: var(--navy, #202124);
+        font-size: 20px;
+        font-weight: 750;
+        margin-bottom: 12px;
+        padding-bottom: 10px;
+        border-bottom: 2px solid var(--border, #DADCE0);
+    }
     .extractor-footer {
         margin-top: 45px;
         padding-top: 18px;
@@ -820,7 +827,14 @@ def render_ct_loop_review_area(
     )
 
     with left_column:
-        st.subheader("Source drawing")
+        st.markdown(
+            """
+            <div class="extractor-review-heading">
+                Source Drawing Review
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         available_pages = sorted(
             checklist["PDF Page"]
@@ -882,7 +896,14 @@ def render_ct_loop_review_area(
                 )
 
     with right_column:
-        st.subheader("Engineering review")
+        st.markdown(
+            """
+            <div class="extractor-review-heading">
+                Engineering Review
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         page_filter = st.checkbox(
             "Show selected PDF page only",
