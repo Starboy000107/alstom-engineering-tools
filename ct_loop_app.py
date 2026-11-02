@@ -18,7 +18,7 @@ LOG_DIRECTORY = Path("/tmp/alstom_ct_loop_logs")
 
 def configure_logging() -> logging.Logger:
     """
-    Configure CT-loop application logging.
+    Configure CT Loop server-side logging.
     """
 
     logger = logging.getLogger("ct_loop_extractor")
@@ -56,8 +56,7 @@ LOGGER = configure_logging()
 
 def render_ct_html(html: str):
     """
-    Renders HTML without Streamlit treating indented HTML
-    as a code block.
+    Renders HTML without it becoming a visible code block.
     """
 
     content = textwrap.dedent(html).strip()
@@ -73,10 +72,10 @@ def render_ct_html(html: str):
 
 def render_ct_loop_styles():
     """
-    CT Loop page-specific styling.
+    CT Loop-specific professional styling.
 
-    The overall Light / Dark / Night theme is applied from
-    ui_theme.py through the main app.py file.
+    Shared Light/Dark/Night theme styling should be applied
+    by app.py / ui_theme.py after this tool is rendered.
     """
 
     css = """
@@ -146,9 +145,7 @@ def render_ct_loop_styles():
     }
 
     .ct-information-card,
-    .ct-upload-panel,
-    .ct-review-card,
-    .ct-log-card {
+    .ct-upload-panel {
         background: var(--surface, #FFFFFF);
         border: 1px solid var(--border, #D9E2EC);
         border-radius: 14px;
@@ -163,10 +160,6 @@ def render_ct_loop_styles():
 
     .ct-upload-panel {
         border-top: 4px solid var(--teal, #008F95);
-    }
-
-    .ct-review-card {
-        border-top: 4px solid var(--green, #167A3D);
     }
 
     .ct-card-title {
@@ -209,7 +202,7 @@ def render_pdf_page(
     page_number: int,
 ) -> bytes:
     """
-    Converts one PDF page to a PNG image for display.
+    Renders one PDF page as PNG for browser display.
     """
 
     with fitz.open(
@@ -233,7 +226,7 @@ def render_pdf_page(
 
 def get_log_file_bytes() -> bytes:
     """
-    Returns the server log file for download.
+    Provides the CT Loop server log for download.
     """
 
     log_file = LOG_DIRECTORY / LOG_FILE_NAME
@@ -246,7 +239,7 @@ def get_log_file_bytes() -> bytes:
 
 def initialize_ct_loop_state():
     """
-    Creates CT Loop-specific Streamlit session state values.
+    Initializes all CT Loop-specific state keys.
     """
 
     defaults = {
@@ -262,8 +255,10 @@ def initialize_ct_loop_state():
 
 def render_processing_logs():
     """
-    Logs are hidden by default and become visible only when
-    the user manually opens this expander.
+    Shows logs only when the user opens the expander.
+
+    This is the ONLY function in this file that displays
+    CT Loop processing logs.
     """
 
     with st.expander(
@@ -295,7 +290,7 @@ def render_processing_logs():
 
 def render_ct_loop_extractor_app():
     """
-    Main CT Loop Drawing Extractor application renderer.
+    Main CT Loop Drawing Extractor renderer.
     """
 
     initialize_ct_loop_state()
@@ -334,7 +329,7 @@ def render_ct_loop_extractor_app():
             <div class="ct-card-description">
                 Upload a controlled CT-loop drawing PDF. The application
                 identifies candidate terminal-pair relationships and creates
-                checklist rows for engineering review. All generated entries
+                checklist rows for engineering review. Every generated entry
                 must be checked against the controlled drawing before issue,
                 approval, or site use.
             </div>
@@ -364,11 +359,7 @@ def render_ct_loop_extractor_app():
     )
 
     if uploaded_pdf is None:
-        st.info(
-            "Upload a PDF to begin."
-        )
-
-        # Logs expander remains available, but is closed by default.
+        st.info("Upload a PDF to begin.")
         render_processing_logs()
         return
 
@@ -378,7 +369,6 @@ def render_ct_loop_extractor_app():
         st.error(
             "The uploaded file is not a valid PDF."
         )
-
         render_processing_logs()
         return
 
@@ -396,10 +386,15 @@ def render_ct_loop_extractor_app():
     )
 
     if extract_clicked:
-        # Reset prior visible/session log entries.
+        # Clear old logs only when a new extraction begins.
         st.session_state.ct_processing_logs = []
 
-        progress_bar = st.progress(0)
+        # This is the only live extraction display.
+        progress_bar = st.progress(
+            0,
+            text="Preparing extraction... 0%",
+        )
+
         status_message = st.empty()
 
         def add_log(
@@ -407,13 +402,11 @@ def render_ct_loop_extractor_app():
             level: str = "INFO",
         ):
             """
-            Saves logs to session state and server file only.
+            Stores log entries only.
 
-            Important:
-            This function intentionally does NOT call st.code(),
-            st.write(), st.text(), or any Streamlit display command.
-            Therefore logs cannot appear on screen until the user
-            manually opens the Processing logs expander.
+            DO NOT add st.code(), st.write(), st.text(),
+            placeholder.code(), or any Streamlit display call here.
+            Doing so would show logs live during extraction.
             """
 
             timestamp = time.strftime("%H:%M:%S")
@@ -439,12 +432,19 @@ def render_ct_loop_extractor_app():
                 LOGGER.info(message)
 
         def update_progress(value: float):
+            """
+            Updates only the visible percentage/progress bar.
+            """
+
             safe_value = max(
                 0,
                 min(100, int(value)),
             )
 
-            progress_bar.progress(safe_value)
+            progress_bar.progress(
+                safe_value,
+                text=f"Extracting PDF... {safe_value}%",
+            )
 
         temporary_path = None
         start_time = time.perf_counter()
@@ -452,12 +452,10 @@ def render_ct_loop_extractor_app():
         try:
             status_message.info(
                 "Extracting CT-loop checklist candidates. "
-                "This may take a few minutes for large PDFs."
+                "Please wait..."
             )
 
-            add_log(
-                "Starting extraction process."
-            )
+            add_log("Starting extraction process.")
 
             with tempfile.NamedTemporaryFile(
                 suffix=".pdf",
@@ -488,6 +486,8 @@ def render_ct_loop_extractor_app():
                 f"{elapsed_seconds:.2f} seconds."
             )
 
+            update_progress(100)
+
             if checklist.empty:
                 add_log(
                     "No checklist rows were created.",
@@ -509,8 +509,6 @@ def render_ct_loop_extractor_app():
                     "Extraction completed successfully. "
                     f"{len(checklist)} candidate row(s) created."
                 )
-
-            update_progress(100)
 
         except Exception as error:
             LOGGER.exception(
@@ -539,8 +537,8 @@ def render_ct_loop_extractor_app():
 
     st.divider()
 
-    # This is the only place where logs are displayed.
-    # It is closed by default.
+    # Processing logs are collapsed by default.
+    # No logs are shown until this is opened by the user.
     render_processing_logs()
 
     checklist = st.session_state.ct_checklist
@@ -579,8 +577,7 @@ def render_ct_loop_review_area(
     checklist,
 ):
     """
-    Displays the PDF page preview, editable candidate table,
-    and Excel download controls.
+    Renders PDF review, table editing, and Excel export.
     """
 
     left_column, right_column = st.columns(
