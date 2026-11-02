@@ -1,0 +1,11 @@
+streamlit
+pandas
+openpyxl
+xlsxwriter
+requests
+python-docx
+PyMuPDF
+opencv-python-headless
+numpy
+python-calamine
+xlrd
