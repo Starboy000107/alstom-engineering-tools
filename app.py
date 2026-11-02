@@ -1,7 +1,7 @@
 import streamlit as st
 
-from ct_loop_app import (
-    render_ct_loop_extractor_app,
+from drawing_extractor_app import (
+    render_drawing_extractor_app,
 )
 from master_drawing_list_app import (
     render_master_drawing_list_app,
@@ -36,7 +36,7 @@ def main():
         "Select tool",
         options=[
             "Master Drawing List Generator",
-            "CT Loop Drawing Extractor",
+            "Drawing Extractor",
         ],
         key="engineering_tool_selector",
     )
@@ -50,12 +50,9 @@ def main():
     if selected_tool == "Master Drawing List Generator":
         render_master_drawing_list_app()
 
-    elif selected_tool == "CT Loop Drawing Extractor":
-        render_ct_loop_extractor_app()
+    elif selected_tool == "Drawing Extractor":
+        render_drawing_extractor_app()
 
-    # Important: apply shared theme LAST.
-    # This allows Dark/Night mode to override styles generated
-    # by the individual applications.
     render_global_theme(selected_theme)
 
 
