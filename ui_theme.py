@@ -436,7 +436,67 @@ def render_global_theme(theme_mode: str):
         [data-testid="stCode"] * {{
             color: {colours["text"]} !important;
         }}
+        /* ====================================================
+           ENGINEERING REVIEW / DATA EDITOR
+           ==================================================== */
 
+        /* Engineering review headings in Drawing Extractor */
+        .extractor-review-heading {{
+            color: {colours["navy"]} !important;
+            font-size: 20px !important;
+            font-weight: 700 !important;
+            margin: 4px 0 14px 0 !important;
+            padding-bottom: 10px !important;
+            border-bottom: 2px solid {colours["border"]} !important;
+        }}
+
+        /* Main Engineering Review table container */
+        [data-testid="stDataEditor"] {{
+            background: {colours["surface"]} !important;
+            border: 1px solid {colours["border"]} !important;
+            border-radius: 10px !important;
+            overflow: hidden !important;
+
+            /* Glide Data Grid theme variables */
+            --gdg-bg-cell: {colours["surface"]} !important;
+            --gdg-bg-cell-medium: {colours["surface_secondary"]} !important;
+            --gdg-bg-header: {colours["surface_secondary"]} !important;
+            --gdg-bg-header-hovered: {colours["surface_hover"]} !important;
+            --gdg-bg-bubble: {colours["surface"]} !important;
+            --gdg-bg-search-result: {colours["surface_selected"]} !important;
+            --gdg-text-dark: {colours["text"]} !important;
+            --gdg-text-medium: {colours["muted"]} !important;
+            --gdg-text-light: {colours["muted"]} !important;
+            --gdg-border-color: {colours["border"]} !important;
+            --gdg-accent-color: {colours["blue"]} !important;
+            --gdg-accent-light: {colours["surface_selected"]} !important;
+            --gdg-selection-color: {colours["surface_selected"]} !important;
+        }}
+
+        /* Review table hover/focus effect */
+        [data-testid="stDataEditor"]:hover {{
+            border-color: {colours["border_hover"]} !important;
+            box-shadow: 0 2px 10px {colours["focus_shadow"]} !important;
+        }}
+
+        /* Checkbox labels, including review filters */
+        [data-testid="stCheckbox"] label,
+        [data-testid="stCheckbox"] label span {{
+            color: {colours["text"]} !important;
+        }}
+
+        /* Data editor toolbar buttons */
+        [data-testid="stDataEditor"] button {{
+            background: {colours["surface"]} !important;
+            color: {colours["text"]} !important;
+            border-color: {colours["border"]} !important;
+        }}
+
+        [data-testid="stDataEditor"] button:hover {{
+            background: {colours["surface_hover"]} !important;
+            border-color: {colours["border_hover"]} !important;
+        }}
+        
         [data-testid="stProgress"] > div {{
             border-radius: 999px !important;
             overflow: hidden !important;
