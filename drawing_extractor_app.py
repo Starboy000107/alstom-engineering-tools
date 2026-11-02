@@ -269,7 +269,6 @@ def render_drawing_extractor_styles():
         border-radius: 16px !important;
         overflow-x: hidden !important;
         overflow-y: auto !important;
-        max-height: 360px !important;
     }
 
     /* File uploader */
