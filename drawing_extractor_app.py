@@ -542,39 +542,44 @@ def render_drawing_extractor_app():
         """
         <div class="extractor-upload-panel">
             <div class="extractor-card-title">
-                Controlled engineering drawing PDF
+                Controlled Drawing Upload
             </div>
 
             <div class="extractor-card-description">
-                Upload the controlled PDF drawing for the selected
-                extraction type.
+                Upload the approved or controlled engineering drawing in PDF
+                format. The selected extraction workflow will be applied to
+                the uploaded document.
             </div>
         </div>
         """
     )
 
     uploaded_pdf = st.file_uploader(
-        f"Upload controlled {extraction_type} drawing PDF",
+        "Upload controlled engineering drawing",
         type=["pdf"],
         key="drawing_extractor_uploaded_pdf",
+        help=(
+            "Upload a controlled engineering drawing in PDF format. "
+            "The document will be processed using the selected "
+            "drawing extraction workflow."
+        ),
     )
 
     if uploaded_pdf is None:
         st.info(
-            "Upload a PDF to begin."
+            "Upload a controlled engineering drawing PDF to begin "
+            "the extraction workflow."
         )
-
-        render_processing_logs()
         return
 
     pdf_bytes = uploaded_pdf.getvalue()
 
     if not pdf_bytes.startswith(b"%PDF"):
         st.error(
-            "The uploaded file is not a valid PDF."
+            "The uploaded file could not be verified as a valid PDF "
+            "document. Please upload a controlled engineering drawing "
+            "in PDF format."
         )
-
-        render_processing_logs()
         return
 
     document_hash = calculate_sha256(pdf_bytes)
@@ -585,7 +590,7 @@ def render_drawing_extractor_app():
     )
 
     extract_clicked = st.button(
-        f"Extract {extraction_type} drawing data",
+        "Start Drawing Extraction",
         type="primary",
         key="drawing_extractor_extract_button",
     )
@@ -753,9 +758,9 @@ def render_drawing_extractor_app():
                     "Temporary PDF removed."
                 )
 
-    st.divider()
-
-    render_processing_logs()
+    if st.session_state.drawing_extractor_processing_logs:
+        st.divider()
+        render_processing_logs()
 
     checklist = st.session_state.drawing_extractor_checklist
 
