@@ -1152,10 +1152,68 @@ def page_is_relevant(
 
 def create_debug_image(
     page,
+    terminals: list[dict],
 ) -> bytes:
     """
-    Create a source drawing preview image.
+    Create a diagnostic image.
+
+    Red boxes identify terminal references detected by the
+    CT Loop extraction process.
+
+    The page exists only in memory while the PDF is processed,
+    so drawing these boxes does not modify the uploaded PDF.
     """
+
+    red_colour = (
+        1.0,
+        0.0,
+        0.0,
+    )
+
+    box_padding = 2.5
+
+    shape = page.new_shape()
+
+    for terminal in terminals:
+        x0 = max(
+            0,
+            terminal["x0"] - box_padding,
+        )
+
+        y0 = max(
+            0,
+            terminal["y0"] - box_padding,
+        )
+
+        x1 = min(
+            page.rect.width,
+            terminal["x1"] + box_padding,
+        )
+
+        y1 = min(
+            page.rect.height,
+            terminal["y1"] + box_padding,
+        )
+
+        terminal_box = fitz.Rect(
+            x0,
+            y0,
+            x1,
+            y1,
+        )
+
+        shape.draw_rect(terminal_box)
+
+    # Draw all boxes in a single commit for better performance.
+    if terminals:
+        shape.finish(
+            color=red_colour,
+            width=1.3,
+            stroke_opacity=1.0,
+        )
+
+        shape.commit()
+
     pixmap = page.get_pixmap(
         matrix=fitz.Matrix(1.5, 1.5),
         alpha=False,
@@ -1296,9 +1354,18 @@ def extract_pdf(
                     item_labels,
                     log_callback=log_callback,
                 )
+                write_log(
+                    log_callback,
+                    f"Page {page_number}: creating debug image with "
+                    f"{len(terminals)} red terminal-reference boxes.",
+                    "DEBUG",
+                )
 
                 debug_images[page_number] = (
-                    create_debug_image(page)
+                    create_debug_image(
+                        page,
+                        terminals,
+                    )
                 )
 
                 for row in ct_loop_rows:
