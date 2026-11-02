@@ -3,7 +3,7 @@ import streamlit as st
 
 def get_theme_colours(theme_mode: str) -> dict:
     """
-    Returns colours for the selected application appearance.
+    Returns colours for Light, Dark, and Night appearance modes.
     """
 
     if theme_mode == "Dark":
@@ -21,11 +21,6 @@ def get_theme_colours(theme_mode: str) -> dict:
             "border": "#486581",
             "text": "#F0F4F8",
             "muted": "#BCCCDC",
-            "soft_blue": "#1B3E62",
-            "soft_teal": "#174C50",
-            "table_row": "#2A4359",
-            "warning_bg": "#4A3A17",
-            "warning_text": "#FFE8A3",
         }
 
     if theme_mode == "Night":
@@ -43,20 +38,14 @@ def get_theme_colours(theme_mode: str) -> dict:
             "border": "#314A62",
             "text": "#EDF4FA",
             "muted": "#A9BED0",
-            "soft_blue": "#102F4A",
-            "soft_teal": "#103F43",
-            "table_row": "#162838",
-            "warning_bg": "#3B3014",
-            "warning_text": "#FFE7A1",
         }
 
-    # Default Light appearance.
     return {
         "app_background": "#F5F7FA",
         "app_background_secondary": "#EEF4F9",
         "surface": "#FFFFFF",
         "surface_secondary": "#FBFCFE",
-        "surface_input": "#FBFCFE",
+        "surface_input": "#FFFFFF",
         "navy": "#102A43",
         "blue": "#1769C2",
         "blue_dark": "#0F4FA8",
@@ -65,21 +54,16 @@ def get_theme_colours(theme_mode: str) -> dict:
         "border": "#D9E2EC",
         "text": "#243B53",
         "muted": "#627D98",
-        "soft_blue": "#EAF3FF",
-        "soft_teal": "#E7F8F7",
-        "table_row": "#F3F6FA",
-        "warning_bg": "#FFF7E6",
-        "warning_text": "#6B4D00",
     }
 
 
 def render_global_theme(theme_mode: str):
     """
-    Applies the selected Light / Dark / Night appearance to the
-    complete Streamlit application.
+    Applies the global Light / Dark / Night theme.
 
-    Call this AFTER rendering the selected tool so this stylesheet
-    overrides tool-specific styles where needed.
+    Important:
+    Do NOT apply a background directly to [data-testid="stSelectbox"].
+    That includes its label and causes the large rectangular blue block.
     """
 
     colours = get_theme_colours(theme_mode)
@@ -96,10 +80,9 @@ def render_global_theme(theme_mode: str):
             --border: {colours["border"]};
             --text: {colours["text"]};
             --muted: {colours["muted"]};
-            --soft-blue: {colours["soft_blue"]};
-            --soft-teal: {colours["soft_teal"]};
             --surface: {colours["surface"]};
             --surface-secondary: {colours["surface_secondary"]};
+            --surface-input: {colours["surface_input"]};
         }}
 
         .stApp {{
@@ -112,44 +95,41 @@ def render_global_theme(theme_mode: str):
             color: {colours["text"]} !important;
         }}
 
-        /* Main text */
         .stApp,
         .stApp p,
         .stApp span,
         .stApp label,
-        .stApp div,
         .stApp h1,
         .stApp h2,
         .stApp h3 {{
             color: {colours["text"]};
         }}
 
-        /* Preserve text colour inside professional dark headers. */
+        /* Keep white text in both application headers. */
         .professional-header,
         .professional-header *,
-        .ct-professional-header,
-        .ct-professional-header * {{
+        .extractor-professional-header,
+        .extractor-professional-header * {{
             color: #FFFFFF !important;
         }}
 
-        /* Streamlit sidebar */
+        /* Sidebar */
         [data-testid="stSidebar"] {{
             background: {colours["surface"]} !important;
-            border-right: 1px solid {colours["border"]};
+            border-right: 1px solid {colours["border"]} !important;
         }}
 
         [data-testid="stSidebar"] * {{
             color: {colours["text"]};
         }}
 
-        /* Cards from Master Drawing List and CT Loop */
+        /* Application cards */
         .information-card,
         .upload-panel,
         .workflow-card,
-        .ct-information-card,
-        .ct-upload-panel,
-        .ct-review-card,
-        .ct-log-card {{
+        .extractor-information-card,
+        .extractor-selection-panel,
+        .extractor-upload-panel {{
             background: {colours["surface"]} !important;
             border-color: {colours["border"]} !important;
             color: {colours["text"]} !important;
@@ -158,40 +138,37 @@ def render_global_theme(theme_mode: str):
         .information-card-title,
         .upload-panel-title,
         .workflow-card-title,
-        .ct-card-title,
-        .ct-section-heading {{
+        .extractor-card-title {{
             color: {colours["navy"]} !important;
         }}
 
         .information-card-text,
         .upload-panel-description,
         .workflow-card-description,
-        .ct-card-description,
+        .extractor-card-description,
         .professional-footer,
-        .ct-footer {{
+        .extractor-footer {{
             color: {colours["muted"]} !important;
         }}
 
-        /* Inputs */
+        /* ----------------------------------------------------
+           Ordinary Streamlit input containers.
+           IMPORTANT: stSelectbox is intentionally NOT included.
+           ---------------------------------------------------- */
         [data-testid="stFileUploader"],
         [data-testid="stTextInput"],
-        [data-testid="stSelectbox"],
         [data-testid="stMultiSelect"],
         [data-testid="stDataEditor"] {{
             background: {colours["surface_secondary"]} !important;
             border-color: {colours["border"]} !important;
         }}
 
-        [data-testid="stFileUploader"] {{
-            background: {colours["surface_secondary"]} !important;
-            border-color: {colours["border"]} !important;
-        }}
-
-        [data-baseweb="input"] > div,
-        [data-baseweb="select"] > div {{
+        /* Text inputs */
+        [data-baseweb="input"] > div {{
             background-color: {colours["surface_input"]} !important;
             color: {colours["text"]} !important;
             border-color: {colours["border"]} !important;
+            border-radius: 14px !important;
         }}
 
         input,
@@ -200,10 +177,71 @@ def render_global_theme(theme_mode: str):
             background-color: {colours["surface_input"]} !important;
         }}
 
+        /* ----------------------------------------------------
+           Rounded Selectbox.
+           This styles only the actual select element and not
+           the label wrapper above it.
+           ---------------------------------------------------- */
+        [data-testid="stSelectbox"] [data-baseweb="select"] {{
+            border-radius: 18px !important;
+        }}
+
+        [data-testid="stSelectbox"] [data-baseweb="select"] > div {{
+            background-color: {colours["surface_input"]} !important;
+            color: {colours["text"]} !important;
+            border: 1px solid {colours["border"]} !important;
+            border-radius: 18px !important;
+            overflow: hidden !important;
+            min-height: 46px !important;
+        }}
+
+        [data-testid="stSelectbox"]
+        [data-baseweb="select"]
+        > div
+        > div {{
+            background-color: transparent !important;
+            color: {colours["text"]} !important;
+        }}
+
+        [data-testid="stSelectbox"]
+        [data-baseweb="select"]
+        svg {{
+            color: {colours["muted"]} !important;
+        }}
+
+        [role="listbox"] {{
+            background-color: {colours["surface"]} !important;
+            color: {colours["text"]} !important;
+            border: 1px solid {colours["border"]} !important;
+            border-radius: 18px !important;
+            overflow: hidden !important;
+        }}
+
+        [role="option"] {{
+            color: {colours["text"]} !important;
+        }}
+
+        /* File upload */
+        [data-testid="stFileUploader"] {{
+            border-radius: 18px !important;
+            overflow: hidden !important;
+            padding: 12px !important;
+        }}
+
+        [data-testid="stFileUploaderDropzone"] {{
+            border-radius: 14px !important;
+        }}
+
+        [data-testid="stFileUploaderFile"] {{
+            border-radius: 14px !important;
+        }}
+
         /* Expanders */
         [data-testid="stExpander"] {{
             background: {colours["surface"]} !important;
             border-color: {colours["border"]} !important;
+            border-radius: 16px !important;
+            overflow: hidden !important;
         }}
 
         [data-testid="stExpander"] summary,
@@ -211,18 +249,18 @@ def render_global_theme(theme_mode: str):
             color: {colours["text"]} !important;
         }}
 
-        /* Dataframes and data editor */
-        [data-testid="stDataFrame"],
+        /* Data editor */
         [data-testid="stDataEditor"] {{
             border: 1px solid {colours["border"]} !important;
-            border-radius: 10px;
-            overflow: hidden;
+            border-radius: 18px !important;
+            overflow: hidden !important;
         }}
 
         /* Metrics */
         [data-testid="stMetric"] {{
             background: {colours["surface"]} !important;
-            border-color: {colours["border"]} !important;
+            border: 1px solid {colours["border"]} !important;
+            border-radius: 14px !important;
         }}
 
         [data-testid="stMetricLabel"],
@@ -235,26 +273,23 @@ def render_global_theme(theme_mode: str):
             color: {colours["navy"]} !important;
         }}
 
-        /* Alerts */
+        /* Messages */
         [data-testid="stAlert"] {{
-            border-radius: 10px;
+            border-radius: 14px !important;
         }}
 
-        /* Code and logs */
+        /* Processing logs code box */
         pre,
         [data-testid="stCode"] {{
             background: {colours["surface_input"]} !important;
             border: 1px solid {colours["border"]} !important;
+            border-radius: 14px !important;
+            overflow: hidden !important;
         }}
 
         pre *,
         [data-testid="stCode"] * {{
             color: {colours["text"]} !important;
-        }}
-
-        /* General separators */
-        hr {{
-            border-color: {colours["border"]} !important;
         }}
 
         /* Buttons */
@@ -266,6 +301,7 @@ def render_global_theme(theme_mode: str):
             ) !important;
             color: #FFFFFF !important;
             border: none !important;
+            border-radius: 14px !important;
         }}
 
         .stDownloadButton > button {{
@@ -276,15 +312,17 @@ def render_global_theme(theme_mode: str):
             ) !important;
             color: #FFFFFF !important;
             border: none !important;
+            border-radius: 14px !important;
         }}
 
-        /* CT Loop primary export button */
-        .ct-primary-action {{
-            background: linear-gradient(
-                135deg,
-                {colours["blue"]},
-                {colours["blue_dark"]}
-            ) !important;
+        /* Progress bar */
+        [data-testid="stProgress"] > div {{
+            border-radius: 999px !important;
+            overflow: hidden !important;
+        }}
+
+        hr {{
+            border-color: {colours["border"]} !important;
         }}
         </style>
         """,
