@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import tempfile
+import textwrap
 import time
 from pathlib import Path
 
@@ -52,6 +53,23 @@ def configure_logging() -> logging.Logger:
 
 LOGGER = configure_logging()
 
+def render_ct_html(html: str):
+    """
+    Render dedented HTML correctly.
+
+    textwrap.dedent prevents Streamlit Markdown from treating
+    indented HTML as a code block.
+    """
+
+    content = textwrap.dedent(html).strip()
+
+    if hasattr(st, "html"):
+        st.html(content)
+    else:
+        st.markdown(
+            content,
+            unsafe_allow_html=True,
+        )
 
 def calculate_sha256(file_bytes: bytes) -> str:
     return hashlib.sha256(file_bytes).hexdigest()
@@ -231,7 +249,7 @@ def render_ct_loop_extractor_app():
     initialize_ct_loop_state()
     render_ct_loop_styles()
 
-    st.markdown(
+    render_ct_html(
         """
         <div class="ct-professional-header">
             <div class="ct-professional-header-inner">
@@ -251,11 +269,10 @@ def render_ct_loop_extractor_app():
                 </div>
             </div>
         </div>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
-    st.markdown(
+    render_ct_html(
         """
         <div class="ct-information-card">
             <div class="ct-card-title">
@@ -270,11 +287,10 @@ def render_ct_loop_extractor_app():
                 approval, or site use.
             </div>
         </div>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
-    st.markdown(
+    render_ct_html(
         """
         <div class="ct-upload-panel">
             <div class="ct-card-title">
@@ -286,8 +302,7 @@ def render_ct_loop_extractor_app():
                 CT-loop checklist entries.
             </div>
         </div>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
     uploaded_pdf = st.file_uploader(
@@ -469,8 +484,8 @@ def render_ct_loop_extractor_app():
         pdf_bytes=pdf_bytes,
         checklist=checklist,
     )
-    
-    st.markdown(
+
+    render_ct_html(
         """
         <div class="ct-footer">
             <strong>CT Loop Drawing Extractor</strong>
@@ -480,8 +495,7 @@ def render_ct_loop_extractor_app():
             Verify all generated checklist entries against the
             controlled drawing before use.
         </div>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
 
