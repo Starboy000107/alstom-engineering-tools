@@ -53,12 +53,11 @@ def configure_logging() -> logging.Logger:
 
 LOGGER = configure_logging()
 
+
 def render_ct_html(html: str):
     """
-    Render dedented HTML correctly.
-
-    textwrap.dedent prevents Streamlit Markdown from treating
-    indented HTML as a code block.
+    Renders HTML without Streamlit treating indented HTML
+    as a code block.
     """
 
     content = textwrap.dedent(html).strip()
@@ -71,6 +70,136 @@ def render_ct_html(html: str):
             unsafe_allow_html=True,
         )
 
+
+def render_ct_loop_styles():
+    """
+    CT Loop page-specific styling.
+
+    The overall Light / Dark / Night theme is applied from
+    ui_theme.py through the main app.py file.
+    """
+
+    css = """
+    <style>
+    .ct-professional-header {
+        position: relative;
+        overflow: hidden;
+        background: linear-gradient(
+            135deg,
+            #102A43 0%,
+            #163D5A 58%,
+            #1C587D 100%
+        );
+        border-radius: 18px;
+        padding: 30px 34px;
+        margin-bottom: 26px;
+        box-shadow: 0 12px 30px rgba(16,42,67,.22);
+        color: white;
+    }
+
+    .ct-professional-header-inner {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        align-items: center;
+        gap: 20px;
+    }
+
+    .ct-professional-icon {
+        width: 68px;
+        height: 68px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: white;
+        color: #102A43 !important;
+        border-radius: 14px;
+        font-size: 34px;
+        flex-shrink: 0;
+    }
+
+    .ct-professional-header h1 {
+        margin: 0;
+        color: white !important;
+        font-size: 30px;
+        font-weight: 750;
+    }
+
+    .ct-professional-header p {
+        margin: 8px 0 0;
+        color: #D9EAF5 !important;
+        font-size: 15px;
+    }
+
+    .ct-header-tag {
+        display: inline-block;
+        margin-top: 15px;
+        padding: 5px 11px;
+        border: 1px solid rgba(255,255,255,.25);
+        border-radius: 20px;
+        color: #EAF5FB !important;
+        background: rgba(255,255,255,.10);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: .6px;
+        text-transform: uppercase;
+    }
+
+    .ct-information-card,
+    .ct-upload-panel,
+    .ct-review-card,
+    .ct-log-card {
+        background: var(--surface, #FFFFFF);
+        border: 1px solid var(--border, #D9E2EC);
+        border-radius: 14px;
+        padding: 22px 25px;
+        margin-bottom: 24px;
+        box-shadow: 0 8px 25px rgba(16,42,67,.08);
+    }
+
+    .ct-information-card {
+        border-top: 4px solid var(--blue, #1769C2);
+    }
+
+    .ct-upload-panel {
+        border-top: 4px solid var(--teal, #008F95);
+    }
+
+    .ct-review-card {
+        border-top: 4px solid var(--green, #167A3D);
+    }
+
+    .ct-card-title {
+        color: var(--navy, #102A43);
+        font-size: 18px;
+        font-weight: 750;
+        margin-bottom: 8px;
+    }
+
+    .ct-card-description {
+        color: var(--muted, #627D98);
+        font-size: 14px;
+        line-height: 1.65;
+    }
+
+    .ct-footer {
+        margin-top: 45px;
+        padding-top: 18px;
+        border-top: 1px solid var(--border, #D9E2EC);
+        color: var(--muted, #627D98);
+        font-size: 12px;
+        line-height: 1.7;
+        text-align: center;
+    }
+    </style>
+    """
+
+    st.markdown(
+        textwrap.dedent(css),
+        unsafe_allow_html=True,
+    )
+
+
 def calculate_sha256(file_bytes: bytes) -> str:
     return hashlib.sha256(file_bytes).hexdigest()
 
@@ -79,6 +208,10 @@ def render_pdf_page(
     pdf_bytes: bytes,
     page_number: int,
 ) -> bytes:
+    """
+    Converts one PDF page to a PNG image for display.
+    """
+
     with fitz.open(
         stream=pdf_bytes,
         filetype="pdf",
@@ -99,6 +232,10 @@ def render_pdf_page(
 
 
 def get_log_file_bytes() -> bytes:
+    """
+    Returns the server log file for download.
+    """
+
     log_file = LOG_DIRECTORY / LOG_FILE_NAME
 
     if not log_file.exists():
@@ -108,6 +245,10 @@ def get_log_file_bytes() -> bytes:
 
 
 def initialize_ct_loop_state():
+    """
+    Creates CT Loop-specific Streamlit session state values.
+    """
+
     defaults = {
         "ct_checklist": None,
         "ct_debug_images": {},
@@ -118,134 +259,45 @@ def initialize_ct_loop_state():
         if key not in st.session_state:
             st.session_state[key] = value
 
-def render_ct_loop_styles():
+
+def render_processing_logs():
     """
-    CT Loop page-specific professional styling.
-    The shared Light/Dark/Night styling is applied from ui_theme.py.
+    Logs are hidden by default and become visible only when
+    the user manually opens this expander.
     """
 
-    st.markdown(
-        """
-        <style>
-        .ct-professional-header {
-            position: relative;
-            overflow: hidden;
-            background: linear-gradient(
-                135deg,
-                #102A43 0%,
-                #163D5A 58%,
-                #1C587D 100%
-            );
-            border-radius: 18px;
-            padding: 30px 34px;
-            margin-bottom: 26px;
-            box-shadow: 0 12px 30px rgba(16,42,67,.22);
-            color: white;
-        }
+    with st.expander(
+        "Processing logs",
+        expanded=False,
+    ):
+        current_logs = "\n".join(
+            st.session_state.ct_processing_logs
+        )
 
-        .ct-professional-header-inner {
-            position: relative;
-            z-index: 1;
-            display: flex;
-            align-items: center;
-            gap: 20px;
-        }
+        if current_logs:
+            st.code(
+                current_logs,
+                language="text",
+            )
+        else:
+            st.info(
+                "No processing logs yet."
+            )
 
-        .ct-professional-icon {
-            width: 68px;
-            height: 68px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: white;
-            color: #102A43 !important;
-            border-radius: 14px;
-            font-size: 34px;
-            flex-shrink: 0;
-        }
+        st.download_button(
+            label="Download full CT-loop log",
+            data=get_log_file_bytes(),
+            file_name="ct_loop_extractor.log",
+            mime="text/plain",
+            key="ct_download_log",
+        )
 
-        .ct-professional-header h1 {
-            margin: 0;
-            color: white !important;
-            font-size: 30px;
-            font-weight: 750;
-        }
-
-        .ct-professional-header p {
-            margin: 8px 0 0;
-            color: #D9EAF5 !important;
-            font-size: 15px;
-        }
-
-        .ct-header-tag {
-            display: inline-block;
-            margin-top: 15px;
-            padding: 5px 11px;
-            border: 1px solid rgba(255,255,255,.25);
-            border-radius: 20px;
-            color: #EAF5FB !important;
-            background: rgba(255,255,255,.10);
-            font-size: 11px;
-            font-weight: 700;
-            letter-spacing: .6px;
-            text-transform: uppercase;
-        }
-
-        .ct-information-card,
-        .ct-upload-panel,
-        .ct-review-card,
-        .ct-log-card {
-            border: 1px solid var(--border);
-            border-radius: 14px;
-            padding: 22px 25px;
-            margin-bottom: 24px;
-            box-shadow: 0 8px 25px rgba(16,42,67,.08);
-        }
-
-        .ct-information-card {
-            border-top: 4px solid var(--blue);
-        }
-
-        .ct-upload-panel {
-            border-top: 4px solid var(--teal);
-        }
-
-        .ct-review-card {
-            border-top: 4px solid var(--green);
-        }
-
-        .ct-card-title {
-            font-size: 18px;
-            font-weight: 750;
-            margin-bottom: 8px;
-        }
-
-        .ct-card-description {
-            font-size: 14px;
-            line-height: 1.65;
-        }
-
-        .ct-section-heading {
-            margin-top: 20px;
-            margin-bottom: 8px;
-            font-size: 21px;
-            font-weight: 750;
-        }
-
-        .ct-footer {
-            margin-top: 45px;
-            padding-top: 18px;
-            border-top: 1px solid var(--border);
-            font-size: 12px;
-            line-height: 1.7;
-            text-align: center;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
 
 def render_ct_loop_extractor_app():
+    """
+    Main CT Loop Drawing Extractor application renderer.
+    """
+
     initialize_ct_loop_state()
     render_ct_loop_styles()
 
@@ -312,38 +364,58 @@ def render_ct_loop_extractor_app():
     )
 
     if uploaded_pdf is None:
-        st.info("Upload a PDF to begin.")
+        st.info(
+            "Upload a PDF to begin."
+        )
+
+        # Logs expander remains available, but is closed by default.
+        render_processing_logs()
         return
 
     pdf_bytes = uploaded_pdf.getvalue()
 
     if not pdf_bytes.startswith(b"%PDF"):
-        st.error("The uploaded file is not a valid PDF.")
+        st.error(
+            "The uploaded file is not a valid PDF."
+        )
+
+        render_processing_logs()
         return
 
     document_hash = calculate_sha256(pdf_bytes)
 
     st.caption(
-        f"File: {uploaded_pdf.name} | SHA-256: {document_hash}"
+        f"File: {uploaded_pdf.name} | "
+        f"SHA-256: {document_hash}"
     )
 
-    if st.button(
+    extract_clicked = st.button(
         "Extract candidate checklist",
         type="primary",
         key="ct_extract_candidate_checklist",
-    ):
+    )
+
+    if extract_clicked:
+        # Reset prior visible/session log entries.
         st.session_state.ct_processing_logs = []
 
         progress_bar = st.progress(0)
-
-        # Logs are stored in session state and shown only when the
-        # user manually opens the "Processing logs" expander.
-        log_placeholder = None
+        status_message = st.empty()
 
         def add_log(
             message: str,
             level: str = "INFO",
         ):
+            """
+            Saves logs to session state and server file only.
+
+            Important:
+            This function intentionally does NOT call st.code(),
+            st.write(), st.text(), or any Streamlit display command.
+            Therefore logs cannot appear on screen until the user
+            manually opens the Processing logs expander.
+            """
+
             timestamp = time.strftime("%H:%M:%S")
 
             formatted_message = (
@@ -356,33 +428,36 @@ def render_ct_loop_extractor_app():
 
             if level == "ERROR":
                 LOGGER.error(message)
+
             elif level == "WARNING":
                 LOGGER.warning(message)
+
             elif level == "DEBUG":
                 LOGGER.debug(message)
+
             else:
                 LOGGER.info(message)
 
-            # Do not display logs outside the expandable log panel.
-            # They remain available in st.session_state.ct_processing_logs.
-            if log_placeholder is not None:
-                log_placeholder.code(
-                    "\n".join(
-                        st.session_state.ct_processing_logs[-100:]
-                    ),
-                    language="text",
-                )
-
         def update_progress(value: float):
-            progress_bar.progress(
-                max(0, min(100, int(value)))
+            safe_value = max(
+                0,
+                min(100, int(value)),
             )
+
+            progress_bar.progress(safe_value)
 
         temporary_path = None
         start_time = time.perf_counter()
 
         try:
-            add_log("Starting extraction process.")
+            status_message.info(
+                "Extracting CT-loop checklist candidates. "
+                "This may take a few minutes for large PDFs."
+            )
+
+            add_log(
+                "Starting extraction process."
+            )
 
             with tempfile.NamedTemporaryFile(
                 suffix=".pdf",
@@ -418,10 +493,21 @@ def render_ct_loop_extractor_app():
                     "No checklist rows were created.",
                     level="WARNING",
                 )
+
+                status_message.warning(
+                    "Extraction completed, but no checklist "
+                    "candidate rows were found."
+                )
+
             else:
                 add_log(
                     "Candidate checklist rows created: "
                     f"{len(checklist)}"
+                )
+
+                status_message.success(
+                    "Extraction completed successfully. "
+                    f"{len(checklist)} candidate row(s) created."
                 )
 
             update_progress(100)
@@ -436,43 +522,26 @@ def render_ct_loop_extractor_app():
                 level="ERROR",
             )
 
-            st.error(
-                "The extraction failed. Download the log file "
-                "and check the detailed error."
+            status_message.error(
+                "The extraction failed. Open Processing logs "
+                "for technical details."
             )
 
         finally:
             if temporary_path:
                 Path(temporary_path).unlink(
-                    missing_ok=True
+                    missing_ok=True,
                 )
-                add_log("Temporary PDF removed.")
+
+                add_log(
+                    "Temporary PDF removed."
+                )
 
     st.divider()
 
-    with st.expander(
-        "Processing logs",
-        expanded=False,
-    ):
-        current_logs = "\n".join(
-            st.session_state.ct_processing_logs
-        )
-
-        if current_logs:
-            st.code(
-                current_logs,
-                language="text",
-            )
-        else:
-            st.info("No processing logs yet.")
-
-        st.download_button(
-            label="Download full CT-loop log",
-            data=get_log_file_bytes(),
-            file_name="ct_loop_extractor.log",
-            mime="text/plain",
-            key="ct_download_log",
-        )
+    # This is the only place where logs are displayed.
+    # It is closed by default.
+    render_processing_logs()
 
     checklist = st.session_state.ct_checklist
 
@@ -482,7 +551,7 @@ def render_ct_loop_extractor_app():
     if checklist.empty:
         st.error(
             "No CT-loop candidate rows were found. "
-            "Check the Processing logs and debug output."
+            "Open Processing logs to review extraction details."
         )
         return
 
@@ -509,6 +578,11 @@ def render_ct_loop_review_area(
     pdf_bytes: bytes,
     checklist,
 ):
+    """
+    Displays the PDF page preview, editable candidate table,
+    and Excel download controls.
+    """
+
     left_column, right_column = st.columns(
         [1.1, 1.5],
     )
