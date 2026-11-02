@@ -232,38 +232,7 @@ def render_drawing_extractor_styles():
         font-size: 14px;
         line-height: 1.65;
     }
-    .extractor-current-type {
-        background: var(--surface, #FFFFFF);
-        border: 1px solid var(--border, #DADCE0);
-        border-radius: 14px;
-        padding: 16px 18px;
-        margin-top: -4px;
-        margin-bottom: 24px;
-        box-shadow: 0 2px 8px rgba(60, 64, 67, 0.08);
-    }
 
-    .extractor-current-type-label {
-        color: var(--muted, #5F6368);
-        font-size: 12px;
-        font-weight: 700;
-        letter-spacing: 0.4px;
-        text-transform: uppercase;
-        margin-bottom: 6px;
-    }
-
-    .extractor-current-type-value {
-        color: var(--navy, #202124);
-        font-size: 18px;
-        font-weight: 750;
-    }
-
-    .extractor-current-type-note {
-        color: var(--muted, #5F6368);
-        font-size: 13px;
-        margin-top: 6px;
-        line-height: 1.5;
-    }
-    
     .extractor-footer {
         margin-top: 45px;
         padding-top: 18px;
@@ -549,34 +518,15 @@ def render_drawing_extractor_app():
         "CT Loop",
     ]
 
-    if len(available_extraction_types) == 1:
-        extraction_type = available_extraction_types[0]
-
-        render_extractor_html(
-            f"""
-            <div class="extractor-current-type">
-                <div class="extractor-current-type-label">
-                    Available extraction type
-                </div>
-
-                <div class="extractor-current-type-value">
-                    {extraction_type}
-                </div>
-
-                <div class="extractor-current-type-note">
-                    Additional drawing extraction types will be added in a
-                    future update.
-                </div>
-            </div>
-            """
-        )
-
-    else:
-        extraction_type = st.selectbox(
-            "Select drawing extraction type",
-            options=available_extraction_types,
-            key="drawing_extractor_type",
-        )
+    extraction_type = st.selectbox(
+        "Select drawing extraction type",
+        options=available_extraction_types,
+        key="drawing_extractor_type",
+        help=(
+            "Select the required drawing extraction workflow. "
+            "Additional extraction types will be added later."
+        ),
+    )
 
     extractor_configuration = get_extractor_configuration(
         extraction_type
