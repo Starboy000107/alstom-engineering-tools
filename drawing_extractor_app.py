@@ -264,11 +264,12 @@ def render_drawing_extractor_styles():
         overflow: hidden;
     }
 
-    /* Dropdown appearance only.
-        Scrolling is managed centrally in ui_theme.py. */
+    /* Dropdown menu: allow long PDF-page lists to scroll */
     [role="listbox"] {
-        border-radius: 10px !important;
-        overflow: hidden !important;
+        border-radius: 16px !important;
+        overflow-x: hidden !important;
+        overflow-y: auto !important;
+        max-height: 360px !important;
     }
 
     /* File uploader */
