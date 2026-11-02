@@ -252,14 +252,11 @@ def render_global_theme(theme_mode: str):
             box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18) !important;
         }
 
-        /* Allow long Streamlit/BaseWeb select menus,
-        such as PDF page selection, to scroll. */
         [role="listbox"] > div {
             overflow-y: auto !important;
             max-height: 320px !important;
         }
 
-        /* Professional scrollbar styling */
         [role="listbox"]::-webkit-scrollbar,
         [role="listbox"] > div::-webkit-scrollbar {
             width: 10px;
