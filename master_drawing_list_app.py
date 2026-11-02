@@ -9074,12 +9074,7 @@ def render_master_drawing_list_interface():
 
     render_html(
         """
-        <div style="
-            color:#102A43;
-            font-size:15px;
-            font-weight:750;
-            margin-bottom:10px;
-        ">
+        <div class="section-heading">
             Select workflow
         </div>
         """
