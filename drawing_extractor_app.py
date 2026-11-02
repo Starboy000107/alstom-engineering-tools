@@ -264,10 +264,12 @@ def render_drawing_extractor_styles():
         overflow: hidden;
     }
 
-    /* Dropdown menu */
+    /* Dropdown menu: allow long PDF-page lists to scroll */
     [role="listbox"] {
         border-radius: 16px !important;
-        overflow: hidden;
+        overflow-x: hidden !important;
+        overflow-y: auto !important;
+        max-height: 360px !important;
     }
 
     /* File uploader */
