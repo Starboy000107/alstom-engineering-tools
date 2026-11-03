@@ -9,10 +9,14 @@ import fitz
 import pandas as pd
 
 
-# Supports examples such as:
+# ---------------------------------------------------------------------
+# Patterns
+# ---------------------------------------------------------------------
+
+# Examples supported:
 # 1252/W/NAC/ALT/R32/541
+# 1252/W/KOW/ALT/R32/531
 # 1252/W/KOW/ALT/R32/555/A1
-# 1252/W/ABC/ALT/R10/123/B2
 DRAWING_PATTERN = re.compile(
     r"\b"
     r"\d+"
@@ -24,7 +28,7 @@ DRAWING_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Supports examples such as:
+# Examples supported:
 # V0.C89
 # V1.D87
 # V10.A123
@@ -32,10 +36,10 @@ DRAWING_PATTERN = re.compile(
 # V1:R40.10
 # V2:R23.11
 #
-# Groups:
+# Named groups:
 # rack     = V1
-# column   = R
-# terminal = 40.9
+# column   = D / R / AB etc.
+# terminal = 87 / 40.9 / 40.10 etc.
 TERMINAL_PATTERN = re.compile(
     r"\b"
     r"(?P<rack>V\d+)"
@@ -48,13 +52,12 @@ TERMINAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Item examples:
-# CT.BW1(UP)
+# Examples:
+# CT.GN1(UP)
 # TC.BW1(REP)
 # BW1(UP)
 # KP1(DN)
 # KX1(BRANCH)
-# VW1(Br)
 ITEM_PATTERN = re.compile(
     r"\b(?:CT|TC)\.?\s*"
     r"([A-Z]{1,}\d+)\s*"
@@ -62,37 +65,17 @@ ITEM_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Used only if an Item label has no CT./TC. prefix.
+# Used only when no CT./TC. prefixed Item labels are found.
 FALLBACK_ITEM_PATTERN = re.compile(
     r"\b([A-Z]{2,}\d+)\s*"
     r"\(\s*([A-Z0-9]+)\s*\)",
     re.IGNORECASE,
 )
 
-# Revision examples:
-# KA1
-# KA2
-# KB1
-# KX1
-REVISION_VALUE_PATTERN = re.compile(
-    r"\b[A-Z]{1,3}\d{1,3}\b",
-    re.IGNORECASE,
-)
 
-# Title-block labels.
-DRAWING_NUMBER_LABEL_PATTERN = re.compile(
-    r"\b(?:DRAWING\s*(?:NO\.?|NUMBER)?|"
-    r"DWG\.?\s*NO\.?|"
-    r"DRAWING\s*NR\.?|"
-    r"DOC(?:UMENT)?\s*NO\.?)\b",
-    re.IGNORECASE,
-)
-
-REVISION_LABEL_PATTERN = re.compile(
-    r"\b(?:REV\.?|REVISION)\b",
-    re.IGNORECASE,
-)
-
+# ---------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------
 
 def write_log(
     log_callback,
@@ -100,21 +83,19 @@ def write_log(
     level: str = "INFO",
 ):
     """
-    Write messages to the Streamlit log panel if supplied.
+    Send a message to the supplied Streamlit/UI logger if available.
     """
     if log_callback is not None:
-        log_callback(
-            message,
-            level,
-        )
+        log_callback(message, level)
 
+
+# ---------------------------------------------------------------------
+# Drawing metadata
+# ---------------------------------------------------------------------
 
 def normalise_drawing_number(
     drawing_number: str,
 ) -> str:
-    """
-    Return an uppercase controlled drawing number.
-    """
     return drawing_number.upper().strip()
 
 
@@ -122,15 +103,14 @@ def get_location_from_drawing_number(
     drawing_number: str,
 ) -> str:
     """
-    Derive the location from a drawing number.
+    Dynamically derive location from drawing number.
 
     Example:
+    1252/W/KOW/ALT/R32/531
+             ^^^
+             Returns KOW
 
-    1252/W/NAC/ALT/R32/541
-             ^
-             Returns NAC
-
-    This is dynamic and does not hardcode a station/location.
+    The location is the segment two positions before R<number>.
     """
     parts = drawing_number.upper().split("/")
 
@@ -142,78 +122,21 @@ def get_location_from_drawing_number(
     return ""
 
 
-def rack_number(
-    rack_name: str,
-) -> int:
-    """
-    Convert V0, V1, V2, V10 etc. to a number.
-    """
-    match = re.search(
-        r"(\d+)$",
-        rack_name,
-    )
-
-    if not match:
-        return 999999
-
-    return int(match.group(1))
-
-def parse_terminal_number(
-    terminal_number: str,
-) -> tuple[int, ...]:
-    """
-    Convert a terminal identifier into a sortable numeric tuple.
-
-    Examples:
-    87     -> (87,)
-    40.9   -> (40, 9)
-    40.10  -> (40, 10)
-    12-3   -> (12, 3)
-
-    This allows different controlled-drawing terminal conventions
-    without hardcoding a specific terminal format.
-    """
-    parts = re.split(
-        r"[.-]",
-        str(terminal_number),
-    )
-
-    parsed_parts = []
-
-    for part in parts:
-        if part.isdigit():
-            parsed_parts.append(
-                int(part)
-            )
-
-    return tuple(parsed_parts)
-
 def get_bottom_title_block_words(
     page,
     bottom_ratio: float = 0.18,
 ) -> list[dict]:
     """
-    Return words in the bottom title-block area.
-
-    The controlled Drawing No. and Rev. are expected in this area.
-
-    bottom_ratio=0.18 means only the bottom 18 percent of the page
-    is searched. If some drawings have a taller title block, change
-    this value to 0.22 or 0.25.
+    Return word records from the bottom title-block region only.
     """
     page_height = float(page.rect.height)
     page_width = float(page.rect.width)
 
-    title_block_top = page_height * (
-        1 - bottom_ratio
-    )
+    title_block_top = page_height * (1 - bottom_ratio)
 
-    title_block_words = []
+    words = []
 
-    for word in page.get_text(
-        "words",
-        sort=True,
-    ):
+    for word in page.get_text("words", sort=True):
         x0, y0, x1, y1, value = word[:5]
 
         y_center = (y0 + y1) / 2
@@ -221,37 +144,26 @@ def get_bottom_title_block_words(
         if y_center < title_block_top:
             continue
 
-        title_block_words.append(
+        words.append(
             {
-                "value": value.strip(
-                    " ,;:()[]{}"
-                ),
+                "value": value.strip(" ,;:()[]{}"),
                 "x0": float(x0),
                 "y0": float(y0),
                 "x1": float(x1),
                 "y1": float(y1),
-                "x_center": round(
-                    (x0 + x1) / 2,
-                    2,
-                ),
-                "y_center": round(
-                    (y0 + y1) / 2,
-                    2,
-                ),
+                "x_center": round((x0 + x1) / 2, 2),
+                "y_center": round((y0 + y1) / 2, 2),
                 "page_width": page_width,
                 "page_height": page_height,
             }
         )
 
-    return title_block_words
+    return words
 
 
 def join_title_block_words(
     title_block_words: list[dict],
 ) -> str:
-    """
-    Join words from the bottom title block into searchable text.
-    """
     return " ".join(
         word["value"]
         for word in title_block_words
@@ -261,27 +173,17 @@ def join_title_block_words(
 def get_drawing_number_from_title_block(
     title_block_words: list[dict],
 ) -> str:
-    """
-    Get the controlled Drawing No. only from the bottom title block.
-
-    Example:
-    1252/W/NAC/ALT/R32/541
-    """
     title_block_text = join_title_block_words(
         title_block_words
     )
 
     matches = list(
-        DRAWING_PATTERN.finditer(
-            title_block_text
-        )
+        DRAWING_PATTERN.finditer(title_block_text)
     )
 
     if not matches:
         return ""
 
-    # Usually there is one controlled drawing number in the title block.
-    # If there are several, select the last occurrence.
     return matches[-1].group(0).upper()
 
 
@@ -289,24 +191,16 @@ def is_revision_value(
     value: str,
 ) -> bool:
     """
-    Check whether a word looks like a revision value.
-
-    Examples:
+    Revision examples:
     KA1
     KA2
     KB1
-
-    This only validates the pattern. The actual selection is controlled
-    by location next to the REV / REVISION title-block label.
+    KX12
     """
-    cleaned_value = value.strip(
-        " ,;:()[]{}"
-    ).upper()
-
     return bool(
         re.fullmatch(
             r"[A-Z]{1,3}\d{1,3}",
-            cleaned_value,
+            value.strip(" ,;:()[]{}").upper(),
         )
     )
 
@@ -315,40 +209,18 @@ def get_revision_from_title_block(
     title_block_words: list[dict],
 ) -> str:
     """
-    Extract Drawing Revision from the value next to the REV label.
-
-    Expected title-block layout:
-
-    DRAWING NO. 1252/W/NAC/ALT/R32/541 | REV. KA1
-
-    This function does NOT simply select a code from the right side
-    of the title block. It specifically finds:
-
-        REV / REV. / REVISION
-            ↓
-        nearest revision value to the right on the same row
-
-    This prevents BU1, BV1, BW1, KX1, KY1 etc. from being used as
-    Drawing Revision.
+    Find REV / REVISION and use the nearest valid revision value
+    on the same title-block row.
     """
-    if not title_block_words:
-        return "REVIEW"
-
     revision_labels = []
 
     for word in title_block_words:
-        cleaned_value = word["value"].strip(
-            " ,;:()[]{}"
-        ).upper()
+        value = word["value"].strip(" ,;:()[]{}").upper()
 
-        if re.fullmatch(
-            r"REV\.?",
-            cleaned_value,
-        ):
+        if re.fullmatch(r"REV\.?", value):
             revision_labels.append(word)
-            continue
 
-        if cleaned_value == "REVISION":
+        elif value == "REVISION":
             revision_labels.append(word)
 
     if not revision_labels:
@@ -356,296 +228,113 @@ def get_revision_from_title_block(
 
     candidates = []
 
-    for revision_label in revision_labels:
-        label_x1 = revision_label["x1"]
-        label_y_center = revision_label["y_center"]
-
-        # Find values directly to the right of REV.
-        # The tolerance is based on text-row geometry, not Item names.
+    for label in revision_labels:
         for word in title_block_words:
-            cleaned_value = word["value"].strip(
-                " ,;:()[]{}"
-            ).upper()
+            value = word["value"].strip(" ,;:()[]{}").upper()
 
-            if not is_revision_value(cleaned_value):
+            if not is_revision_value(value):
                 continue
 
-            # Revision value must be positioned to the right of REV.
-            if word["x_center"] <= label_x1:
+            if word["x_center"] <= label["x1"]:
                 continue
 
+            horizontal_distance = word["x0"] - label["x1"]
             vertical_distance = abs(
-                word["y_center"]
-                - label_y_center
+                word["y_center"] - label["y_center"]
             )
 
-            # Normally the revision is on the same title-block row.
-            # A slightly larger tolerance supports different PDF fonts.
-            if vertical_distance > 18:
+            if vertical_distance > 20:
                 continue
-
-            horizontal_distance = (
-                word["x0"] - label_x1
-            )
 
             candidates.append(
                 {
-                    "value": cleaned_value,
-                    "horizontal_distance": (
-                        horizontal_distance
-                    ),
-                    "vertical_distance": (
-                        vertical_distance
-                    ),
+                    "value": value,
                     "score": (
                         horizontal_distance
-                        + (vertical_distance * 5)
+                        + vertical_distance * 5
                     ),
                 }
             )
 
-    if candidates:
-        candidates = sorted(
-            candidates,
-            key=lambda candidate: candidate["score"],
-        )
+    if not candidates:
+        return "REVIEW"
 
-        return candidates[0]["value"]
+    candidates.sort(
+        key=lambda candidate: candidate["score"]
+    )
 
-    # Fallback:
-    # Search in a small rectangle immediately to the right and slightly
-    # below the REV label. This supports title blocks where KA1 is printed
-    # below the REV heading rather than on the exact same row.
-    fallback_candidates = []
+    return candidates[0]["value"]
 
-    for revision_label in revision_labels:
-        label_x1 = revision_label["x1"]
-        label_y_center = revision_label["y_center"]
-
-        for word in title_block_words:
-            cleaned_value = word["value"].strip(
-                " ,;:()[]{}"
-            ).upper()
-
-            if not is_revision_value(cleaned_value):
-                continue
-
-            horizontal_distance = (
-                word["x_center"] - label_x1
-            )
-
-            vertical_distance = abs(
-                word["y_center"]
-                - label_y_center
-            )
-
-            # Restrict fallback to the revision cell area:
-            # right of label, not too far away, near same row.
-            if horizontal_distance < 0:
-                continue
-
-            if horizontal_distance > 100:
-                continue
-
-            if vertical_distance > 45:
-                continue
-
-            fallback_candidates.append(
-                {
-                    "value": cleaned_value,
-                    "score": (
-                        horizontal_distance
-                        + (vertical_distance * 5)
-                    ),
-                }
-            )
-
-    if fallback_candidates:
-        fallback_candidates = sorted(
-            fallback_candidates,
-            key=lambda candidate: candidate["score"],
-        )
-
-        return fallback_candidates[0]["value"]
-
-    return "REVIEW"
 
 def get_title_block_metadata(
     page,
     log_callback=None,
 ) -> tuple[str, str]:
     """
-    Get controlled Drawing No. and Drawing Rev. strictly from the
-    bottom title block.
-
-    The main drawing area is intentionally ignored for this metadata,
-    because it can contain cross-references to other drawings and Item
-    labels that look like revision codes.
+    Extract controlled Drawing No. and Revision from page title block.
     """
-    title_block_words = get_bottom_title_block_words(
-        page,
-        bottom_ratio=0.18,
-    )
-
-    title_block_text = join_title_block_words(
-        title_block_words
-    )
+    title_block_words = get_bottom_title_block_words(page)
 
     drawing_number = get_drawing_number_from_title_block(
         title_block_words
     )
 
-    revision = get_revision_from_title_block(
+    drawing_revision = get_revision_from_title_block(
         title_block_words
     )
 
     write_log(
         log_callback,
-        "Bottom title-block extraction: "
+        "Title-block extraction: "
         f"drawing={drawing_number or 'NOT FOUND'}; "
-        f"revision={revision}; "
-        f"words={len(title_block_words)}; "
-        f"text={title_block_text[:300]}",
+        f"revision={drawing_revision}; "
+        f"word_count={len(title_block_words)}.",
         "DEBUG",
     )
 
-    return drawing_number, revision
+    return drawing_number, drawing_revision
 
 
-def remove_duplicate_terminals(
-    terminals: list[dict],
-) -> list[dict]:
+# ---------------------------------------------------------------------
+# Terminal extraction and pairing
+# ---------------------------------------------------------------------
+
+def parse_terminal_number(
+    terminal_number: str,
+) -> tuple[int, ...]:
     """
-    Remove repeated terminal labels caused by duplicate PDF text layers.
+    Convert terminal identifiers to sortable tuple values.
+
+    Examples:
+    87      -> (87,)
+    88      -> (88,)
+    40.9    -> (40, 9)
+    40.10   -> (40, 10)
+    12-3    -> (12, 3)
     """
-    unique_terminals = []
+    parts = re.split(r"[.-]", str(terminal_number))
 
-    for terminal in terminals:
-        duplicate_found = False
+    parsed = []
 
-        for existing in unique_terminals:
-            same_terminal = (
-                terminal["terminal"]
-                == existing["terminal"]
-            )
+    for part in parts:
+        if part.isdigit():
+            parsed.append(int(part))
 
-            same_position = (
-                abs(
-                    terminal["x_center"]
-                    - existing["x_center"]
-                ) <= 2
-                and abs(
-                    terminal["y_center"]
-                    - existing["y_center"]
-                ) <= 2
-            )
+    return tuple(parsed)
 
-            if same_terminal and same_position:
-                duplicate_found = True
-                break
-
-        if not duplicate_found:
-            unique_terminals.append(terminal)
-
-    return unique_terminals
-
-
-def extract_terminal_references(
-    page,
-) -> list[dict]:
-    """
-    Extract terminal references and PDF coordinates.
-
-    Supports terminal formats such as:
-
-    V1.D87
-    V2.B83
-    V10.A123
-    V1:R40.9
-    V1:R40.10
-    V2:R23.11
-
-    No cable rack, location, terminal column, or number is hardcoded.
-    """
-    terminals = []
-
-    for word in page.get_text(
-        "words",
-        sort=True,
-    ):
-        x0, y0, x1, y1, value = word[:5]
-
-        cleaned_value = value.strip(
-            " ,;:()[]{}"
-        )
-
-        match = TERMINAL_PATTERN.fullmatch(
-            cleaned_value
-        )
-
-        if not match:
-            continue
-
-        rack = match.group(
-            "rack"
-        ).upper()
-
-        terminal_column = match.group(
-            "column"
-        ).upper()
-
-        terminal_number_text = match.group(
-            "terminal"
-        )
-
-        terminal_number_parts = parse_terminal_number(
-            terminal_number_text
-        )
-
-        terminals.append(
-            {
-                "terminal": cleaned_value.upper(),
-                "rack": rack,
-                "terminal_column": terminal_column,
-                "terminal_number": terminal_number_text,
-                "terminal_number_parts": (
-                    terminal_number_parts
-                ),
-                "x0": float(x0),
-                "y0": float(y0),
-                "x1": float(x1),
-                "y1": float(y1),
-                "x_center": round(
-                    (x0 + x1) / 2,
-                    2,
-                ),
-                "y_center": round(
-                    (y0 + y1) / 2,
-                    2,
-                ),
-            }
-        )
-
-    return remove_duplicate_terminals(
-        terminals
-    )
 
 def terminal_numbers_are_consecutive(
     first_terminal: dict,
     second_terminal: dict,
 ) -> bool:
     """
-    Check whether two terminal identifiers are consecutive.
+    Generic terminal consecutiveness check.
 
     Examples:
     87 and 88           -> True
     40.9 and 40.10      -> True
     40.10 and 40.11     -> True
     40.9 and 41.10      -> False
-    87 and 89           -> False
-
-    For hierarchical terminal numbers, all parts except the final part
-    must match. The final numeric part must increment by one.
     """
     first_parts = first_terminal[
         "terminal_number_parts"
@@ -667,36 +356,248 @@ def terminal_numbers_are_consecutive(
             == first_parts[0] + 1
         )
 
-    same_terminal_group = (
-        first_parts[:-1]
-        == second_parts[:-1]
-    )
-
-    consecutive_final_number = (
-        second_parts[-1]
-        == first_parts[-1] + 1
-    )
-
     return (
-        same_terminal_group
-        and consecutive_final_number
+        first_parts[:-1] == second_parts[:-1]
+        and second_parts[-1] == first_parts[-1] + 1
     )
+
+
+def remove_duplicate_terminals(
+    terminals: list[dict],
+) -> list[dict]:
+    """
+    Remove repeated text caused by duplicate PDF text layers.
+    """
+    unique_terminals = []
+
+    for terminal in terminals:
+        is_duplicate = False
+
+        for existing in unique_terminals:
+            same_terminal = (
+                terminal["terminal"]
+                == existing["terminal"]
+            )
+
+            same_position = (
+                abs(
+                    terminal["x_center"]
+                    - existing["x_center"]
+                ) <= 2
+                and abs(
+                    terminal["y_center"]
+                    - existing["y_center"]
+                ) <= 2
+            )
+
+            if same_terminal and same_position:
+                is_duplicate = True
+                break
+
+        if not is_duplicate:
+            unique_terminals.append(terminal)
+
+    return unique_terminals
+
+
+def extract_terminal_references(
+    page,
+) -> list[dict]:
+    """
+    Extract terminal references with geometric coordinates.
+    """
+    terminals = []
+
+    for word in page.get_text("words", sort=True):
+        x0, y0, x1, y1, value = word[:5]
+
+        cleaned_value = value.strip(" ,;:()[]{}")
+
+        match = TERMINAL_PATTERN.fullmatch(
+            cleaned_value
+        )
+
+        if not match:
+            continue
+
+        rack = match.group("rack").upper()
+        column = match.group("column").upper()
+        terminal_number = match.group("terminal")
+
+        # Canonical output format is always Vx.COLUMNnumber.
+        terminal_text = (
+            f"{rack}.{column}{terminal_number}"
+        )
+
+        terminals.append(
+            {
+                "terminal": terminal_text,
+                "rack": rack,
+                "terminal_column": column,
+                "terminal_number": terminal_number,
+                "terminal_number_parts": (
+                    parse_terminal_number(terminal_number)
+                ),
+                "x0": float(x0),
+                "y0": float(y0),
+                "x1": float(x1),
+                "y1": float(y1),
+                "x_center": round((x0 + x1) / 2, 2),
+                "y_center": round((y0 + y1) / 2, 2),
+            }
+        )
+
+    return remove_duplicate_terminals(terminals)
+
+
+def pair_terminals_by_rack(
+    terminals: list[dict],
+) -> list[dict]:
+    """
+    Pair consecutive terminals within the same rack and terminal column.
+
+    Examples:
+    V1.E19 + V1.E20 -> V1.E19 & V1.E20
+    V2.B41 + V2.B42 -> V2.B41 & V2.B42
+    """
+    terminals_by_block = defaultdict(list)
+
+    for terminal in terminals:
+        block_key = (
+            terminal["rack"],
+            terminal["terminal_column"],
+        )
+
+        terminals_by_block[block_key].append(terminal)
+
+    pairs = []
+
+    for block_terminals in terminals_by_block.values():
+        ordered = sorted(
+            block_terminals,
+            key=lambda terminal: (
+                terminal["terminal_number_parts"],
+                terminal["y_center"],
+            ),
+        )
+
+        index = 0
+
+        while index < len(ordered):
+            first = ordered[index]
+
+            if index + 1 >= len(ordered):
+                pairs.append(
+                    {
+                        "text": (
+                            f"{first['terminal']} "
+                            "(UNPAIRED - REVIEW)"
+                        ),
+                        "rack": first["rack"],
+                        "column": first["terminal_column"],
+                        "x_center": first["x_center"],
+                        "y_center": first["y_center"],
+                        "x_min": first["x0"],
+                        "x_max": first["x1"],
+                        "y_min": first["y0"],
+                        "y_max": first["y1"],
+                        "review_required": True,
+                    }
+                )
+
+                index += 1
+                continue
+
+            second = ordered[index + 1]
+
+            if terminal_numbers_are_consecutive(
+                first,
+                second,
+            ):
+                pairs.append(
+                    {
+                        "text": (
+                            f"{first['terminal']} & "
+                            f"{second['terminal']}"
+                        ),
+                        "rack": first["rack"],
+                        "column": first["terminal_column"],
+                        "x_center": round(
+                            (
+                                first["x_center"]
+                                + second["x_center"]
+                            ) / 2,
+                            2,
+                        ),
+                        "y_center": round(
+                            (
+                                first["y_center"]
+                                + second["y_center"]
+                            ) / 2,
+                            2,
+                        ),
+                        "x_min": min(
+                            first["x0"],
+                            second["x0"],
+                        ),
+                        "x_max": max(
+                            first["x1"],
+                            second["x1"],
+                        ),
+                        "y_min": min(
+                            first["y0"],
+                            second["y0"],
+                        ),
+                        "y_max": max(
+                            first["y1"],
+                            second["y1"],
+                        ),
+                        "review_required": False,
+                    }
+                )
+
+                index += 2
+
+            else:
+                pairs.append(
+                    {
+                        "text": (
+                            f"{first['terminal']} "
+                            "(UNPAIRED - REVIEW)"
+                        ),
+                        "rack": first["rack"],
+                        "column": first["terminal_column"],
+                        "x_center": first["x_center"],
+                        "y_center": first["y_center"],
+                        "x_min": first["x0"],
+                        "x_max": first["x1"],
+                        "y_min": first["y0"],
+                        "y_max": first["y1"],
+                        "review_required": True,
+                    }
+                )
+
+                index += 1
+
+    return pairs
+
+
+# ---------------------------------------------------------------------
+# Item extraction
+# ---------------------------------------------------------------------
 
 def extract_item_labels(
     page,
 ) -> list[dict]:
     """
-    Extract Item labels and their positions.
+    Extract Item labels and coordinates.
 
     Examples:
-    CT.BW1(UP) -> BW1(UP)
+    CT.GN1(UP)  -> GN1(UP)
     TC.BW1(REP) -> BW1(REP)
-    KP1(DN) -> KP1(DN)
+    KP1(DN)     -> KP1(DN)
     """
-    page_text = page.get_text(
-        "text",
-        sort=True,
-    )
+    page_text = page.get_text("text", sort=True)
 
     item_labels = []
     seen = set()
@@ -715,9 +616,7 @@ def extract_item_labels(
 
             source_text = match.group(0)
 
-            rectangles = page.search_for(
-                source_text,
-            )
+            rectangles = page.search_for(source_text)
 
             for rectangle in rectangles:
                 key = (
@@ -738,352 +637,207 @@ def extract_item_labels(
                             (
                                 rectangle.x0
                                 + rectangle.x1
-                            )
-                            / 2,
+                            ) / 2,
                             2,
                         ),
                         "y_center": round(
                             (
                                 rectangle.y0
                                 + rectangle.y1
-                            )
-                            / 2,
+                            ) / 2,
                             2,
                         ),
                     }
                 )
 
-        # Do not apply the looser fallback if the proper Item pattern
-        # has already found Item labels.
+        # Only use fallback if no properly prefixed Item labels exist.
         if item_labels:
             break
 
     return item_labels
 
 
-def pair_terminals_by_rack(
-    terminals: list[dict],
+# ---------------------------------------------------------------------
+# Dynamic rack topology
+# ---------------------------------------------------------------------
+
+def get_rack_lane_positions(
+    terminal_pairs: list[dict],
 ) -> list[dict]:
     """
-    Pair consecutive terminal numbers in the same cable rack and
-    terminal column.
+    Calculate the physical horizontal position of every rack.
 
-    Example:
-    V1.D87 + V1.D88 -> V1.D87 & V1.D88
+    This is geometry-based, not rack-number-based.
+
+    Example result:
+    [
+        {"rack": "V0", "x_center": 130.2, ...},
+        {"rack": "V1", "x_center": 706.5, ...},
+        {"rack": "V2", "x_center": 820.9, ...},
+    ]
     """
-    terminals_by_block = defaultdict(list)
+    pairs_by_rack = defaultdict(list)
 
-    for terminal in terminals:
-        block_key = (
-            terminal["rack"],
-            terminal["terminal_column"],
+    for pair in terminal_pairs:
+        pairs_by_rack[pair["rack"]].append(pair)
+
+    rack_lanes = []
+
+    for rack, rack_pairs in pairs_by_rack.items():
+        x_values = sorted(
+            pair["x_center"]
+            for pair in rack_pairs
         )
 
-        terminals_by_block[block_key].append(
-            terminal
+        middle_index = len(x_values) // 2
+
+        rack_lanes.append(
+            {
+                "rack": rack,
+                "x_center": x_values[middle_index],
+                "pair_count": len(rack_pairs),
+            }
         )
 
-    terminal_pairs = []
+    return sorted(
+        rack_lanes,
+        key=lambda rack_lane: rack_lane["x_center"],
+    )
 
-    for _, block_terminals in terminals_by_block.items():
-        ordered_terminals = sorted(
-            block_terminals,
-            key=lambda terminal: (
-                terminal["terminal_number_parts"],
-                terminal["y_center"],
-            ),
+
+def select_ct_loop_racks(
+    terminal_pairs: list[dict],
+    log_callback=None,
+) -> tuple[str, str] | tuple[None, None]:
+    """
+    Select CT-loop source and destination rack lanes dynamically.
+
+    Rule:
+    - identify all physical rack lanes from terminal X coordinates;
+    - use the two right-most rack lanes;
+    - left of those two = Step 6 source rack;
+    - right-most = Step 7 / Step 14 destination rack.
+
+    This avoids treating far-left equipment terminal references as
+    CT-loop interface terminals.
+
+    No rack IDs are fixed. V0, V1, V2 etc. are not hardcoded.
+    """
+    rack_lanes = get_rack_lane_positions(
+        terminal_pairs
+    )
+
+    if len(rack_lanes) < 2:
+        write_log(
+            log_callback,
+            "Cannot select CT-loop racks: fewer than "
+            "two rack lanes were found.",
+            "WARNING",
+        )
+        return None, None
+
+    source_rack = rack_lanes[-2]["rack"]
+    destination_rack = rack_lanes[-1]["rack"]
+
+    write_log(
+        log_callback,
+        "Dynamic rack-lane selection: "
+        f"lanes={rack_lanes}; "
+        f"source={source_rack}; "
+        f"destination={destination_rack}.",
+        "DEBUG",
+    )
+
+    return source_rack, destination_rack
+
+
+# ---------------------------------------------------------------------
+# Item lane grouping
+# ---------------------------------------------------------------------
+
+def find_nearest_item(
+    terminal_pair: dict,
+    item_labels: list[dict],
+) -> str:
+    """
+    Assign a terminal pair to its nearest Item drawing lane.
+
+    Vertical distance is strongly weighted because CT-loop drawing
+    lanes are generally horizontal.
+    """
+    if not item_labels:
+        return "REVIEW REQUIRED"
+
+    selected_item = "REVIEW REQUIRED"
+    selected_score = None
+
+    for item_label in item_labels:
+        horizontal_distance = abs(
+            terminal_pair["x_center"]
+            - item_label["x_center"]
         )
 
-        index = 0
+        vertical_distance = abs(
+            terminal_pair["y_center"]
+            - item_label["y_center"]
+        )
 
-        while index < len(ordered_terminals):
-            first_terminal = ordered_terminals[index]
+        score = (
+            vertical_distance * 5
+            + horizontal_distance
+        )
 
-            if index + 1 >= len(ordered_terminals):
-                terminal_pairs.append(
-                    {
-                        "text": (
-                            f"{first_terminal['terminal']} "
-                            "(UNPAIRED - REVIEW)"
-                        ),
-                        "rack": first_terminal["rack"],
-                        "column": first_terminal[
-                            "terminal_column"
-                        ],
-                        "x_center": first_terminal[
-                            "x_center"
-                        ],
-                        "y_center": first_terminal[
-                            "y_center"
-                        ],
-                        "review_required": True,
-                    }
-                )
+        if (
+            selected_score is None
+            or score < selected_score
+        ):
+            selected_score = score
+            selected_item = item_label["item"]
 
-                index += 1
-                continue
+    return selected_item
 
-            second_terminal = ordered_terminals[
-                index + 1
-            ]
 
-            consecutive_numbers = (
-                terminal_numbers_are_consecutive(
-                    first_terminal,
-                    second_terminal,
-                )
-            )
+def group_pairs_by_item(
+    terminal_pairs: list[dict],
+    item_labels: list[dict],
+) -> dict[str, list[dict]]:
+    """
+    Group terminal pairs to Item labels based on drawing geometry.
+    """
+    grouped = {
+        item_label["item"]: []
+        for item_label in item_labels
+    }
 
-            if consecutive_numbers:
-                terminal_pairs.append(
-                    {
-                        "text": (
-                            f"{first_terminal['terminal']} & "
-                            f"{second_terminal['terminal']}"
-                        ),
-                        "rack": first_terminal["rack"],
-                        "column": first_terminal[
-                            "terminal_column"
-                        ],
-                        "x_center": round(
-                            (
-                                first_terminal["x_center"]
-                                + second_terminal[
-                                    "x_center"
-                                ]
-                            )
-                            / 2,
-                            2,
-                        ),
-                        "y_center": round(
-                            (
-                                first_terminal["y_center"]
-                                + second_terminal[
-                                    "y_center"
-                                ]
-                            )
-                            / 2,
-                            2,
-                        ),
-                        "review_required": False,
-                    }
-                )
+    for pair in terminal_pairs:
+        item_name = find_nearest_item(
+            pair,
+            item_labels,
+        )
 
-                index += 2
-            else:
-                terminal_pairs.append(
-                    {
-                        "text": (
-                            f"{first_terminal['terminal']} "
-                            "(UNPAIRED - REVIEW)"
-                        ),
-                        "rack": first_terminal["rack"],
-                        "column": first_terminal[
-                            "terminal_column"
-                        ],
-                        "x_center": first_terminal[
-                            "x_center"
-                        ],
-                        "y_center": first_terminal[
-                            "y_center"
-                        ],
-                        "review_required": True,
-                    }
-                )
+        if item_name not in grouped:
+            grouped[item_name] = []
 
-                index += 1
+        grouped[item_name].append(pair)
 
-    return terminal_pairs
+    return grouped
 
 
 def format_pairs(
     pairs: list[dict],
 ) -> str:
     """
-    Format terminal pairs into an Excel-cell multiline value.
+    Format terminal pairs as multiline Excel-cell content.
     """
-    if not pairs:
-        return ""
-
     return "\n".join(
         f"- {pair['text']}"
         for pair in pairs
     )
 
 
-def find_nearest_item(
-    source_pair: dict,
-    item_labels: list[dict],
-) -> str:
-    """
-    Select the Item label closest to a Step 6 source pair.
-
-    Vertical position is weighted more strongly because link groups
-    normally follow a horizontal drawing lane.
-    """
-    if not item_labels:
-        return "REVIEW REQUIRED"
-
-    selected_item = "REVIEW REQUIRED"
-    shortest_distance = None
-
-    for item_label in item_labels:
-        horizontal_distance = abs(
-            source_pair["x_center"]
-            - item_label["x_center"]
-        )
-
-        vertical_distance = abs(
-            source_pair["y_center"]
-            - item_label["y_center"]
-        )
-
-        weighted_distance = (
-            horizontal_distance
-            + (vertical_distance * 3)
-        )
-
-        if (
-            shortest_distance is None
-            or weighted_distance < shortest_distance
-        ):
-            shortest_distance = weighted_distance
-            selected_item = item_label["item"]
-
-    return selected_item
-
-
-def make_balanced_capacities(
-    source_count: int,
-    destination_count: int,
-) -> list[int]:
-    """
-    Calculate the target number of destination pairs for each source pair.
-
-    Examples:
-    2 source pairs / 4 destination pairs -> [2, 2]
-    3 source pairs / 6 destination pairs -> [2, 2, 2]
-    2 source pairs / 5 destination pairs -> [3, 2]
-    """
-    if source_count <= 0:
-        return []
-
-    base_capacity = destination_count // source_count
-    remainder = destination_count % source_count
-
-    capacities = []
-
-    for index in range(source_count):
-        capacity = base_capacity
-
-        if index < remainder:
-            capacity += 1
-
-        capacities.append(capacity)
-
-    return capacities
-
-
-def assign_destination_pairs(
-    source_pairs: list[dict],
-    destination_pairs: list[dict],
-) -> dict[int, list[dict]]:
-    """
-    Assign every destination terminal pair to only one source pair.
-
-    Assignment is based on nearest vertical drawing lane, while using
-    balanced capacities. This is what prevents all destination pairs
-    being copied into every Item row.
-    """
-    assignments = {
-        source_index: []
-        for source_index in range(
-            len(source_pairs)
-        )
-    }
-
-    capacities = make_balanced_capacities(
-        len(source_pairs),
-        len(destination_pairs),
-    )
-
-    available_capacity = {
-        source_index: capacities[source_index]
-        for source_index in range(
-            len(source_pairs)
-        )
-    }
-
-    candidate_matches = []
-
-    for destination_index, destination_pair in enumerate(
-        destination_pairs
-    ):
-        for source_index, source_pair in enumerate(
-            source_pairs
-        ):
-            vertical_distance = abs(
-                destination_pair["y_center"]
-                - source_pair["y_center"]
-            )
-
-            candidate_matches.append(
-                (
-                    vertical_distance,
-                    destination_index,
-                    source_index,
-                )
-            )
-
-    candidate_matches.sort(
-        key=lambda value: value[0]
-    )
-
-    assigned_destinations = set()
-
-    for (
-        _,
-        destination_index,
-        source_index,
-    ) in candidate_matches:
-        if destination_index in assigned_destinations:
-            continue
-
-        if available_capacity[source_index] <= 0:
-            continue
-
-        assignments[source_index].append(
-            destination_pairs[destination_index]
-        )
-
-        assigned_destinations.add(
-            destination_index
-        )
-
-        available_capacity[source_index] -= 1
-
-    # Assign any remaining unusual/unbalanced destination pair to
-    # the closest source pair.
-    for destination_index, destination_pair in enumerate(
-        destination_pairs
-    ):
-        if destination_index in assigned_destinations:
-            continue
-
-        nearest_source_index = min(
-            range(len(source_pairs)),
-            key=lambda source_index: abs(
-                source_pairs[source_index]["y_center"]
-                - destination_pair["y_center"]
-            ),
-        )
-
-        assignments[nearest_source_index].append(
-            destination_pair
-        )
-
-    return assignments
-
+# ---------------------------------------------------------------------
+# CT loop row creation
+# ---------------------------------------------------------------------
 
 def create_ct_loop_rows(
     terminals: list[dict],
@@ -1091,17 +845,32 @@ def create_ct_loop_rows(
     log_callback=None,
 ) -> list[dict]:
     """
-    Create CT-loop checklist candidate rows.
+    Create one CT-loop checklist row per Item.
 
-    Generic logic:
-    - Lowest-numbered V rack is Step 6 source rack.
-    - Highest-numbered V rack is Step 7/14 destination rack.
-    - Every source terminal pair becomes one separate row.
-    - Destination pairs are allocated to one source row only.
-    - Step 14 uses the right-most Step 7 destination pair.
+    Dynamic workflow:
+    1. Pair terminals within each rack/column.
+    2. Identify rack lanes by their X coordinate.
+    3. Select the two right-most rack lanes.
+    4. Use left lane as Step 6 and right lane as Step 7.
+    5. Group pairs to Item labels by drawing lane proximity.
+    6. Create exactly one row per Item.
+    7. Step 14 is the right-most Step 7 pair.
 
-    No station name, Item name, rack ID, or terminal number is hardcoded.
+    No locations, Item names, rack names, terminal numbers,
+    or drawing numbers are hardcoded.
     """
+    if not terminals:
+        return []
+
+    if not item_labels:
+        write_log(
+            log_callback,
+            "No Item labels found. "
+            "Cannot create Item-based rows.",
+            "WARNING",
+        )
+        return []
+
     terminals_by_rack = defaultdict(list)
 
     for terminal in terminals:
@@ -1109,115 +878,117 @@ def create_ct_loop_rows(
             terminal["rack"]
         ].append(terminal)
 
-    rack_names = sorted(
-        terminals_by_rack.keys(),
-        key=rack_number,
-    )
+    all_pairs = []
 
-    if len(rack_names) < 2:
+    for rack_terminals in terminals_by_rack.values():
+        all_pairs.extend(
+            pair_terminals_by_rack(rack_terminals)
+        )
+
+    if not all_pairs:
         write_log(
             log_callback,
-            "Less than two cable racks found; "
-            "cannot create CT-loop row.",
+            "No terminal pairs were created.",
             "WARNING",
         )
         return []
 
-    source_rack = rack_names[0]
-    destination_rack = rack_names[-1]
-
-    source_pairs = pair_terminals_by_rack(
-        terminals_by_rack[source_rack]
+    source_rack, destination_rack = select_ct_loop_racks(
+        all_pairs,
+        log_callback=log_callback,
     )
 
-    destination_pairs = pair_terminals_by_rack(
-        terminals_by_rack[destination_rack]
-    )
-
-    if not source_pairs:
-        write_log(
-            log_callback,
-            f"No source pairs created in rack "
-            f"{source_rack}.",
-            "WARNING",
-        )
+    if source_rack is None or destination_rack is None:
         return []
 
-    if not destination_pairs:
-        write_log(
-            log_callback,
-            f"No destination pairs created in rack "
-            f"{destination_rack}.",
-            "WARNING",
-        )
-        return []
+    source_pairs = [
+        pair
+        for pair in all_pairs
+        if pair["rack"] == source_rack
+    ]
 
-    source_pairs = sorted(
+    destination_pairs = [
+        pair
+        for pair in all_pairs
+        if pair["rack"] == destination_rack
+    ]
+
+    source_by_item = group_pairs_by_item(
         source_pairs,
-        key=lambda pair: pair["y_center"],
+        item_labels,
     )
 
-    destination_assignments = assign_destination_pairs(
-        source_pairs,
+    destination_by_item = group_pairs_by_item(
         destination_pairs,
-    )
-
-    write_log(
-        log_callback,
-        "Lane allocation: "
-        f"source rack={source_rack}; "
-        f"destination rack={destination_rack}; "
-        f"source pairs={len(source_pairs)}; "
-        f"destination pairs={len(destination_pairs)}.",
-        "DEBUG",
+        item_labels,
     )
 
     rows = []
 
-    for source_index, source_pair in enumerate(
-        source_pairs
-    ):
-        linked_destination_pairs = (
-            destination_assignments[source_index]
+    for item_label in item_labels:
+        item_name = item_label["item"]
+
+        item_source_pairs = source_by_item.get(
+            item_name,
+            [],
         )
 
-        # Right-most destination terminal group first.
-        linked_destination_pairs = sorted(
-            linked_destination_pairs,
+        item_destination_pairs = destination_by_item.get(
+            item_name,
+            [],
+        )
+
+        # Step 6: source pair nearest to Item vertically.
+        item_source_pairs = sorted(
+            item_source_pairs,
+            key=lambda pair: (
+                abs(
+                    pair["y_center"]
+                    - item_label["y_center"]
+                ),
+                abs(
+                    pair["x_center"]
+                    - item_label["x_center"]
+                ),
+            ),
+        )
+
+        step_6_pairs = item_source_pairs[:1]
+
+        # Step 7: show right-most destination group first.
+        # This also ensures Step 14 is the first Step 7 pair.
+        step_7_pairs = sorted(
+            item_destination_pairs,
             key=lambda pair: pair["x_center"],
             reverse=True,
         )
 
-        item_name = find_nearest_item(
-            source_pair,
-            item_labels,
-        )
-
         step_14_pairs = []
 
-        if linked_destination_pairs:
-            step_14_pairs = [
-                linked_destination_pairs[0]
-            ]
+        if step_7_pairs:
+            step_14_pairs = [step_7_pairs[0]]
+
+        if not step_6_pairs and not step_7_pairs:
+            continue
 
         review_required = (
-            item_name == "REVIEW REQUIRED"
-            or source_pair["review_required"]
-            or not linked_destination_pairs
+            not step_6_pairs
+            or not step_7_pairs
             or any(
                 pair["review_required"]
-                for pair in linked_destination_pairs
+                for pair in (
+                    step_6_pairs
+                    + step_7_pairs
+                )
             )
         )
 
         write_log(
             log_callback,
-            f"Row candidate: Item={item_name}; "
-            f"Step 6={source_pair['text']}; "
-            f"Step 7="
-            f"{[pair['text'] for pair in linked_destination_pairs]}; "
-            f"Step 14="
-            f"{[pair['text'] for pair in step_14_pairs]}.",
+            f"CT-loop row: Item={item_name}; "
+            f"Step6={[pair['text'] for pair in step_6_pairs]}; "
+            f"Step7={[pair['text'] for pair in step_7_pairs]}; "
+            f"Step14={[pair['text'] for pair in step_14_pairs]}.",
             "DEBUG",
         )
 
@@ -1225,10 +996,10 @@ def create_ct_loop_rows(
             {
                 "Item": item_name,
                 "G1 - Step 6": format_pairs(
-                    [source_pair]
+                    step_6_pairs
                 ),
                 "G1 - Step 7": format_pairs(
-                    linked_destination_pairs
+                    step_7_pairs
                 ),
                 "G1 - Step 14": format_pairs(
                     step_14_pairs
@@ -1239,8 +1010,8 @@ def create_ct_loop_rows(
                     else "Draft"
                 ),
                 "Engineer Remarks": (
-                    "Candidate created by terminal-pair and "
-                    "drawing-lane grouping. Verify against "
+                    "Candidate created by dynamic rack-lane "
+                    "and Item-lane geometry. Verify against "
                     "controlled drawing."
                 ),
             }
@@ -1249,14 +1020,18 @@ def create_ct_loop_rows(
     return rows
 
 
+# ---------------------------------------------------------------------
+# Page qualification and debug image
+# ---------------------------------------------------------------------
+
 def page_is_relevant(
     page_text: str,
     log_callback=None,
 ) -> bool:
     """
-    Process pages that contain at least:
-    - one recognised cable-rack terminal reference; and
-    - one Item label.
+    A relevant page requires:
+    - at least one recognised terminal reference;
+    - at least one Item label.
     """
     terminal_matches = TERMINAL_PATTERN.findall(
         page_text
@@ -1264,9 +1039,7 @@ def page_is_relevant(
 
     item_matches = (
         ITEM_PATTERN.findall(page_text)
-        or FALLBACK_ITEM_PATTERN.findall(
-            page_text
-        )
+        or FALLBACK_ITEM_PATTERN.findall(page_text)
     )
 
     write_log(
@@ -1277,9 +1050,7 @@ def page_is_relevant(
         "DEBUG",
     )
 
-    return bool(terminal_matches) and bool(
-        item_matches
-    )
+    return bool(terminal_matches) and bool(item_matches)
 
 
 def create_debug_image(
@@ -1287,56 +1058,29 @@ def create_debug_image(
     terminals: list[dict],
 ) -> bytes:
     """
-    Create a diagnostic image.
-
-    Red boxes identify terminal references detected by the
-    CT Loop extraction process.
-
-    The page exists only in memory while the PDF is processed,
-    so drawing these boxes does not modify the uploaded PDF.
+    Return a PNG debug image with red boxes around detected terminals.
     """
-
-    red_colour = (
-        1.0,
-        0.0,
-        0.0,
-    )
-
-    box_padding = 2.5
+    red_colour = (1.0, 0.0, 0.0)
+    padding = 2.5
 
     shape = page.new_shape()
 
     for terminal in terminals:
-        x0 = max(
-            0,
-            terminal["x0"] - box_padding,
+        rectangle = fitz.Rect(
+            max(0, terminal["x0"] - padding),
+            max(0, terminal["y0"] - padding),
+            min(
+                page.rect.width,
+                terminal["x1"] + padding,
+            ),
+            min(
+                page.rect.height,
+                terminal["y1"] + padding,
+            ),
         )
 
-        y0 = max(
-            0,
-            terminal["y0"] - box_padding,
-        )
+        shape.draw_rect(rectangle)
 
-        x1 = min(
-            page.rect.width,
-            terminal["x1"] + box_padding,
-        )
-
-        y1 = min(
-            page.rect.height,
-            terminal["y1"] + box_padding,
-        )
-
-        terminal_box = fitz.Rect(
-            x0,
-            y0,
-            x1,
-            y1,
-        )
-
-        shape.draw_rect(terminal_box)
-
-    # Draw all boxes in a single commit for better performance.
     if terminals:
         shape.finish(
             color=red_colour,
@@ -1354,6 +1098,10 @@ def create_debug_image(
     return pixmap.tobytes("png")
 
 
+# ---------------------------------------------------------------------
+# Main extraction entry point
+# ---------------------------------------------------------------------
+
 def extract_pdf(
     pdf_path: str | Path,
     log_callback=None,
@@ -1363,8 +1111,10 @@ def extract_pdf(
     Extract CT-loop checklist candidate rows from a controlled PDF.
 
     Returns:
-        DataFrame,
-        {pdf_page_number: PNG_debug_image}
+        dataframe,
+        {
+            pdf_page_number: png_debug_image_bytes
+        }
     """
     start_time = time.perf_counter()
 
@@ -1382,7 +1132,7 @@ def extract_pdf(
         write_log(
             log_callback,
             f"PDF opened successfully. "
-            f"Total pages: {total_pages}",
+            f"Total pages: {total_pages}.",
         )
 
         for page_index, page in enumerate(document):
@@ -1413,25 +1163,23 @@ def extract_pdf(
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
-                        "no terminal/item pattern.",
+                        "no recognised terminal/item pattern.",
                         "DEBUG",
                     )
                     continue
 
-                (
-                    drawing_number,
-                    drawing_revision,
-                ) = get_title_block_metadata(
-                    page,
-                    log_callback=log_callback,
+                drawing_number, drawing_revision = (
+                    get_title_block_metadata(
+                        page,
+                        log_callback=log_callback,
+                    )
                 )
 
                 if not drawing_number:
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
-                        "Drawing No. not found in bottom "
-                        "title block.",
+                        "Drawing Number not found in title block.",
                         "WARNING",
                     )
                     continue
@@ -1448,13 +1196,9 @@ def extract_pdf(
                     drawing_number
                 )
 
-                terminals = extract_terminal_references(
-                    page
-                )
+                terminals = extract_terminal_references(page)
 
-                item_labels = extract_item_labels(
-                    page
-                )
+                item_labels = extract_item_labels(page)
 
                 write_log(
                     log_callback,
@@ -1471,7 +1215,7 @@ def extract_pdf(
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
-                        "no terminal references found.",
+                        "no terminal references extracted.",
                         "WARNING",
                     )
                     continue
@@ -1479,21 +1223,16 @@ def extract_pdf(
                 if not item_labels:
                     write_log(
                         log_callback,
-                        f"Page {page_number}: no Item labels "
-                        "found; Item will be REVIEW REQUIRED.",
+                        f"Page {page_number}: skipped; "
+                        "no Item labels extracted.",
                         "WARNING",
                     )
+                    continue
 
                 ct_loop_rows = create_ct_loop_rows(
                     terminals,
                     item_labels,
                     log_callback=log_callback,
-                )
-                write_log(
-                    log_callback,
-                    f"Page {page_number}: creating debug image with "
-                    f"{len(terminals)} red terminal-reference boxes.",
-                    "DEBUG",
                 )
 
                 debug_images[page_number] = (
@@ -1514,18 +1253,10 @@ def extract_pdf(
                                 drawing_number
                             ),
                             "Drawing Rev.": drawing_revision,
-                            "A11 CoV Work Procedure Appendix": (
-                                "G1"
-                            ),
-                            "G1 - Step 6": (
-                                row["G1 - Step 6"]
-                            ),
-                            "G1 - Step 7": (
-                                row["G1 - Step 7"]
-                            ),
-                            "G1 - Step 14": (
-                                row["G1 - Step 14"]
-                            ),
+                            "A11 CoV Work Procedure Appendix": "G1",
+                            "G1 - Step 6": row["G1 - Step 6"],
+                            "G1 - Step 7": row["G1 - Step 7"],
+                            "G1 - Step 14": row["G1 - Step 14"],
                             "PDF Page": page_number,
                             "Review Status": (
                                 row["Review Status"]
@@ -1544,27 +1275,25 @@ def extract_pdf(
                 write_log(
                     log_callback,
                     f"Page {page_number}: created "
-                    f"{len(ct_loop_rows)} candidate row(s) "
-                    f"in {page_elapsed:.2f}s.",
+                    f"{len(ct_loop_rows)} row(s) in "
+                    f"{page_elapsed:.2f}s.",
                 )
 
             except Exception as error:
                 write_log(
                     log_callback,
-                    f"Page {page_number}: ERROR: "
-                    f"{str(error)}",
+                    f"Page {page_number}: ERROR: {error}",
                     "ERROR",
                 )
 
     dataframe = pd.DataFrame(records)
 
     if not dataframe.empty:
-        # Sort by final numeric part of Drawing No. Check list.
-        # PDF Page is intentionally NOT used for sorting.
+        # Sort using the numeric sheet part after /R<number>/.
         dataframe["_drawing_sort"] = (
             dataframe["Drawing No. Check list"]
             .astype(str)
-            .str.extract(r"/(\d+)\s*$")[0]
+            .str.extract(r"/R\d+/(\d+)")[0]
         )
 
         dataframe["_drawing_sort"] = pd.to_numeric(
