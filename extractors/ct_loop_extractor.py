@@ -760,13 +760,10 @@ def find_nearest_item(
     item_labels: list[dict],
 ) -> str:
     """
-    Assign a terminal pair to the nearest Item label.
+    Assign a terminal pair to its nearest Item drawing lane.
 
-    Multiple occurrences of an Item label are allowed. For example,
-    BD1(UP) may appear in more than one place on a drawing.
-
-    The output remains one row per unique Item name later in
-    create_ct_loop_rows().
+    Vertical distance is strongly weighted because CT-loop drawing
+    lanes are generally horizontal.
     """
     if not item_labels:
         return "REVIEW REQUIRED"
@@ -774,7 +771,8 @@ def find_nearest_item(
     selected_item = "REVIEW REQUIRED"
     selected_score = None
 
-    for item_label in item_labels:
+    # New: exactly one row per Item name.
+    for item_name, item_label in unique_item_labels.items():
         horizontal_distance = abs(
             terminal_pair["x_center"]
             - item_label["x_center"]
@@ -785,8 +783,6 @@ def find_nearest_item(
             - item_label["y_center"]
         )
 
-        # Vertical alignment is more important because electrical
-        # drawing paths normally run horizontally.
         score = (
             vertical_distance * 5
             + horizontal_distance
@@ -807,12 +803,12 @@ def group_pairs_by_item(
     item_labels: list[dict],
 ) -> dict[str, list[dict]]:
     """
-    Group terminal pairs by their nearest Item name.
-
-    All physical occurrences of an Item label are used for matching,
-    but terminal pairs are grouped under the Item name only.
+    Group terminal pairs to Item labels based on drawing geometry.
     """
-    grouped = defaultdict(list)
+    grouped = {
+        item_label["item"]: []
+        for item_label in item_labels
+    }
 
     for pair in terminal_pairs:
         item_name = find_nearest_item(
@@ -820,106 +816,12 @@ def group_pairs_by_item(
             item_labels,
         )
 
+        if item_name not in grouped:
+            grouped[item_name] = []
+
         grouped[item_name].append(pair)
 
-    return dict(grouped)
-
-
-def group_item_labels_by_name(
-    item_labels: list[dict],
-) -> dict[str, list[dict]]:
-    """
-    Group repeated physical Item-label positions by Item name.
-
-    Example:
-
-    [
-        {"item": "BD1(UP)", "x_center": ..., "y_center": ...},
-        {"item": "BD1(UP)", "x_center": ..., "y_center": ...},
-        {"item": "BD1(REP)", "x_center": ..., "y_center": ...},
-    ]
-
-    becomes:
-
-    {
-        "BD1(UP)": [label1, label2],
-        "BD1(REP)": [label3],
-    }
-
-    This guarantees one output row per Item name while preserving
-    all Item positions for geometry matching.
-    """
-    labels_by_name = defaultdict(list)
-
-    for item_label in item_labels:
-        labels_by_name[
-            item_label["item"]
-        ].append(item_label)
-
-    return dict(labels_by_name)
-
-
-def remove_duplicate_pairs(
-    pairs: list[dict],
-) -> list[dict]:
-    """
-    Remove repeated terminal pairs caused by duplicate PDF text layers
-    or repeated Item-label matching.
-    """
-    unique_pairs = []
-    seen = set()
-
-    for pair in pairs:
-        pair_key = (
-            pair["text"],
-            pair["rack"],
-            pair["column"],
-        )
-
-        if pair_key in seen:
-            continue
-
-        seen.add(pair_key)
-        unique_pairs.append(pair)
-
-    return unique_pairs
-
-
-def distance_to_item_occurrences(
-    terminal_pair: dict,
-    item_occurrences: list[dict],
-) -> tuple[float, float]:
-    """
-    Return the best geometric distance from a terminal pair to any
-    visible occurrence of an Item label.
-
-    This is important where the same Item is printed in more than one
-    physical location on a controlled drawing.
-    """
-    distances = []
-
-    for item_label in item_occurrences:
-        vertical_distance = abs(
-            terminal_pair["y_center"]
-            - item_label["y_center"]
-        )
-
-        horizontal_distance = abs(
-            terminal_pair["x_center"]
-            - item_label["x_center"]
-        )
-
-        distances.append(
-            (
-                vertical_distance,
-                horizontal_distance,
-            )
-        )
-
-    if not distances:
-        return 999999.0, 999999.0
-
-    return min(distances)
+    return grouped
 
 
 def format_pairs(
@@ -946,15 +848,17 @@ def create_ct_loop_rows(
     """
     Create one CT-loop checklist row per unique Item name.
 
-    Dynamic workflow:
-    1. Pair consecutive terminals within each rack/column.
-    2. Select source and destination rack lanes dynamically.
-    3. Match terminal pairs to the nearest Item drawing lane.
-    4. Merge repeated physical Item labels into one Item record.
-    5. Create one output row per unique Item name.
+    Multiple occurrences of the same Item label on a drawing are common.
+    They are used for geometric terminal association, but only one output
+    row is created per Item name.
 
-    No location, Item name, rack ID, terminal number, or drawing
-    number is hardcoded.
+    Dynamic workflow:
+    1. Pair terminals in each rack/column.
+    2. Select the two right-most physical rack lanes.
+    3. Second-right-most lane = Step 6 source.
+    4. Right-most lane = Step 7 / Step 14 destination.
+    5. Associate terminal pairs with nearest Item labels.
+    6. Merge repeated Item labels into one output row per Item.
     """
     if not terminals:
         return []
@@ -1010,7 +914,7 @@ def create_ct_loop_rows(
         if pair["rack"] == destination_rack
     ]
 
-    # Match pairs using every physical occurrence of each Item label.
+    # Associate pairs using every detected occurrence of an Item label.
     source_by_item = group_pairs_by_item(
         source_pairs,
         item_labels,
@@ -1021,40 +925,88 @@ def create_ct_loop_rows(
         item_labels,
     )
 
-    # This is the key duplicate-item protection.
-    # One key/value group exists per unique Item name.
-    item_labels_by_name = group_item_labels_by_name(
-        item_labels
-    )
+    # -----------------------------------------------------------------
+    # Important:
+    # Create one representative label per Item name.
+    #
+    # Multiple PDF positions can contain BD1(UP), BD1(REP), etc.
+    # We retain one representative only for Item-lane sorting.
+    # Terminal-pair grouping above still used all occurrences.
+    # -----------------------------------------------------------------
+    unique_item_labels = {}
+
+    # New: exactly one row per Item name.
+    for item_name, item_label in unique_item_labels.items():
+        item_name = item_label["item"]
+
+        if item_name not in unique_item_labels:
+            unique_item_labels[item_name] = item_label
 
     rows = []
 
-    for item_name, item_occurrences in (
-        item_labels_by_name.items()
-    ):
-        item_source_pairs = remove_duplicate_pairs(
-            source_by_item.get(item_name, [])
+    for item_name, item_label in unique_item_labels.items():
+        item_source_pairs = source_by_item.get(
+            item_name,
+            [],
         )
 
-        item_destination_pairs = remove_duplicate_pairs(
-            destination_by_item.get(item_name, [])
+        item_destination_pairs = destination_by_item.get(
+            item_name,
+            [],
         )
 
-        # Step 6 = the source pair closest to any physical occurrence
-        # of this Item label.
+        # Remove duplicate terminal pairs if duplicate PDF text layers
+        # created exactly the same pair more than once.
+        unique_source_pairs = {}
+        unique_destination_pairs = {}
+
+        for pair in item_source_pairs:
+            pair_key = (
+                pair["text"],
+                pair["rack"],
+                pair["column"],
+            )
+
+            if pair_key not in unique_source_pairs:
+                unique_source_pairs[pair_key] = pair
+
+        for pair in item_destination_pairs:
+            pair_key = (
+                pair["text"],
+                pair["rack"],
+                pair["column"],
+            )
+
+            if pair_key not in unique_destination_pairs:
+                unique_destination_pairs[pair_key] = pair
+
+        item_source_pairs = list(
+            unique_source_pairs.values()
+        )
+
+        item_destination_pairs = list(
+            unique_destination_pairs.values()
+        )
+
+        # Step 6 contains the source pair closest to the Item lane.
         item_source_pairs = sorted(
             item_source_pairs,
-            key=lambda pair: distance_to_item_occurrences(
-                pair,
-                item_occurrences,
+            key=lambda pair: (
+                abs(
+                    pair["y_center"]
+                    - item_label["y_center"]
+                ),
+                abs(
+                    pair["x_center"]
+                    - item_label["x_center"]
+                ),
             ),
         )
 
         step_6_pairs = item_source_pairs[:1]
 
-        # Step 7 = destination pairs associated with the Item.
-        # Right-most destination pair is listed first and becomes
-        # Step 14.
+        # Step 7: right-most pair is first.
+        # Therefore, Step 14 is always the first Step 7 entry.
         step_7_pairs = sorted(
             item_destination_pairs,
             key=lambda pair: (
@@ -1068,7 +1020,7 @@ def create_ct_loop_rows(
         if step_7_pairs:
             step_14_pairs = [step_7_pairs[0]]
 
-        # Do not create blank rows.
+        # Do not create an empty Item row.
         if not step_6_pairs and not step_7_pairs:
             continue
 
