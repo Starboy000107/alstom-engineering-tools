@@ -13,8 +13,8 @@ import pandas as pd
 # Patterns
 # ---------------------------------------------------------------------
 
-# Examples supported:
-# 1252/W/NAC/ALT/R32/541
+# Examples:
+# 1252/W/OLY/ALT/R32/501
 # 1252/W/KOW/ALT/R32/531
 # 1252/W/KOW/ALT/R32/555/A1
 DRAWING_PATTERN = re.compile(
@@ -28,18 +28,13 @@ DRAWING_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Examples supported:
+# Examples:
 # V0.C89
 # V1.D87
 # V10.A123
-# V1:R40.9
+# V0.R40.7
 # V1:R40.10
 # V2:R23.11
-#
-# Named groups:
-# rack     = V1
-# column   = D / R / AB etc.
-# terminal = 87 / 40.9 / 40.10 etc.
 TERMINAL_PATTERN = re.compile(
     r"\b"
     r"(?P<rack>V\d+)"
@@ -55,9 +50,7 @@ TERMINAL_PATTERN = re.compile(
 # Examples:
 # CT.GN1(UP)
 # TC.BW1(REP)
-# BW1(UP)
-# KP1(DN)
-# KX1(BRANCH)
+# CT.BD1(UP)
 ITEM_PATTERN = re.compile(
     r"\b(?:CT|TC)\.?\s*"
     r"([A-Z]{1,}\d+)\s*"
@@ -65,7 +58,7 @@ ITEM_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Used only when no CT./TC. prefixed Item labels are found.
+# Used only if no prefixed CT./TC. Items are found.
 FALLBACK_ITEM_PATTERN = re.compile(
     r"\b([A-Z]{2,}\d+)\s*"
     r"\(\s*([A-Z0-9]+)\s*\)",
@@ -82,15 +75,12 @@ def write_log(
     message: str,
     level: str = "INFO",
 ):
-    """
-    Send a message to the supplied Streamlit/UI logger if available.
-    """
     if log_callback is not None:
         log_callback(message, level)
 
 
 # ---------------------------------------------------------------------
-# Drawing metadata
+# Title-block metadata
 # ---------------------------------------------------------------------
 
 def normalise_drawing_number(
@@ -103,14 +93,13 @@ def get_location_from_drawing_number(
     drawing_number: str,
 ) -> str:
     """
-    Dynamically derive location from drawing number.
-
     Example:
-    1252/W/KOW/ALT/R32/531
-             ^^^
-             Returns KOW
+        1252/W/OLY/ALT/R32/501
 
-    The location is the segment two positions before R<number>.
+    Returns:
+        OLY
+
+    Location is the segment two places before R<number>.
     """
     parts = drawing_number.upper().split("/")
 
@@ -126,13 +115,12 @@ def get_bottom_title_block_words(
     page,
     bottom_ratio: float = 0.18,
 ) -> list[dict]:
-    """
-    Return word records from the bottom title-block region only.
-    """
     page_height = float(page.rect.height)
     page_width = float(page.rect.width)
 
-    title_block_top = page_height * (1 - bottom_ratio)
+    title_block_top = page_height * (
+        1 - bottom_ratio
+    )
 
     words = []
 
@@ -151,8 +139,14 @@ def get_bottom_title_block_words(
                 "y0": float(y0),
                 "x1": float(x1),
                 "y1": float(y1),
-                "x_center": round((x0 + x1) / 2, 2),
-                "y_center": round((y0 + y1) / 2, 2),
+                "x_center": round(
+                    (x0 + x1) / 2,
+                    2,
+                ),
+                "y_center": round(
+                    (y0 + y1) / 2,
+                    2,
+                ),
                 "page_width": page_width,
                 "page_height": page_height,
             }
@@ -190,13 +184,6 @@ def get_drawing_number_from_title_block(
 def is_revision_value(
     value: str,
 ) -> bool:
-    """
-    Revision examples:
-    KA1
-    KA2
-    KB1
-    KX12
-    """
     return bool(
         re.fullmatch(
             r"[A-Z]{1,3}\d{1,3}",
@@ -208,14 +195,12 @@ def is_revision_value(
 def get_revision_from_title_block(
     title_block_words: list[dict],
 ) -> str:
-    """
-    Find REV / REVISION and use the nearest valid revision value
-    on the same title-block row.
-    """
     revision_labels = []
 
     for word in title_block_words:
-        value = word["value"].strip(" ,;:()[]{}").upper()
+        value = word["value"].strip(
+            " ,;:()[]{}"
+        ).upper()
 
         if re.fullmatch(r"REV\.?", value):
             revision_labels.append(word)
@@ -228,19 +213,26 @@ def get_revision_from_title_block(
 
     candidates = []
 
-    for label in revision_labels:
+    for revision_label in revision_labels:
         for word in title_block_words:
-            value = word["value"].strip(" ,;:()[]{}").upper()
+            value = word["value"].strip(
+                " ,;:()[]{}"
+            ).upper()
 
             if not is_revision_value(value):
                 continue
 
-            if word["x_center"] <= label["x1"]:
+            if word["x_center"] <= revision_label["x1"]:
                 continue
 
-            horizontal_distance = word["x0"] - label["x1"]
+            horizontal_distance = (
+                word["x0"]
+                - revision_label["x1"]
+            )
+
             vertical_distance = abs(
-                word["y_center"] - label["y_center"]
+                word["y_center"]
+                - revision_label["y_center"]
             )
 
             if vertical_distance > 20:
@@ -270,10 +262,9 @@ def get_title_block_metadata(
     page,
     log_callback=None,
 ) -> tuple[str, str]:
-    """
-    Extract controlled Drawing No. and Revision from page title block.
-    """
-    title_block_words = get_bottom_title_block_words(page)
+    title_block_words = get_bottom_title_block_words(
+        page
+    )
 
     drawing_number = get_drawing_number_from_title_block(
         title_block_words
@@ -288,7 +279,7 @@ def get_title_block_metadata(
         "Title-block extraction: "
         f"drawing={drawing_number or 'NOT FOUND'}; "
         f"revision={drawing_revision}; "
-        f"word_count={len(title_block_words)}.",
+        f"words={len(title_block_words)}.",
         "DEBUG",
     )
 
@@ -296,46 +287,35 @@ def get_title_block_metadata(
 
 
 # ---------------------------------------------------------------------
-# Terminal extraction and pairing
+# Terminal extraction
 # ---------------------------------------------------------------------
 
 def parse_terminal_number(
     terminal_number: str,
 ) -> tuple[int, ...]:
     """
-    Convert terminal identifiers to sortable tuple values.
-
     Examples:
-    87      -> (87,)
-    88      -> (88,)
-    40.9    -> (40, 9)
-    40.10   -> (40, 10)
-    12-3    -> (12, 3)
+        87      -> (87,)
+        40.9    -> (40, 9)
+        40.10   -> (40, 10)
+        12-3    -> (12, 3)
     """
-    parts = re.split(r"[.-]", str(terminal_number))
+    parts = re.split(
+        r"[.-]",
+        str(terminal_number),
+    )
 
-    parsed = []
-
-    for part in parts:
-        if part.isdigit():
-            parsed.append(int(part))
-
-    return tuple(parsed)
+    return tuple(
+        int(part)
+        for part in parts
+        if part.isdigit()
+    )
 
 
 def terminal_numbers_are_consecutive(
     first_terminal: dict,
     second_terminal: dict,
 ) -> bool:
-    """
-    Generic terminal consecutiveness check.
-
-    Examples:
-    87 and 88           -> True
-    40.9 and 40.10      -> True
-    40.10 and 40.11     -> True
-    40.9 and 41.10      -> False
-    """
     first_parts = first_terminal[
         "terminal_number_parts"
     ]
@@ -358,20 +338,18 @@ def terminal_numbers_are_consecutive(
 
     return (
         first_parts[:-1] == second_parts[:-1]
-        and second_parts[-1] == first_parts[-1] + 1
+        and second_parts[-1]
+        == first_parts[-1] + 1
     )
 
 
 def remove_duplicate_terminals(
     terminals: list[dict],
 ) -> list[dict]:
-    """
-    Remove repeated text caused by duplicate PDF text layers.
-    """
     unique_terminals = []
 
     for terminal in terminals:
-        is_duplicate = False
+        duplicate_found = False
 
         for existing in unique_terminals:
             same_terminal = (
@@ -391,10 +369,10 @@ def remove_duplicate_terminals(
             )
 
             if same_terminal and same_position:
-                is_duplicate = True
+                duplicate_found = True
                 break
 
-        if not is_duplicate:
+        if not duplicate_found:
             unique_terminals.append(terminal)
 
     return unique_terminals
@@ -403,15 +381,14 @@ def remove_duplicate_terminals(
 def extract_terminal_references(
     page,
 ) -> list[dict]:
-    """
-    Extract terminal references with geometric coordinates.
-    """
     terminals = []
 
     for word in page.get_text("words", sort=True):
         x0, y0, x1, y1, value = word[:5]
 
-        cleaned_value = value.strip(" ,;:()[]{}")
+        cleaned_value = value.strip(
+            " ,;:()[]{}"
+        )
 
         match = TERMINAL_PATTERN.fullmatch(
             cleaned_value
@@ -421,54 +398,194 @@ def extract_terminal_references(
             continue
 
         rack = match.group("rack").upper()
-        column = match.group("column").upper()
-        terminal_number = match.group("terminal")
+        terminal_column = match.group(
+            "column"
+        ).upper()
 
-        # Canonical output format is always Vx.COLUMNnumber.
-        terminal_text = (
-            f"{rack}.{column}{terminal_number}"
+        terminal_number = match.group(
+            "terminal"
         )
 
         terminals.append(
             {
-                "terminal": terminal_text,
+                "terminal": (
+                    f"{rack}."
+                    f"{terminal_column}"
+                    f"{terminal_number}"
+                ),
                 "rack": rack,
-                "terminal_column": column,
+                "terminal_column": terminal_column,
                 "terminal_number": terminal_number,
                 "terminal_number_parts": (
-                    parse_terminal_number(terminal_number)
+                    parse_terminal_number(
+                        terminal_number
+                    )
                 ),
                 "x0": float(x0),
                 "y0": float(y0),
                 "x1": float(x1),
                 "y1": float(y1),
-                "x_center": round((x0 + x1) / 2, 2),
-                "y_center": round((y0 + y1) / 2, 2),
+                "x_center": round(
+                    (x0 + x1) / 2,
+                    2,
+                ),
+                "y_center": round(
+                    (y0 + y1) / 2,
+                    2,
+                ),
+                "page_width": float(
+                    page.rect.width
+                ),
             }
         )
 
     return remove_duplicate_terminals(terminals)
 
 
-def pair_terminals_by_rack(
+# ---------------------------------------------------------------------
+# Physical terminal-lane detection
+# ---------------------------------------------------------------------
+
+def get_lane_tolerance(
+    terminals: list[dict],
+) -> float:
+    """
+    Calculate physical lane tolerance from PDF page width.
+
+    This is not tied to any location, rack ID, terminal number,
+    Item name, or drawing number.
+    """
+    if not terminals:
+        return 20.0
+
+    page_width = terminals[0].get(
+        "page_width",
+        1000.0,
+    )
+
+    return max(
+        12.0,
+        min(page_width * 0.02, 45.0),
+    )
+
+
+def build_physical_terminal_lanes(
     terminals: list[dict],
 ) -> list[dict]:
     """
-    Pair consecutive terminals within the same rack and terminal column.
+    Split terminals into physical left-to-right lanes.
 
-    Examples:
-    V1.E19 + V1.E20 -> V1.E19 & V1.E20
-    V2.B41 + V2.B42 -> V2.B41 & V2.B42
+    Example:
+
+        V1 left | V0 middle | V1 right
+
+    The two V1 areas become separate lanes because their physical
+    X positions are different.
+    """
+    if not terminals:
+        return []
+
+    tolerance = get_lane_tolerance(terminals)
+
+    ordered_terminals = sorted(
+        terminals,
+        key=lambda terminal: terminal["x_center"],
+    )
+
+    raw_lanes = []
+
+    for terminal in ordered_terminals:
+        if not raw_lanes:
+            raw_lanes.append(
+                {
+                    "x_values": [
+                        terminal["x_center"]
+                    ],
+                    "terminals": [terminal],
+                }
+            )
+            continue
+
+        current_lane = raw_lanes[-1]
+
+        lane_x_center = sum(
+            current_lane["x_values"]
+        ) / len(current_lane["x_values"])
+
+        if abs(
+            terminal["x_center"] - lane_x_center
+        ) <= tolerance:
+            current_lane["x_values"].append(
+                terminal["x_center"]
+            )
+
+            current_lane["terminals"].append(
+                terminal
+            )
+
+        else:
+            raw_lanes.append(
+                {
+                    "x_values": [
+                        terminal["x_center"]
+                    ],
+                    "terminals": [terminal],
+                }
+            )
+
+    lanes = []
+
+    for lane_id, raw_lane in enumerate(raw_lanes):
+        rack_counts = defaultdict(int)
+
+        for terminal in raw_lane["terminals"]:
+            rack_counts[terminal["rack"]] += 1
+
+        primary_rack = max(
+            rack_counts,
+            key=rack_counts.get,
+        )
+
+        lanes.append(
+            {
+                "lane_id": lane_id,
+                "x_center": round(
+                    sum(raw_lane["x_values"])
+                    / len(raw_lane["x_values"]),
+                    2,
+                ),
+                "terminals": raw_lane["terminals"],
+                "primary_rack": primary_rack,
+            }
+        )
+
+    return lanes
+
+
+# ---------------------------------------------------------------------
+# Terminal pairing inside physical lanes
+# ---------------------------------------------------------------------
+
+def pair_terminals_in_lane(
+    lane: dict,
+) -> list[dict]:
+    """
+    Pair consecutive terminals only within one physical lane.
+
+    This prevents the two V1 sides of a drawing from being merged
+    simply because they have the same rack name.
     """
     terminals_by_block = defaultdict(list)
 
-    for terminal in terminals:
-        block_key = (
+    for terminal in lane["terminals"]:
+        key = (
             terminal["rack"],
             terminal["terminal_column"],
         )
 
-        terminals_by_block[block_key].append(terminal)
+        terminals_by_block[key].append(
+            terminal
+        )
 
     pairs = []
 
@@ -494,13 +611,12 @@ def pair_terminals_by_rack(
                             "(UNPAIRED - REVIEW)"
                         ),
                         "rack": first["rack"],
-                        "column": first["terminal_column"],
+                        "column": first[
+                            "terminal_column"
+                        ],
+                        "lane_id": lane["lane_id"],
                         "x_center": first["x_center"],
                         "y_center": first["y_center"],
-                        "x_min": first["x0"],
-                        "x_max": first["x1"],
-                        "y_min": first["y0"],
-                        "y_max": first["y1"],
                         "review_required": True,
                     }
                 )
@@ -521,7 +637,10 @@ def pair_terminals_by_rack(
                             f"{second['terminal']}"
                         ),
                         "rack": first["rack"],
-                        "column": first["terminal_column"],
+                        "column": first[
+                            "terminal_column"
+                        ],
+                        "lane_id": lane["lane_id"],
                         "x_center": round(
                             (
                                 first["x_center"]
@@ -535,22 +654,6 @@ def pair_terminals_by_rack(
                                 + second["y_center"]
                             ) / 2,
                             2,
-                        ),
-                        "x_min": min(
-                            first["x0"],
-                            second["x0"],
-                        ),
-                        "x_max": max(
-                            first["x1"],
-                            second["x1"],
-                        ),
-                        "y_min": min(
-                            first["y0"],
-                            second["y0"],
-                        ),
-                        "y_max": max(
-                            first["y1"],
-                            second["y1"],
                         ),
                         "review_required": False,
                     }
@@ -566,13 +669,12 @@ def pair_terminals_by_rack(
                             "(UNPAIRED - REVIEW)"
                         ),
                         "rack": first["rack"],
-                        "column": first["terminal_column"],
+                        "column": first[
+                            "terminal_column"
+                        ],
+                        "lane_id": lane["lane_id"],
                         "x_center": first["x_center"],
                         "y_center": first["y_center"],
-                        "x_min": first["x0"],
-                        "x_max": first["x1"],
-                        "y_min": first["y0"],
-                        "y_max": first["y1"],
                         "review_required": True,
                     }
                 )
@@ -582,6 +684,16 @@ def pair_terminals_by_rack(
     return pairs
 
 
+def add_pairs_to_lanes(
+    lanes: list[dict],
+) -> list[dict]:
+    for lane in lanes:
+        lane["pairs"] = pair_terminals_in_lane(lane)
+        lane["pair_count"] = len(lane["pairs"])
+
+    return lanes
+
+
 # ---------------------------------------------------------------------
 # Item extraction
 # ---------------------------------------------------------------------
@@ -589,15 +701,10 @@ def pair_terminals_by_rack(
 def extract_item_labels(
     page,
 ) -> list[dict]:
-    """
-    Extract Item labels and coordinates.
-
-    Examples:
-    CT.GN1(UP)  -> GN1(UP)
-    TC.BW1(REP) -> BW1(REP)
-    KP1(DN)     -> KP1(DN)
-    """
-    page_text = page.get_text("text", sort=True)
+    page_text = page.get_text(
+        "text",
+        sort=True,
+    )
 
     item_labels = []
     seen = set()
@@ -650,7 +757,6 @@ def extract_item_labels(
                     }
                 )
 
-        # Only use fallback if no properly prefixed Item labels exist.
         if item_labels:
             break
 
@@ -658,113 +764,152 @@ def extract_item_labels(
 
 
 # ---------------------------------------------------------------------
-# Dynamic rack topology
+# Generic in-between topology:
+# same outer rack | different middle rack | same outer rack
 # ---------------------------------------------------------------------
 
-def get_rack_lane_positions(
-    terminal_pairs: list[dict],
-) -> list[dict]:
+def select_ct_loop_lanes(
+    lanes: list[dict],
+    log_callback=None,
+) -> tuple[dict | None, list[dict]]:
     """
-    Calculate the physical horizontal position of every rack.
+    Select a generic three-lane topology:
 
-    This is geometry-based, not rack-number-based.
+        outer rack A | middle rack B | outer rack A
 
-    Example result:
-    [
-        {"rack": "V0", "x_center": 130.2, ...},
-        {"rack": "V1", "x_center": 706.5, ...},
-        {"rack": "V2", "x_center": 820.9, ...},
-    ]
+    For example:
+
+        V1 | V0 | V1
+        V2 | V1 | V2
+        V5 | V3 | V5
+
+    Output:
+        source lane       = middle lane
+        destination lanes = [right outer lane, left outer lane]
+
+    The right lane is intentionally first. This gives the desired
+    Step 7 order and makes the first Step 7 pair Step 14.
     """
-    pairs_by_rack = defaultdict(list)
+    if len(lanes) < 3:
+        write_log(
+            log_callback,
+            "Cannot select CT-loop lanes: fewer than "
+            "three physical terminal lanes were detected.",
+            "WARNING",
+        )
+        return None, []
 
-    for pair in terminal_pairs:
-        pairs_by_rack[pair["rack"]].append(pair)
+    candidates = []
 
-    rack_lanes = []
+    for index in range(len(lanes) - 2):
+        left_lane = lanes[index]
+        middle_lane = lanes[index + 1]
+        right_lane = lanes[index + 2]
 
-    for rack, rack_pairs in pairs_by_rack.items():
-        x_values = sorted(
-            pair["x_center"]
-            for pair in rack_pairs
+        outer_racks_match = (
+            left_lane["primary_rack"]
+            == right_lane["primary_rack"]
         )
 
-        middle_index = len(x_values) // 2
+        middle_rack_differs = (
+            middle_lane["primary_rack"]
+            != left_lane["primary_rack"]
+        )
 
-        rack_lanes.append(
+        if not outer_racks_match:
+            continue
+
+        if not middle_rack_differs:
+            continue
+
+        if not middle_lane["pairs"]:
+            continue
+
+        if not left_lane["pairs"]:
+            continue
+
+        if not right_lane["pairs"]:
+            continue
+
+        left_to_middle = abs(
+            middle_lane["x_center"]
+            - left_lane["x_center"]
+        )
+
+        middle_to_right = abs(
+            right_lane["x_center"]
+            - middle_lane["x_center"]
+        )
+
+        candidates.append(
             {
-                "rack": rack,
-                "x_center": x_values[middle_index],
-                "pair_count": len(rack_pairs),
+                "left_lane": left_lane,
+                "source_lane": middle_lane,
+                "right_lane": right_lane,
+                "pair_count": (
+                    left_lane["pair_count"]
+                    + middle_lane["pair_count"]
+                    + right_lane["pair_count"]
+                ),
+                "geometry_balance": abs(
+                    left_to_middle
+                    - middle_to_right
+                ),
             }
         )
 
-    return sorted(
-        rack_lanes,
-        key=lambda rack_lane: rack_lane["x_center"],
-    )
-
-
-def select_ct_loop_racks(
-    terminal_pairs: list[dict],
-    log_callback=None,
-) -> tuple[str, str] | tuple[None, None]:
-    """
-    Select CT-loop source and destination rack lanes dynamically.
-
-    Rule:
-    - identify all physical rack lanes from terminal X coordinates;
-    - use the two right-most rack lanes;
-    - left of those two = Step 6 source rack;
-    - right-most = Step 7 / Step 14 destination rack.
-
-    This avoids treating far-left equipment terminal references as
-    CT-loop interface terminals.
-
-    No rack IDs are fixed. V0, V1, V2 etc. are not hardcoded.
-    """
-    rack_lanes = get_rack_lane_positions(
-        terminal_pairs
-    )
-
-    if len(rack_lanes) < 2:
+    if not candidates:
         write_log(
             log_callback,
-            "Cannot select CT-loop racks: fewer than "
-            "two rack lanes were found.",
+            "No valid in-between topology found. "
+            "Expected: same outer rack | different "
+            "middle rack | same outer rack.",
             "WARNING",
         )
-        return None, None
+        return None, []
 
-    source_rack = rack_lanes[-2]["rack"]
-    destination_rack = rack_lanes[-1]["rack"]
+    candidates.sort(
+        key=lambda candidate: (
+            -candidate["pair_count"],
+            candidate["geometry_balance"],
+            candidate["source_lane"]["x_center"],
+        )
+    )
+
+    selected = candidates[0]
+
+    left_lane = selected["left_lane"]
+    source_lane = selected["source_lane"]
+    right_lane = selected["right_lane"]
+
+    destination_lanes = [
+        right_lane,
+        left_lane,
+    ]
 
     write_log(
         log_callback,
-        "Dynamic rack-lane selection: "
-        f"lanes={rack_lanes}; "
-        f"source={source_rack}; "
-        f"destination={destination_rack}.",
+        "In-between topology selected: "
+        f"left=(lane={left_lane['lane_id']}, "
+        f"rack={left_lane['primary_rack']}); "
+        f"middle_step6=(lane={source_lane['lane_id']}, "
+        f"rack={source_lane['primary_rack']}); "
+        f"right_step7=(lane={right_lane['lane_id']}, "
+        f"rack={right_lane['primary_rack']}).",
         "DEBUG",
     )
 
-    return source_rack, destination_rack
+    return source_lane, destination_lanes
 
 
 # ---------------------------------------------------------------------
-# Item lane grouping
+# Item grouping
 # ---------------------------------------------------------------------
 
 def find_nearest_item(
-    terminal_pair: dict,
+    pair: dict,
     item_labels: list[dict],
 ) -> str:
-    """
-    Assign a terminal pair to its nearest Item drawing lane.
-
-    Vertical distance is strongly weighted because CT-loop drawing
-    lanes are generally horizontal.
-    """
     if not item_labels:
         return "REVIEW REQUIRED"
 
@@ -773,12 +918,12 @@ def find_nearest_item(
 
     for item_label in item_labels:
         horizontal_distance = abs(
-            terminal_pair["x_center"]
+            pair["x_center"]
             - item_label["x_center"]
         )
 
         vertical_distance = abs(
-            terminal_pair["y_center"]
+            pair["y_center"]
             - item_label["y_center"]
         )
 
@@ -798,37 +943,93 @@ def find_nearest_item(
 
 
 def group_pairs_by_item(
-    terminal_pairs: list[dict],
+    pairs: list[dict],
     item_labels: list[dict],
 ) -> dict[str, list[dict]]:
-    """
-    Group terminal pairs to Item labels based on drawing geometry.
-    """
-    grouped = {
-        item_label["item"]: []
-        for item_label in item_labels
-    }
+    grouped = defaultdict(list)
 
-    for pair in terminal_pairs:
+    for pair in pairs:
         item_name = find_nearest_item(
             pair,
             item_labels,
         )
 
-        if item_name not in grouped:
-            grouped[item_name] = []
-
         grouped[item_name].append(pair)
 
-    return grouped
+    return dict(grouped)
+
+
+def group_item_labels_by_name(
+    item_labels: list[dict],
+) -> dict[str, list[dict]]:
+    """
+    One final output row per Item name, even if the same Item label
+    appears more than once in the PDF.
+    """
+    grouped = defaultdict(list)
+
+    for item_label in item_labels:
+        grouped[item_label["item"]].append(
+            item_label
+        )
+
+    return dict(grouped)
+
+
+def remove_duplicate_pairs(
+    pairs: list[dict],
+) -> list[dict]:
+    unique_pairs = []
+    seen = set()
+
+    for pair in pairs:
+        key = (
+            pair["text"],
+            pair["rack"],
+            pair["column"],
+            pair["lane_id"],
+            round(pair["x_center"], 1),
+            round(pair["y_center"], 1),
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        unique_pairs.append(pair)
+
+    return unique_pairs
+
+
+def distance_to_item_occurrences(
+    pair: dict,
+    item_occurrences: list[dict],
+) -> tuple[float, float]:
+    distances = []
+
+    for item_label in item_occurrences:
+        distances.append(
+            (
+                abs(
+                    pair["y_center"]
+                    - item_label["y_center"]
+                ),
+                abs(
+                    pair["x_center"]
+                    - item_label["x_center"]
+                ),
+            )
+        )
+
+    if not distances:
+        return 999999.0, 999999.0
+
+    return min(distances)
 
 
 def format_pairs(
     pairs: list[dict],
 ) -> str:
-    """
-    Format terminal pairs as multiline Excel-cell content.
-    """
     return "\n".join(
         f"- {pair['text']}"
         for pair in pairs
@@ -836,7 +1037,7 @@ def format_pairs(
 
 
 # ---------------------------------------------------------------------
-# CT loop row creation
+# CT-loop row creation
 # ---------------------------------------------------------------------
 
 def create_ct_loop_rows(
@@ -845,73 +1046,64 @@ def create_ct_loop_rows(
     log_callback=None,
 ) -> list[dict]:
     """
-    Create one CT-loop checklist row per Item.
+    Create one CT-loop checklist row per unique Item.
 
-    Dynamic workflow:
-    1. Pair terminals within each rack/column.
-    2. Identify rack lanes by their X coordinate.
-    3. Select the two right-most rack lanes.
-    4. Use left lane as Step 6 and right lane as Step 7.
-    5. Group pairs to Item labels by drawing lane proximity.
-    6. Create exactly one row per Item.
-    7. Step 14 is the right-most Step 7 pair.
+    Generic topology:
 
-    No locations, Item names, rack names, terminal numbers,
-    or drawing numbers are hardcoded.
+        Outer lane A | Middle lane B | Outer lane A
+
+    Step 6:
+        Terminal pairs in middle lane B.
+
+    Step 7:
+        Terminal pairs in both outer lanes.
+        Right outer lane is listed before left outer lane.
+
+    Step 14:
+        First Step 7 pair, which is the right-most destination pair.
+
+    Example:
+
+        V1 left | V0 middle | V1 right
+
+    Step 6:
+        V0.A65 & V0.A66
+
+    Step 7:
+        V1.B5 & V1.B6
+        V1.A5 & V1.A6
+
+    Step 14:
+        V1.B5 & V1.B6
     """
-    if not terminals:
+    if not terminals or not item_labels:
         return []
 
-    if not item_labels:
-        write_log(
-            log_callback,
-            "No Item labels found. "
-            "Cannot create Item-based rows.",
-            "WARNING",
-        )
-        return []
-
-    terminals_by_rack = defaultdict(list)
-
-    for terminal in terminals:
-        terminals_by_rack[
-            terminal["rack"]
-        ].append(terminal)
-
-    all_pairs = []
-
-    for rack_terminals in terminals_by_rack.values():
-        all_pairs.extend(
-            pair_terminals_by_rack(rack_terminals)
-        )
-
-    if not all_pairs:
-        write_log(
-            log_callback,
-            "No terminal pairs were created.",
-            "WARNING",
-        )
-        return []
-
-    source_rack, destination_rack = select_ct_loop_racks(
-        all_pairs,
-        log_callback=log_callback,
+    lanes = build_physical_terminal_lanes(
+        terminals
     )
 
-    if source_rack is None or destination_rack is None:
+    lanes = add_pairs_to_lanes(lanes)
+
+    source_lane, destination_lanes = (
+        select_ct_loop_lanes(
+            lanes,
+            log_callback=log_callback,
+        )
+    )
+
+    if source_lane is None or not destination_lanes:
         return []
 
-    source_pairs = [
-        pair
-        for pair in all_pairs
-        if pair["rack"] == source_rack
-    ]
+    source_pairs = source_lane["pairs"]
 
-    destination_pairs = [
-        pair
-        for pair in all_pairs
-        if pair["rack"] == destination_rack
-    ]
+    destination_pairs = []
+
+    # Right destination lane is added first, then left destination lane.
+    for destination_lane in destination_lanes:
+        destination_pairs.extend(
+            destination_lane["pairs"]
+        )
 
     source_by_item = group_pairs_by_item(
         source_pairs,
@@ -923,73 +1115,67 @@ def create_ct_loop_rows(
         item_labels,
     )
 
+    item_labels_by_name = group_item_labels_by_name(
+        item_labels
+    )
+
     rows = []
 
-    for item_label in item_labels:
-        item_name = item_label["item"]
-
-        item_source_pairs = source_by_item.get(
-            item_name,
-            [],
+    for item_name, item_occurrences in (
+        item_labels_by_name.items()
+    ):
+        item_source_pairs = remove_duplicate_pairs(
+            source_by_item.get(item_name, [])
         )
 
-        item_destination_pairs = destination_by_item.get(
-            item_name,
-            [],
+        item_destination_pairs = remove_duplicate_pairs(
+            destination_by_item.get(item_name, [])
         )
 
-        # Step 6: source pair nearest to Item vertically.
+        # Step 6 = nearest source/middle pair to Item.
         item_source_pairs = sorted(
             item_source_pairs,
-            key=lambda pair: (
-                abs(
-                    pair["y_center"]
-                    - item_label["y_center"]
-                ),
-                abs(
-                    pair["x_center"]
-                    - item_label["x_center"]
-                ),
+            key=lambda pair: distance_to_item_occurrences(
+                pair,
+                item_occurrences,
             ),
         )
 
         step_6_pairs = item_source_pairs[:1]
 
-        # Step 7: show right-most destination group first.
-        # This also ensures Step 14 is the first Step 7 pair.
+        # Step 7:
+        # Right-most terminal pair first.
+        # If X positions are similar, use vertical position.
         step_7_pairs = sorted(
             item_destination_pairs,
-            key=lambda pair: pair["x_center"],
-            reverse=True,
+            key=lambda pair: (
+                -pair["x_center"],
+                pair["y_center"],
+            ),
         )
 
+        # Step 14 = right-most Step 7 pair.
         step_14_pairs = []
 
         if step_7_pairs:
             step_14_pairs = [step_7_pairs[0]]
 
-        if not step_6_pairs and not step_7_pairs:
+        # Do not create incomplete candidate rows.
+        if not step_6_pairs or not step_7_pairs:
+            write_log(
+                log_callback,
+                f"Item={item_name}: skipped; "
+                "Step 6 or Step 7 not found.",
+                "DEBUG",
+            )
             continue
 
-        review_required = (
-            not step_6_pairs
-            or not step_7_pairs
-            or any(
-                pair["review_required"]
-                for pair in (
-                    step_6_pairs
-                    + step_7_pairs
-                )
+        review_required = any(
+            pair["review_required"]
+            for pair in (
+                step_6_pairs
+                + step_7_pairs
             )
-        )
-
-        write_log(
-            log_callback,
-            f"CT-loop row: Item={item_name}; "
-            f"Step6={[pair['text'] for pair in step_6_pairs]}; "
-            f"Step7={[pair['text'] for pair in step_7_pairs]}; "
-            f"Step14={[pair['text'] for pair in step_14_pairs]}.",
-            "DEBUG",
         )
 
         rows.append(
@@ -1010,63 +1196,68 @@ def create_ct_loop_rows(
                     else "Draft"
                 ),
                 "Engineer Remarks": (
-                    "Candidate created by dynamic rack-lane "
-                    "and Item-lane geometry. Verify against "
-                    "controlled drawing."
+                    "Candidate created from dynamic "
+                    "outer-middle-outer physical lane "
+                    "topology. Verify controlled drawing."
                 ),
             }
+        )
+
+        write_log(
+            log_callback,
+            f"CT loop: Item={item_name}; "
+            f"Step6={[pair['text'] for pair in step_6_pairs]}; "
+            f"Step7={[pair['text'] for pair in step_7_pairs]}; "
+            f"Step14={[pair['text'] for pair in step_14_pairs]}.",
+            "DEBUG",
         )
 
     return rows
 
 
 # ---------------------------------------------------------------------
-# Page qualification and debug image
+# Page relevance and debug image
 # ---------------------------------------------------------------------
 
 def page_is_relevant(
     page_text: str,
     log_callback=None,
 ) -> bool:
-    """
-    A relevant page requires:
-    - at least one recognised terminal reference;
-    - at least one Item label.
-    """
     terminal_matches = TERMINAL_PATTERN.findall(
         page_text
     )
 
     item_matches = (
         ITEM_PATTERN.findall(page_text)
-        or FALLBACK_ITEM_PATTERN.findall(page_text)
+        or FALLBACK_ITEM_PATTERN.findall(
+            page_text
+        )
     )
 
     write_log(
         log_callback,
-        "Page relevance check: "
-        f"terminal_matches={terminal_matches[:10]}; "
-        f"item_matches={item_matches[:10]}.",
+        "Page relevance: "
+        f"terminals={terminal_matches[:10]}; "
+        f"items={item_matches[:10]}.",
         "DEBUG",
     )
 
-    return bool(terminal_matches) and bool(item_matches)
+    return bool(terminal_matches) and bool(
+        item_matches
+    )
 
 
 def create_debug_image(
     page,
     terminals: list[dict],
 ) -> bytes:
-    """
-    Return a PNG debug image with red boxes around detected terminals.
-    """
     red_colour = (1.0, 0.0, 0.0)
     padding = 2.5
 
     shape = page.new_shape()
 
     for terminal in terminals:
-        rectangle = fitz.Rect(
+        terminal_box = fitz.Rect(
             max(0, terminal["x0"] - padding),
             max(0, terminal["y0"] - padding),
             min(
@@ -1079,7 +1270,7 @@ def create_debug_image(
             ),
         )
 
-        shape.draw_rect(rectangle)
+        shape.draw_rect(terminal_box)
 
     if terminals:
         shape.finish(
@@ -1099,7 +1290,7 @@ def create_debug_image(
 
 
 # ---------------------------------------------------------------------
-# Main extraction entry point
+# Main extraction
 # ---------------------------------------------------------------------
 
 def extract_pdf(
@@ -1107,15 +1298,6 @@ def extract_pdf(
     log_callback=None,
     progress_callback=None,
 ) -> tuple[pd.DataFrame, dict[int, bytes]]:
-    """
-    Extract CT-loop checklist candidate rows from a controlled PDF.
-
-    Returns:
-        dataframe,
-        {
-            pdf_page_number: png_debug_image_bytes
-        }
-    """
     start_time = time.perf_counter()
 
     records = []
@@ -1144,12 +1326,6 @@ def extract_pdf(
                     (page_index / total_pages) * 100
                 )
 
-            write_log(
-                log_callback,
-                f"----- Processing page "
-                f"{page_number}/{total_pages} -----",
-            )
-
             try:
                 page_text = page.get_text(
                     "text",
@@ -1163,7 +1339,7 @@ def extract_pdf(
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
-                        "no recognised terminal/item pattern.",
+                        "no Item / terminal pattern.",
                         "DEBUG",
                     )
                     continue
@@ -1179,7 +1355,7 @@ def extract_pdf(
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
-                        "Drawing Number not found in title block.",
+                        "Drawing Number missing.",
                         "WARNING",
                     )
                     continue
@@ -1196,9 +1372,13 @@ def extract_pdf(
                     drawing_number
                 )
 
-                terminals = extract_terminal_references(page)
+                terminals = extract_terminal_references(
+                    page
+                )
 
-                item_labels = extract_item_labels(page)
+                item_labels = extract_item_labels(
+                    page
+                )
 
                 write_log(
                     log_callback,
@@ -1211,20 +1391,12 @@ def extract_pdf(
                     "DEBUG",
                 )
 
-                if not terminals:
+                if not terminals or not item_labels:
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
-                        "no terminal references extracted.",
-                        "WARNING",
-                    )
-                    continue
-
-                if not item_labels:
-                    write_log(
-                        log_callback,
-                        f"Page {page_number}: skipped; "
-                        "no Item labels extracted.",
+                        f"terminals={len(terminals)}, "
+                        f"items={len(item_labels)}.",
                         "WARNING",
                     )
                     continue
@@ -1253,10 +1425,18 @@ def extract_pdf(
                                 drawing_number
                             ),
                             "Drawing Rev.": drawing_revision,
-                            "A11 CoV Work Procedure Appendix": "G1",
-                            "G1 - Step 6": row["G1 - Step 6"],
-                            "G1 - Step 7": row["G1 - Step 7"],
-                            "G1 - Step 14": row["G1 - Step 14"],
+                            "A11 CoV Work Procedure Appendix": (
+                                "G1"
+                            ),
+                            "G1 - Step 6": (
+                                row["G1 - Step 6"]
+                            ),
+                            "G1 - Step 7": (
+                                row["G1 - Step 7"]
+                            ),
+                            "G1 - Step 14": (
+                                row["G1 - Step 14"]
+                            ),
                             "PDF Page": page_number,
                             "Review Status": (
                                 row["Review Status"]
@@ -1289,7 +1469,21 @@ def extract_pdf(
     dataframe = pd.DataFrame(records)
 
     if not dataframe.empty:
-        # Sort using the numeric sheet part after /R<number>/.
+        dataframe = dataframe.drop_duplicates(
+            subset=[
+                "Location",
+                "Item",
+                "Drawing No. Check list",
+                "Drawing Rev.",
+                "A11 CoV Work Procedure Appendix",
+                "G1 - Step 6",
+                "G1 - Step 7",
+                "G1 - Step 14",
+                "PDF Page",
+            ],
+            keep="first",
+        ).reset_index(drop=True)
+
         dataframe["_drawing_sort"] = (
             dataframe["Drawing No. Check list"]
             .astype(str)
