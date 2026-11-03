@@ -9,20 +9,42 @@ import fitz
 import pandas as pd
 
 
-# Controlled drawing number, for example:
+# Supports examples such as:
 # 1252/W/NAC/ALT/R32/541
+# 1252/W/KOW/ALT/R32/555/A1
+# 1252/W/ABC/ALT/R10/123/B2
 DRAWING_PATTERN = re.compile(
-    r"\b\d+/(?:[A-Z0-9-]+/)+R\d+/\d+\b",
+    r"\b"
+    r"\d+"
+    r"(?:/[A-Z0-9-]+)+"
+    r"/R\d+"
+    r"/\d+"
+    r"(?:/[A-Z0-9-]+)*"
+    r"\b",
     re.IGNORECASE,
 )
 
-# Terminal reference examples:
+# Supports examples such as:
 # V0.C89
 # V1.D87
-# V2.B83
 # V10.A123
+# V1:R40.9
+# V1:R40.10
+# V2:R23.11
+#
+# Groups:
+# rack     = V1
+# column   = R
+# terminal = 40.9
 TERMINAL_PATTERN = re.compile(
-    r"\b(V\d+)\.([A-Z]+)(\d+)\b",
+    r"\b"
+    r"(?P<rack>V\d+)"
+    r"\s*"
+    r"[:.]"
+    r"\s*"
+    r"(?P<column>[A-Z]+)"
+    r"(?P<terminal>\d+(?:[.-]\d+)*)"
+    r"\b",
     re.IGNORECASE,
 )
 
@@ -136,6 +158,35 @@ def rack_number(
 
     return int(match.group(1))
 
+def parse_terminal_number(
+    terminal_number: str,
+) -> tuple[int, ...]:
+    """
+    Convert a terminal identifier into a sortable numeric tuple.
+
+    Examples:
+    87     -> (87,)
+    40.9   -> (40, 9)
+    40.10  -> (40, 10)
+    12-3   -> (12, 3)
+
+    This allows different controlled-drawing terminal conventions
+    without hardcoding a specific terminal format.
+    """
+    parts = re.split(
+        r"[.-]",
+        str(terminal_number),
+    )
+
+    parsed_parts = []
+
+    for part in parts:
+        if part.isdigit():
+            parsed_parts.append(
+                int(part)
+            )
+
+    return tuple(parsed_parts)
 
 def get_bottom_title_block_words(
     page,
@@ -503,18 +554,18 @@ def extract_terminal_references(
     page,
 ) -> list[dict]:
     """
-    Extract terminal labels and PDF coordinates.
+    Extract terminal references and PDF coordinates.
 
-    Example terminal result:
+    Supports terminal formats such as:
 
-    {
-        "terminal": "V1.D87",
-        "rack": "V1",
-        "terminal_column": "D",
-        "terminal_number": 87,
-        "x_center": 123.4,
-        "y_center": 567.8,
-    }
+    V1.D87
+    V2.B83
+    V10.A123
+    V1:R40.9
+    V1:R40.10
+    V2:R23.11
+
+    No cable rack, location, terminal column, or number is hardcoded.
     """
     terminals = []
 
@@ -535,15 +586,30 @@ def extract_terminal_references(
         if not match:
             continue
 
+        rack = match.group(
+            "rack"
+        ).upper()
+
+        terminal_column = match.group(
+            "column"
+        ).upper()
+
+        terminal_number_text = match.group(
+            "terminal"
+        )
+
+        terminal_number_parts = parse_terminal_number(
+            terminal_number_text
+        )
+
         terminals.append(
             {
                 "terminal": cleaned_value.upper(),
-                "rack": match.group(1).upper(),
-                "terminal_column": (
-                    match.group(2).upper()
-                ),
-                "terminal_number": int(
-                    match.group(3)
+                "rack": rack,
+                "terminal_column": terminal_column,
+                "terminal_number": terminal_number_text,
+                "terminal_number_parts": (
+                    terminal_number_parts
                 ),
                 "x0": float(x0),
                 "y0": float(y0),
@@ -564,6 +630,57 @@ def extract_terminal_references(
         terminals
     )
 
+def terminal_numbers_are_consecutive(
+    first_terminal: dict,
+    second_terminal: dict,
+) -> bool:
+    """
+    Check whether two terminal identifiers are consecutive.
+
+    Examples:
+    87 and 88           -> True
+    40.9 and 40.10      -> True
+    40.10 and 40.11     -> True
+    40.9 and 41.10      -> False
+    87 and 89           -> False
+
+    For hierarchical terminal numbers, all parts except the final part
+    must match. The final numeric part must increment by one.
+    """
+    first_parts = first_terminal[
+        "terminal_number_parts"
+    ]
+
+    second_parts = second_terminal[
+        "terminal_number_parts"
+    ]
+
+    if not first_parts or not second_parts:
+        return False
+
+    if len(first_parts) != len(second_parts):
+        return False
+
+    if len(first_parts) == 1:
+        return (
+            second_parts[0]
+            == first_parts[0] + 1
+        )
+
+    same_terminal_group = (
+        first_parts[:-1]
+        == second_parts[:-1]
+    )
+
+    consecutive_final_number = (
+        second_parts[-1]
+        == first_parts[-1] + 1
+    )
+
+    return (
+        same_terminal_group
+        and consecutive_final_number
+    )
 
 def extract_item_labels(
     page,
@@ -672,7 +789,7 @@ def pair_terminals_by_rack(
         ordered_terminals = sorted(
             block_terminals,
             key=lambda terminal: (
-                terminal["terminal_number"],
+                terminal["terminal_number_parts"],
                 terminal["y_center"],
             ),
         )
@@ -711,8 +828,10 @@ def pair_terminals_by_rack(
             ]
 
             consecutive_numbers = (
-                second_terminal["terminal_number"]
-                == first_terminal["terminal_number"] + 1
+                terminal_numbers_are_consecutive(
+                    first_terminal,
+                    second_terminal,
+                )
             )
 
             if consecutive_numbers:
@@ -1132,22 +1251,35 @@ def create_ct_loop_rows(
 
 def page_is_relevant(
     page_text: str,
+    log_callback=None,
 ) -> bool:
     """
     Process pages that contain at least:
-    - one cable-rack terminal reference; and
+    - one recognised cable-rack terminal reference; and
     - one Item label.
     """
-    has_terminal = bool(
-        TERMINAL_PATTERN.search(page_text)
+    terminal_matches = TERMINAL_PATTERN.findall(
+        page_text
     )
 
-    has_item = bool(
-        ITEM_PATTERN.search(page_text)
-        or FALLBACK_ITEM_PATTERN.search(page_text)
+    item_matches = (
+        ITEM_PATTERN.findall(page_text)
+        or FALLBACK_ITEM_PATTERN.findall(
+            page_text
+        )
     )
 
-    return has_terminal and has_item
+    write_log(
+        log_callback,
+        "Page relevance check: "
+        f"terminal_matches={terminal_matches[:10]}; "
+        f"item_matches={item_matches[:10]}.",
+        "DEBUG",
+    )
+
+    return bool(terminal_matches) and bool(
+        item_matches
+    )
 
 
 def create_debug_image(
@@ -1274,7 +1406,10 @@ def extract_pdf(
                     sort=True,
                 )
 
-                if not page_is_relevant(page_text):
+                if not page_is_relevant(
+                    page_text,
+                    log_callback=log_callback,
+                ):
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
