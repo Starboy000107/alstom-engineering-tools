@@ -771,7 +771,8 @@ def find_nearest_item(
     selected_item = "REVIEW REQUIRED"
     selected_score = None
 
-    for item_label in item_labels:
+    # New: exactly one row per Item name.
+    for item_name, item_label in unique_item_labels.items():
         horizontal_distance = abs(
             terminal_pair["x_center"]
             - item_label["x_center"]
@@ -845,19 +846,19 @@ def create_ct_loop_rows(
     log_callback=None,
 ) -> list[dict]:
     """
-    Create one CT-loop checklist row per Item.
+    Create one CT-loop checklist row per unique Item name.
+
+    Multiple occurrences of the same Item label on a drawing are common.
+    They are used for geometric terminal association, but only one output
+    row is created per Item name.
 
     Dynamic workflow:
-    1. Pair terminals within each rack/column.
-    2. Identify rack lanes by their X coordinate.
-    3. Select the two right-most rack lanes.
-    4. Use left lane as Step 6 and right lane as Step 7.
-    5. Group pairs to Item labels by drawing lane proximity.
-    6. Create exactly one row per Item.
-    7. Step 14 is the right-most Step 7 pair.
-
-    No locations, Item names, rack names, terminal numbers,
-    or drawing numbers are hardcoded.
+    1. Pair terminals in each rack/column.
+    2. Select the two right-most physical rack lanes.
+    3. Second-right-most lane = Step 6 source.
+    4. Right-most lane = Step 7 / Step 14 destination.
+    5. Associate terminal pairs with nearest Item labels.
+    6. Merge repeated Item labels into one output row per Item.
     """
     if not terminals:
         return []
@@ -913,6 +914,7 @@ def create_ct_loop_rows(
         if pair["rack"] == destination_rack
     ]
 
+    # Associate pairs using every detected occurrence of an Item label.
     source_by_item = group_pairs_by_item(
         source_pairs,
         item_labels,
@@ -923,11 +925,26 @@ def create_ct_loop_rows(
         item_labels,
     )
 
-    rows = []
+    # -----------------------------------------------------------------
+    # Important:
+    # Create one representative label per Item name.
+    #
+    # Multiple PDF positions can contain BD1(UP), BD1(REP), etc.
+    # We retain one representative only for Item-lane sorting.
+    # Terminal-pair grouping above still used all occurrences.
+    # -----------------------------------------------------------------
+    unique_item_labels = {}
 
-    for item_label in item_labels:
+    # New: exactly one row per Item name.
+    for item_name, item_label in unique_item_labels.items():
         item_name = item_label["item"]
 
+        if item_name not in unique_item_labels:
+            unique_item_labels[item_name] = item_label
+
+    rows = []
+
+    for item_name, item_label in unique_item_labels.items():
         item_source_pairs = source_by_item.get(
             item_name,
             [],
@@ -938,7 +955,40 @@ def create_ct_loop_rows(
             [],
         )
 
-        # Step 6: source pair nearest to Item vertically.
+        # Remove duplicate terminal pairs if duplicate PDF text layers
+        # created exactly the same pair more than once.
+        unique_source_pairs = {}
+        unique_destination_pairs = {}
+
+        for pair in item_source_pairs:
+            pair_key = (
+                pair["text"],
+                pair["rack"],
+                pair["column"],
+            )
+
+            if pair_key not in unique_source_pairs:
+                unique_source_pairs[pair_key] = pair
+
+        for pair in item_destination_pairs:
+            pair_key = (
+                pair["text"],
+                pair["rack"],
+                pair["column"],
+            )
+
+            if pair_key not in unique_destination_pairs:
+                unique_destination_pairs[pair_key] = pair
+
+        item_source_pairs = list(
+            unique_source_pairs.values()
+        )
+
+        item_destination_pairs = list(
+            unique_destination_pairs.values()
+        )
+
+        # Step 6 contains the source pair closest to the Item lane.
         item_source_pairs = sorted(
             item_source_pairs,
             key=lambda pair: (
@@ -955,12 +1005,14 @@ def create_ct_loop_rows(
 
         step_6_pairs = item_source_pairs[:1]
 
-        # Step 7: show right-most destination group first.
-        # This also ensures Step 14 is the first Step 7 pair.
+        # Step 7: right-most pair is first.
+        # Therefore, Step 14 is always the first Step 7 entry.
         step_7_pairs = sorted(
             item_destination_pairs,
-            key=lambda pair: pair["x_center"],
-            reverse=True,
+            key=lambda pair: (
+                -pair["x_center"],
+                pair["y_center"],
+            ),
         )
 
         step_14_pairs = []
@@ -968,6 +1020,7 @@ def create_ct_loop_rows(
         if step_7_pairs:
             step_14_pairs = [step_7_pairs[0]]
 
+        # Do not create an empty Item row.
         if not step_6_pairs and not step_7_pairs:
             continue
 
@@ -1287,6 +1340,22 @@ def extract_pdf(
                 )
 
     dataframe = pd.DataFrame(records)
+
+    if not dataframe.empty:
+        dataframe = dataframe.drop_duplicates(
+            subset=[
+                "Location",
+                "Item",
+                "Drawing No. Check list",
+                "Drawing Rev.",
+                "A11 CoV Work Procedure Appendix",
+                "G1 - Step 6",
+                "G1 - Step 7",
+                "G1 - Step 14",
+                "PDF Page",
+            ],
+            keep="first",
+        ).reset_index(drop=True)
 
     if not dataframe.empty:
         # Sort using the numeric sheet part after /R<number>/.
