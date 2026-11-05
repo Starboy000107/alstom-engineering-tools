@@ -20,11 +20,6 @@ DRAWING_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Examples:
-# V0.C89
-# V1.D87
-# V0.R40.7
-# V1:R40.10
 TERMINAL_PATTERN = re.compile(
     r"\b"
     r"(?P<rack>V\d+)"
@@ -35,9 +30,6 @@ TERMINAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Examples:
-# CT.BU1(UP)
-# TC.BW1(REP)
 ITEM_PATTERN = re.compile(
     r"\b(?:CT|TC)\.?\s*"
     r"(?P<item>[A-Z]+\d+)"
@@ -47,10 +39,6 @@ ITEM_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Examples:
-# BU1(UP)
-# BW1(REP)
-# KX1(BRANCH)
 FALLBACK_ITEM_PATTERN = re.compile(
     r"\b"
     r"(?P<item>[A-Z]{2,}\d+)"
@@ -84,12 +72,12 @@ def write_log(
 # ---------------------------------------------------------------------
 
 def normalise_text(
-    value: str,
+    text: str,
 ) -> str:
     return re.sub(
         r"[^A-Z0-9]+",
         " ",
-        str(value).upper(),
+        str(text).upper(),
     ).strip()
 
 
@@ -116,62 +104,33 @@ def point_to_segment_distance(
     if length_squared == 0:
         return point_distance(point, start)
 
-    projection = (
+    t = (
         (point.x - start.x) * dx
         + (point.y - start.y) * dy
     ) / length_squared
 
-    projection = max(0.0, min(1.0, projection))
+    t = max(0.0, min(1.0, t))
 
-    closest = fitz.Point(
-        start.x + projection * dx,
-        start.y + projection * dy,
+    closest_point = fitz.Point(
+        start.x + t * dx,
+        start.y + t * dy,
     )
 
-    return point_distance(point, closest)
+    return point_distance(
+        point,
+        closest_point,
+    )
 
 
 def circular_hue_distance(
     first_hue: float,
     second_hue: float,
 ) -> float:
-    difference = abs(first_hue - second_hue)
+    distance = abs(first_hue - second_hue)
 
     return min(
-        difference,
-        360 - difference,
-    )
-
-
-def parse_terminal_number(
-    number: str,
-) -> tuple[int, ...]:
-    return tuple(
-        int(part)
-        for part in re.split(r"[.-]", number)
-        if part.isdigit()
-    )
-
-
-def terminal_numbers_are_consecutive(
-    first: dict,
-    second: dict,
-) -> bool:
-    first_parts = first["number_parts"]
-    second_parts = second["number_parts"]
-
-    if not first_parts or not second_parts:
-        return False
-
-    if len(first_parts) != len(second_parts):
-        return False
-
-    if len(first_parts) == 1:
-        return second_parts[0] == first_parts[0] + 1
-
-    return (
-        first_parts[:-1] == second_parts[:-1]
-        and second_parts[-1] == first_parts[-1] + 1
+        distance,
+        360 - distance,
     )
 
 
@@ -201,8 +160,44 @@ def rgb_to_hsv(
     )
 
 
+def parse_terminal_number(
+    value: str,
+) -> tuple[int, ...]:
+    return tuple(
+        int(part)
+        for part in re.split(r"[.-]", value)
+        if part.isdigit()
+    )
+
+
+def terminal_numbers_are_consecutive(
+    first_terminal: dict,
+    second_terminal: dict,
+) -> bool:
+    first_parts = first_terminal["number_parts"]
+    second_parts = second_terminal["number_parts"]
+
+    if not first_parts or not second_parts:
+        return False
+
+    if len(first_parts) != len(second_parts):
+        return False
+
+    if len(first_parts) == 1:
+        return (
+            second_parts[0]
+            == first_parts[0] + 1
+        )
+
+    return (
+        first_parts[:-1] == second_parts[:-1]
+        and second_parts[-1]
+        == first_parts[-1] + 1
+    )
+
+
 # ---------------------------------------------------------------------
-# Title block
+# Title block extraction
 # ---------------------------------------------------------------------
 
 def get_bottom_title_block_words(
@@ -210,12 +205,12 @@ def get_bottom_title_block_words(
     bottom_ratio: float = 0.35,
 ) -> list[dict]:
     """
-    Continuous Transmission is commonly written in the title block.
-
-    35% is intentionally used because title blocks may extend
-    significantly above the bottom edge of an A1 / A0 drawing.
+    Continuous Transmission is usually stated in the drawing title
+    block. The title block may occupy more than the lower 18%, so this
+    function checks the lower 35% of the sheet.
     """
-    title_top = page.rect.height * (1 - bottom_ratio)
+    page_height = float(page.rect.height)
+    title_top = page_height * (1 - bottom_ratio)
 
     words = []
 
@@ -254,8 +249,10 @@ def page_has_continuous_transmission(
     page_text: str,
 ) -> tuple[bool, str]:
     """
-    Finds CONTINUOUS TRANSMISSION either in the whole drawing
-    text or specifically in the bottom title block.
+    Check both all page text and title-block text.
+
+    This supports drawings where CONTINUOUS TRANSMISSION occurs only
+    in the bottom-right title block.
     """
     if CONTINUOUS_TRANSMISSION_PATTERN.search(
         normalise_text(page_text)
@@ -272,13 +269,13 @@ def page_has_continuous_transmission(
     return False, "NOT FOUND"
 
 
-def get_drawing_number_from_title_block(
+def get_drawing_number(
     page,
 ) -> str:
-    title_block_text = get_title_block_text(page)
-
     matches = list(
-        DRAWING_PATTERN.finditer(title_block_text)
+        DRAWING_PATTERN.finditer(
+            get_title_block_text(page)
+        )
     )
 
     if not matches:
@@ -287,25 +284,24 @@ def get_drawing_number_from_title_block(
     return matches[-1].group(0).upper()
 
 
-def get_revision_from_title_block(
+def get_revision(
     page,
 ) -> str:
     words = get_bottom_title_block_words(page)
 
-    revision_labels = []
+    revision_words = [
+        word
+        for word in words
+        if word["value"].upper()
+        in {"REV", "REV.", "REVISION"}
+    ]
 
-    for word in words:
-        value = word["value"].upper()
-
-        if value in {"REV", "REV.", "REVISION"}:
-            revision_labels.append(word)
-
-    if not revision_labels:
+    if not revision_words:
         return "REVIEW"
 
     candidates = []
 
-    for revision_label in revision_labels:
+    for revision_word in revision_words:
         for word in words:
             value = word["value"].upper()
 
@@ -315,12 +311,12 @@ def get_revision_from_title_block(
             ):
                 continue
 
-            if word["x_center"] <= revision_label["x1"]:
+            if word["x_center"] <= revision_word["x1"]:
                 continue
 
             vertical_distance = abs(
                 word["y_center"]
-                - revision_label["y_center"]
+                - revision_word["y_center"]
             )
 
             if vertical_distance > 20:
@@ -328,7 +324,7 @@ def get_revision_from_title_block(
 
             horizontal_distance = (
                 word["x0"]
-                - revision_label["x1"]
+                - revision_word["x1"]
             )
 
             candidates.append(
@@ -378,10 +374,10 @@ def extract_terminal_references(
     seen = set()
 
     for word in page.get_text("words", sort=True):
-        x0, y0, x1, y1, value = word[:5]
+        x0, y0, x1, y1, text = word[:5]
 
         match = TERMINAL_PATTERN.fullmatch(
-            value.strip(" ,;:()[]{}")
+            text.strip(" ,;:()[]{}")
         )
 
         if not match:
@@ -391,13 +387,15 @@ def extract_terminal_references(
         column = match.group("column").upper()
         number = match.group("number")
 
-        terminal_text = f"{rack}.{column}{number}"
+        terminal_name = (
+            f"{rack}.{column}{number}"
+        )
 
         x_center = round((x0 + x1) / 2, 2)
         y_center = round((y0 + y1) / 2, 2)
 
         key = (
-            terminal_text,
+            terminal_name,
             round(x_center, 1),
             round(y_center, 1),
         )
@@ -409,7 +407,7 @@ def extract_terminal_references(
 
         terminals.append(
             {
-                "terminal": terminal_text,
+                "terminal": terminal_name,
                 "rack": rack,
                 "column": column,
                 "number": number,
@@ -422,7 +420,10 @@ def extract_terminal_references(
                 "y1": float(y1),
                 "x_center": x_center,
                 "y_center": y_center,
-                "point": fitz.Point(x_center, y_center),
+                "point": fitz.Point(
+                    x_center,
+                    y_center,
+                ),
             }
         )
 
@@ -433,10 +434,10 @@ def extract_item_labels(
     page,
 ) -> list[dict]:
     """
-    Extract Item labels and physical positions.
+    Extract Item labels and their positions.
 
-    Prefixed CT./TC. labels are preferred. The fallback pattern
-    supports drawings where the Item prefix is not written.
+    CT./TC.-prefixed labels are preferred. Fallback labels are used
+    only when the prefixed labels do not exist on the page.
     """
     page_text = page.get_text(
         "text",
@@ -458,7 +459,9 @@ def extract_item_labels(
 
             source_text = match.group(0)
 
-            for rectangle in page.search_for(source_text):
+            rectangles = page.search_for(source_text)
+
+            for rectangle in rectangles:
                 key = (
                     item_name,
                     round(rectangle.x0, 1),
@@ -507,14 +510,20 @@ def extract_item_labels(
 
 
 # ---------------------------------------------------------------------
-# Coloured circuit detection
+# Coloured vector circuit extraction
 # ---------------------------------------------------------------------
 
 def drawing_item_to_segments(
     item,
 ) -> list[tuple[fitz.Point, fitz.Point]]:
     """
-    Convert normal PDF drawing primitives into line segments.
+    Convert standard PDF vector primitives into simple segments.
+
+    Supported PyMuPDF drawing item types:
+        l  line
+        re rectangle
+        qu quadrilateral
+        c  Bezier curve
     """
     if not item:
         return []
@@ -530,27 +539,12 @@ def drawing_item_to_segments(
         ]
 
     if item_type == "re" and len(item) >= 2:
-        rectangle = fitz.Rect(item[1])
+        rect = fitz.Rect(item[1])
 
-        top_left = fitz.Point(
-            rectangle.x0,
-            rectangle.y0,
-        )
-
-        top_right = fitz.Point(
-            rectangle.x1,
-            rectangle.y0,
-        )
-
-        bottom_right = fitz.Point(
-            rectangle.x1,
-            rectangle.y1,
-        )
-
-        bottom_left = fitz.Point(
-            rectangle.x0,
-            rectangle.y1,
-        )
+        top_left = fitz.Point(rect.x0, rect.y0)
+        top_right = fitz.Point(rect.x1, rect.y0)
+        bottom_right = fitz.Point(rect.x1, rect.y1)
+        bottom_left = fitz.Point(rect.x0, rect.y1)
 
         return [
             (top_left, top_right),
@@ -584,24 +578,20 @@ def get_coloured_vector_segments(
     page,
 ) -> list[dict]:
     """
-    Find saturated coloured vector geometry.
+    Get saturated coloured vector segments.
 
-    This is dynamic and does not use:
-    - red/cyan RGB values;
-    - cable rack identities;
-    - locations;
-    - Item names;
-    - terminal numbers.
+    No cable rack, location, Item name, drawing number, red RGB
+    value, or cyan RGB value is hardcoded.
     """
     segments = []
 
     for drawing in page.get_drawings():
-        possible_colours = [
+        colours = [
             drawing.get("color"),
             drawing.get("fill"),
         ]
 
-        for colour in possible_colours:
+        for colour in colours:
             hsv = rgb_to_hsv(colour)
 
             if hsv is None:
@@ -609,7 +599,7 @@ def get_coloured_vector_segments(
 
             hue, saturation, value = hsv
 
-            # Exclude monochrome drawing content.
+            # Ignore monochrome and nearly invisible paths.
             if saturation < 0.28:
                 continue
 
@@ -631,8 +621,6 @@ def get_coloured_vector_segments(
                             "end": end,
                             "length": length,
                             "hue": hue,
-                            "saturation": saturation,
-                            "value": value,
                         }
                     )
 
@@ -640,64 +628,66 @@ def get_coloured_vector_segments(
 
 
 def get_two_dominant_colour_bins(
-    coloured_segments: list[dict],
+    segments: list[dict],
     hue_bin_size: int = 15,
 ) -> tuple[int, int] | None:
     """
-    Finds the two largest saturated colour families.
+    Select two significant colour families dynamically.
 
-    They must be meaningfully different. This supports red/cyan,
-    red/blue-green, magenta/green etc. without fixed RGB values.
+    The two colours must be sufficiently different in hue. This
+    supports red/cyan, red/blue-green, green/magenta, etc.
     """
     weights = Counter()
 
-    for segment in coloured_segments:
+    for segment in segments:
         hue_bin = int(
             segment["hue"] // hue_bin_size
         )
 
         weights[hue_bin] += segment["length"]
 
-    groups = []
+    colour_groups = []
 
-    for hue_bin, weight in weights.items():
-        if weight < 25:
+    for hue_bin, total_length in weights.items():
+        if total_length < 20:
             continue
 
-        groups.append(
+        colour_groups.append(
             {
-                "hue_bin": hue_bin,
+                "bin": hue_bin,
                 "hue": (
                     hue_bin * hue_bin_size
                     + hue_bin_size / 2
                 ),
-                "weight": weight,
+                "weight": total_length,
             }
         )
 
-    if len(groups) < 2:
+    if len(colour_groups) < 2:
         return None
 
     candidates = []
 
-    for index, first in enumerate(groups):
-        for second in groups[index + 1:]:
+    for index, first_group in enumerate(
+        colour_groups
+    ):
+        for second_group in colour_groups[index + 1:]:
             hue_distance = circular_hue_distance(
-                first["hue"],
-                second["hue"],
+                first_group["hue"],
+                second_group["hue"],
             )
 
-            # Do not select two shades of the same colour.
+            # Avoid selecting two shades of the same plotted colour.
             if hue_distance < 40:
                 continue
 
             candidates.append(
                 {
-                    "first": first,
-                    "second": second,
+                    "first": first_group,
+                    "second": second_group,
                     "score": (
-                        first["weight"]
-                        + second["weight"]
+                        first_group["weight"]
+                        + second_group["weight"]
                         + hue_distance
                     ),
                 }
@@ -711,11 +701,11 @@ def get_two_dominant_colour_bins(
         reverse=True,
     )
 
-    best = candidates[0]
+    selected = candidates[0]
 
     return (
-        best["first"]["hue_bin"],
-        best["second"]["hue_bin"],
+        selected["first"]["bin"],
+        selected["second"]["bin"],
     )
 
 
@@ -728,31 +718,36 @@ def segment_matches_colour_bin(
         segment["hue"] // hue_bin_size
     )
 
+    # Accept nearby HSV bins to tolerate drawing shade variation.
     return abs(segment_bin - colour_bin) <= 1
 
 
-def get_selected_circuit_segments(
+def get_coloured_circuit_groups(
     page,
 ) -> dict[int, list[dict]]:
     """
-    Return the two dominant coloured circuit segment groups.
+    Return two detected coloured circuit groups.
+
+    Keys:
+        1
+        2
     """
     segments = get_coloured_vector_segments(page)
 
-    colour_bins = get_two_dominant_colour_bins(
+    selected_bins = get_two_dominant_colour_bins(
         segments
     )
 
-    if colour_bins is None:
+    if selected_bins is None:
         return {}
 
     groups = {}
 
-    for colour_id, colour_bin in enumerate(
-        colour_bins,
+    for group_id, colour_bin in enumerate(
+        selected_bins,
         start=1,
     ):
-        groups[colour_id] = [
+        groups[group_id] = [
             segment
             for segment in segments
             if segment_matches_colour_bin(
@@ -765,10 +760,10 @@ def get_selected_circuit_segments(
 
 
 # ---------------------------------------------------------------------
-# Terminal association with coloured circuits
+# Terminal-pair candidates
 # ---------------------------------------------------------------------
 
-def terminal_distance_to_segments(
+def terminal_distance_to_colour_group(
     terminal: dict,
     segments: list[dict],
 ) -> float:
@@ -785,247 +780,241 @@ def terminal_distance_to_segments(
     )
 
 
-def select_terminals_near_coloured_circuits(
+def classify_terminal_colour_group(
+    terminal: dict,
+    colour_groups: dict[int, list[dict]],
+) -> tuple[int, float] | None:
+    distances = []
+
+    for colour_group_id, segments in colour_groups.items():
+        distance = terminal_distance_to_colour_group(
+            terminal,
+            segments,
+        )
+
+        distances.append(
+            (
+                distance,
+                colour_group_id,
+            )
+        )
+
+    if not distances:
+        return None
+
+    distances.sort()
+
+    return (
+        distances[0][1],
+        distances[0][0],
+    )
+
+
+def build_terminal_pair_candidates(
     page,
     terminals: list[dict],
-    colour_segments: dict[int, list[dict]],
+    colour_groups: dict[int, list[dict]],
 ) -> list[dict]:
     """
-    Select terminals close to the actual coloured circuit lines.
+    Build terminal pairs using:
 
-    Unlike the earlier strict implementation, this does NOT require
-    terminal text to be located at a line endpoint. Terminal text is
-    usually positioned beside a terminal symbol, not on the endpoint.
+    - matching rack;
+    - matching column;
+    - consecutive terminal numbers;
+    - physical proximity;
+    - nearest coloured circuit group.
 
-    The selected terminal must be reasonably close to one of the two
-    coloured circuits. The threshold is proportional to page size.
+    Rack is only used to avoid invalid references being paired
+    together. It is NOT used to identify CT topology.
     """
-    if not terminals or not colour_segments:
-        return []
-
     page_scale = max(
         float(page.rect.width),
         float(page.rect.height),
     )
 
-    maximum_distance = max(
+    maximum_terminal_distance = max(
         22.0,
-        min(page_scale * 0.045, 72.0),
+        min(page_scale * 0.06, 100.0),
     )
 
-    selected = []
+    maximum_pair_distance = max(
+        25.0,
+        min(page_scale * 0.14, 175.0),
+    )
+
+    classified_terminals = []
 
     for terminal in terminals:
-        colour_distances = []
+        classification = classify_terminal_colour_group(
+            terminal,
+            colour_groups,
+        )
 
-        for colour_id, segments in colour_segments.items():
-            distance = terminal_distance_to_segments(
-                terminal,
-                segments,
-            )
-
-            colour_distances.append(
-                (
-                    distance,
-                    colour_id,
-                )
-            )
-
-        colour_distances.sort()
-
-        if not colour_distances:
+        if classification is None:
             continue
 
-        best_distance, best_colour = colour_distances[0]
+        colour_group_id, colour_distance = classification
 
-        if best_distance > maximum_distance:
+        if colour_distance > maximum_terminal_distance:
             continue
 
         terminal_copy = terminal.copy()
 
-        terminal_copy["colour_id"] = best_colour
-        terminal_copy["colour_distance"] = round(
-            best_distance,
-            2,
-        )
+        terminal_copy["colour_group_id"] = colour_group_id
+        terminal_copy["colour_distance"] = colour_distance
 
-        selected.append(terminal_copy)
-
-    return selected
-
-
-# ---------------------------------------------------------------------
-# Pair terminals
-# ---------------------------------------------------------------------
-
-def pair_terminals(
-    page,
-    selected_terminals: list[dict],
-) -> list[dict]:
-    """
-    Make terminal pairs from nearby consecutive references.
-
-    Rack and column are used only to ensure a valid electrical
-    terminal pair, such as:
-
-        V2.C3 & V2.C4
-
-    and prevent invalid cross-reference pairs such as:
-
-        V1.C3 & V2.C4
-
-    Cable rack topology is not used to find CT loops.
-    """
-    if not selected_terminals:
-        return []
-
-    page_scale = max(
-        float(page.rect.width),
-        float(page.rect.height),
-    )
-
-    maximum_pair_distance = max(
-        28.0,
-        min(page_scale * 0.14, 170.0),
-    )
+        classified_terminals.append(terminal_copy)
 
     candidates = []
 
-    for first_index, first in enumerate(
-        selected_terminals
+    for first_index, first_terminal in enumerate(
+        classified_terminals
     ):
-        for second in selected_terminals[
+        for second_terminal in classified_terminals[
             first_index + 1:
         ]:
-            if first["rack"] != second["rack"]:
-                continue
-
-            if first["column"] != second["column"]:
-                continue
-
-            if not terminal_numbers_are_consecutive(
-                first,
-                second,
+            if (
+                first_terminal["rack"]
+                != second_terminal["rack"]
             ):
                 continue
 
-            distance = point_distance(
-                first["point"],
-                second["point"],
+            if (
+                first_terminal["column"]
+                != second_terminal["column"]
+            ):
+                continue
+
+            if not terminal_numbers_are_consecutive(
+                first_terminal,
+                second_terminal,
+            ):
+                continue
+
+            pair_distance = point_distance(
+                first_terminal["point"],
+                second_terminal["point"],
             )
 
-            if distance > maximum_pair_distance:
+            if pair_distance > maximum_pair_distance:
                 continue
 
-            # Both labels should belong to the same detected coloured
-            # circuit group whenever possible.
-            if first["colour_id"] != second["colour_id"]:
+            if (
+                first_terminal["colour_group_id"]
+                != second_terminal["colour_group_id"]
+            ):
                 continue
+
+            pair_x = round(
+                (
+                    first_terminal["x_center"]
+                    + second_terminal["x_center"]
+                ) / 2,
+                2,
+            )
+
+            pair_y = round(
+                (
+                    first_terminal["y_center"]
+                    + second_terminal["y_center"]
+                ) / 2,
+                2,
+            )
 
             candidates.append(
                 {
-                    "first": first,
-                    "second": second,
-                    "distance": distance,
-                    "colour_id": first["colour_id"],
+                    "text": (
+                        f"{first_terminal['terminal']} & "
+                        f"{second_terminal['terminal']}"
+                    ),
+                    "rack": first_terminal["rack"],
+                    "column": first_terminal["column"],
+                    "colour_group_id": first_terminal[
+                        "colour_group_id"
+                    ],
+                    "colour_distance": (
+                        first_terminal["colour_distance"]
+                        + second_terminal["colour_distance"]
+                    ) / 2,
+                    "pair_distance": pair_distance,
+                    "x_center": pair_x,
+                    "y_center": pair_y,
+                    "point": fitz.Point(pair_x, pair_y),
+                    "terminals": [
+                        first_terminal,
+                        second_terminal,
+                    ],
                 }
             )
 
     candidates.sort(
-        key=lambda candidate: candidate["distance"]
+        key=lambda pair: (
+            pair["pair_distance"],
+            pair["colour_distance"],
+        )
     )
 
-    used = set()
-    pairs = []
+    used_terminals = set()
+    unique_pairs = []
 
-    for candidate in candidates:
-        first = candidate["first"]
-        second = candidate["second"]
+    for pair in candidates:
+        first_terminal = pair["terminals"][0]
+        second_terminal = pair["terminals"][1]
 
         first_key = (
-            first["terminal"],
-            round(first["x_center"], 1),
-            round(first["y_center"], 1),
+            first_terminal["terminal"],
+            round(first_terminal["x_center"], 1),
+            round(first_terminal["y_center"], 1),
         )
 
         second_key = (
-            second["terminal"],
-            round(second["x_center"], 1),
-            round(second["y_center"], 1),
+            second_terminal["terminal"],
+            round(second_terminal["x_center"], 1),
+            round(second_terminal["y_center"], 1),
         )
 
-        if first_key in used or second_key in used:
+        if (
+            first_key in used_terminals
+            or second_key in used_terminals
+        ):
             continue
 
-        used.add(first_key)
-        used.add(second_key)
+        used_terminals.add(first_key)
+        used_terminals.add(second_key)
 
-        pairs.append(
-            {
-                "text": (
-                    f"{first['terminal']} & "
-                    f"{second['terminal']}"
-                ),
-                "colour_id": candidate["colour_id"],
-                "x_center": round(
-                    (
-                        first["x_center"]
-                        + second["x_center"]
-                    ) / 2,
-                    2,
-                ),
-                "y_center": round(
-                    (
-                        first["y_center"]
-                        + second["y_center"]
-                    ) / 2,
-                    2,
-                ),
-                "point": fitz.Point(
-                    (
-                        first["x_center"]
-                        + second["x_center"]
-                    ) / 2,
-                    (
-                        first["y_center"]
-                        + second["y_center"]
-                    ) / 2,
-                ),
-                "terminals": [
-                    first,
-                    second,
-                ],
-            }
-        )
+        unique_pairs.append(pair)
 
-    return pairs
+    return unique_pairs
 
 
 # ---------------------------------------------------------------------
-# Item ownership
+# Item grouping and Step selection
 # ---------------------------------------------------------------------
 
 def pair_to_item_score(
     pair: dict,
-    item: dict,
+    item_label: dict,
 ) -> float:
     """
-    Dynamic geometry score.
+    Geometry-only score.
 
-    Vertical alignment is weighted more strongly because CT Items and
-    their terminal references are commonly in the same circuit row.
+    Vertical relationship is weighted higher because terminals and
+    device labels commonly occupy the same drawing circuit row.
     """
-    horizontal = abs(
+    horizontal_distance = abs(
         pair["x_center"]
-        - item["x_center"]
+        - item_label["x_center"]
     )
 
-    vertical = abs(
+    vertical_distance = abs(
         pair["y_center"]
-        - item["y_center"]
+        - item_label["y_center"]
     )
 
-    return vertical * 3.5 + horizontal
+    return (
+        vertical_distance * 4
+        + horizontal_distance
+    )
 
 
 def group_items_by_name(
@@ -1033,78 +1022,76 @@ def group_items_by_name(
 ) -> dict[str, list[dict]]:
     grouped = defaultdict(list)
 
-    for item in item_labels:
-        grouped[item["item"]].append(item)
+    for item_label in item_labels:
+        grouped[item_label["item"]].append(
+            item_label
+        )
 
     return dict(grouped)
 
 
-def assign_pairs_to_nearest_item(
+def get_item_pair_candidates(
+    item_occurrences: list[dict],
     pairs: list[dict],
-    item_labels: list[dict],
-) -> dict[str, list[dict]]:
+) -> list[dict]:
     """
-    Every pair belongs to one Item only.
+    Return all pairs ordered by relationship to a specific Item.
 
-    This avoids reusing one terminal pair in multiple output rows.
+    Pairs are not permanently assigned to only one Item because an
+    Item can have two separate branches on a crowded drawing.
     """
-    grouped = defaultdict(list)
+    candidates = []
 
     for pair in pairs:
-        if not item_labels:
-            continue
-
-        best_item = min(
-            item_labels,
-            key=lambda item: pair_to_item_score(
+        distance = min(
+            pair_to_item_score(
                 pair,
-                item,
-            ),
+                item_occurrence,
+            )
+            for item_occurrence in item_occurrences
         )
 
         pair_copy = pair.copy()
+        pair_copy["item_distance"] = distance
 
-        pair_copy["item_score"] = pair_to_item_score(
-            pair,
-            best_item,
+        candidates.append(pair_copy)
+
+    candidates.sort(
+        key=lambda pair: (
+            pair["item_distance"],
+            pair["colour_distance"],
+            pair["pair_distance"],
         )
-
-        grouped[best_item["item"]].append(pair_copy)
-
-    return dict(grouped)
-
-
-def format_pairs(
-    pairs: list[dict],
-) -> str:
-    return "\n".join(
-        f"- {pair['text']}"
-        for pair in pairs
     )
 
+    return candidates
 
-# ---------------------------------------------------------------------
-# Step selection
-# ---------------------------------------------------------------------
 
 def choose_step_pairs(
     item_pairs: list[dict],
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """
-    Required G1 layout:
+    Produce required output shape:
 
         Step 6:
-            one terminal pair
+            exactly one terminal pair
 
         Step 7:
             exactly two terminal pairs
 
         Step 14:
-            the first Step 7 pair
+            first Step 7 pair
 
-    The code uses detected coloured circuit groups to make Step 6
-    and Step 7 come from different coloured circuit groups where
-    possible. No rack topology is used.
+    Preferred selection:
+        - Step 7 comes from one coloured circuit group containing
+          at least two terminal pairs.
+        - Step 6 comes from the other coloured circuit group.
+
+    Fallback:
+        - If PDF colour grouping is fragmented, the best three
+          geometrically associated pairs are used.
+
+    No cable-rack topology is used.
     """
     if len(item_pairs) < 3:
         return [], [], []
@@ -1112,81 +1099,88 @@ def choose_step_pairs(
     pairs_by_colour = defaultdict(list)
 
     for pair in item_pairs:
-        pairs_by_colour[pair["colour_id"]].append(pair)
+        pairs_by_colour[
+            pair["colour_group_id"]
+        ].append(pair)
 
     for pairs in pairs_by_colour.values():
         pairs.sort(
             key=lambda pair: (
-                pair["item_score"],
+                pair["item_distance"],
+                pair["colour_distance"],
                 -pair["x_center"],
                 pair["y_center"],
             )
         )
 
-    sorted_groups = sorted(
+    colour_groups = sorted(
         pairs_by_colour.items(),
         key=lambda group: (
             len(group[1]),
-            -group[1][0]["item_score"],
+            -group[1][0]["item_distance"],
         ),
         reverse=True,
     )
 
-    # Preferred behaviour:
-    # - colour group with at least two pairs -> Step 7
-    # - another colour group -> Step 6
-    for step_7_colour, step_7_candidates in sorted_groups:
+    # Preferred: Step 7 has two pairs from one colour group.
+    for step_7_colour, step_7_candidates in colour_groups:
         if len(step_7_candidates) < 2:
             continue
 
         step_6_candidates = []
 
-        for colour_id, candidates in sorted_groups:
+        for colour_id, candidates in colour_groups:
             if colour_id == step_7_colour:
                 continue
 
             step_6_candidates.extend(candidates)
 
-        if step_6_candidates:
-            step_6_candidates.sort(
-                key=lambda pair: pair["item_score"]
+        if not step_6_candidates:
+            continue
+
+        step_6_candidates.sort(
+            key=lambda pair: (
+                pair["item_distance"],
+                pair["colour_distance"],
             )
+        )
 
-            step_6_pairs = step_6_candidates[:1]
+        step_6_pairs = step_6_candidates[:1]
 
-            step_7_pairs = sorted(
-                step_7_candidates[:2],
-                key=lambda pair: (
-                    -pair["x_center"],
-                    pair["y_center"],
-                ),
-            )
+        step_7_pairs = sorted(
+            step_7_candidates[:2],
+            key=lambda pair: (
+                -pair["x_center"],
+                pair["y_center"],
+            ),
+        )
 
-            return (
-                step_6_pairs,
-                step_7_pairs,
-                step_7_pairs[:1],
-            )
+        step_14_pairs = step_7_pairs[:1]
 
-    # Fallback:
-    # If colours are fragmented in the PDF, retain the three closest
-    # valid circuit pairs rather than returning no rows.
-    ordered = sorted(
+        return (
+            step_6_pairs,
+            step_7_pairs,
+            step_14_pairs,
+        )
+
+    # Fallback for fragmented colour vectors:
+    ordered_pairs = sorted(
         item_pairs,
         key=lambda pair: (
-            pair["item_score"],
+            pair["item_distance"],
+            pair["colour_distance"],
             -pair["x_center"],
             pair["y_center"],
-        ),
+        )
     )
 
-    if len(ordered) < 3:
+    if len(ordered_pairs) < 3:
         return [], [], []
 
-    step_6_pairs = ordered[:1]
+    step_6_pairs = ordered_pairs[:1]
 
     step_7_pairs = sorted(
-        ordered[1:3],
+        ordered_pairs[1:3],
         key=lambda pair: (
             -pair["x_center"],
             pair["y_center"],
@@ -1200,149 +1194,13 @@ def choose_step_pairs(
     )
 
 
-# ---------------------------------------------------------------------
-# CT-loop extraction
-# ---------------------------------------------------------------------
-
-def create_ct_loop_rows(
-    page,
-    terminals: list[dict],
-    item_labels: list[dict],
-    log_callback=None,
-) -> tuple[list[dict], list[dict]]:
-    """
-    Extraction sequence:
-
-        1. Page identified as Continuous Transmission.
-        2. Find two significant coloured circuit families.
-        3. Find terminal labels near coloured circuit linework.
-        4. Build consecutive terminal pairs.
-        5. Assign each pair to its nearest Item.
-        6. Create G1 rows:
-           - one Step 6 pair;
-           - exactly two Step 7 pairs;
-           - first Step 7 pair for Step 14.
-
-    Cable-rack topology is not used.
-    """
-    colour_segments = get_selected_circuit_segments(
-        page
+def format_pairs(
+    pairs: list[dict],
+) -> str:
+    return "\n".join(
+        f"- {pair['text']}"
+        for pair in pairs
     )
-
-    if len(colour_segments) < 2:
-        write_log(
-            log_callback,
-            "CT loop skipped: fewer than two significant "
-            "coloured circuit groups were detected.",
-            "WARNING",
-        )
-        return [], []
-
-    selected_terminals = (
-        select_terminals_near_coloured_circuits(
-            page,
-            terminals,
-            colour_segments,
-        )
-    )
-
-    write_log(
-        log_callback,
-        "CT circuit selection: "
-        f"all_terminals={len(terminals)}; "
-        f"selected_terminals={len(selected_terminals)}; "
-        f"colour_1_segments="
-        f"{len(colour_segments.get(1, []))}; "
-        f"colour_2_segments="
-        f"{len(colour_segments.get(2, []))}.",
-        "DEBUG",
-    )
-
-    pairs = pair_terminals(
-        page,
-        selected_terminals,
-    )
-
-    write_log(
-        log_callback,
-        f"CT terminal pairing: pairs={len(pairs)}.",
-        "DEBUG",
-    )
-
-    if not pairs:
-        return [], []
-
-    pairs_by_item = assign_pairs_to_nearest_item(
-        pairs,
-        item_labels,
-    )
-
-    item_occurrences = group_items_by_name(item_labels)
-
-    rows = []
-    output_terminals = []
-
-    for item_name in sorted(item_occurrences):
-        item_pairs = pairs_by_item.get(item_name, [])
-
-        (
-            step_6_pairs,
-            step_7_pairs,
-            step_14_pairs,
-        ) = choose_step_pairs(item_pairs)
-
-        if (
-            len(step_6_pairs) != 1
-            or len(step_7_pairs) != 2
-        ):
-            write_log(
-                log_callback,
-                f"Item={item_name}: skipped; "
-                f"available_pairs={len(item_pairs)}; "
-                "requires 1 Step 6 pair and "
-                "2 Step 7 pairs.",
-                "DEBUG",
-            )
-            continue
-
-        for pair in step_6_pairs + step_7_pairs:
-            output_terminals.extend(
-                pair["terminals"]
-            )
-
-        rows.append(
-            {
-                "Item": item_name,
-                "G1 - Step 6": format_pairs(
-                    step_6_pairs
-                ),
-                "G1 - Step 7": format_pairs(
-                    step_7_pairs
-                ),
-                "G1 - Step 14": format_pairs(
-                    step_14_pairs
-                ),
-                "Review Status": "Draft",
-                "Engineer Remarks": (
-                    "Candidate created from Continuous "
-                    "Transmission title-block detection and "
-                    "coloured circuit geometry. Cable rack "
-                    "topology was not used. Verify against "
-                    "controlled drawing."
-                ),
-            }
-        )
-
-        write_log(
-            log_callback,
-            f"Item={item_name}; "
-            f"Step6={[pair['text'] for pair in step_6_pairs]}; "
-            f"Step7={[pair['text'] for pair in step_7_pairs]}; "
-            f"Step14={[pair['text'] for pair in step_14_pairs]}.",
-            "DEBUG",
-        )
-
-    return rows, remove_duplicate_terminals(output_terminals)
 
 
 def remove_duplicate_terminals(
@@ -1368,6 +1226,133 @@ def remove_duplicate_terminals(
 
 
 # ---------------------------------------------------------------------
+# CT loop row creation
+# ---------------------------------------------------------------------
+
+def create_ct_loop_rows(
+    page,
+    terminals: list[dict],
+    item_labels: list[dict],
+    log_callback=None,
+) -> tuple[list[dict], list[dict]]:
+    """
+    CT-loop extraction logic:
+
+        1. Page is identified by CONTINUOUS TRANSMISSION.
+        2. Two dominant coloured circuit families are detected.
+        3. Valid consecutive terminal-pair candidates are found.
+        4. Each Item receives:
+             - one Step 6 pair;
+             - exactly two Step 7 pairs;
+             - first Step 7 pair for Step 14.
+
+    Cable rack topology is not used.
+    """
+    colour_groups = get_coloured_circuit_groups(page)
+
+    if len(colour_groups) < 2:
+        write_log(
+            log_callback,
+            "No usable coloured circuit groups found.",
+            "WARNING",
+        )
+        return [], []
+
+    terminal_pairs = build_terminal_pair_candidates(
+        page,
+        terminals,
+        colour_groups,
+    )
+
+    write_log(
+        log_callback,
+        "Circuit candidates: "
+        f"terminals={len(terminals)}; "
+        f"pairs={len(terminal_pairs)}; "
+        f"colour_1_segments="
+        f"{len(colour_groups.get(1, []))}; "
+        f"colour_2_segments="
+        f"{len(colour_groups.get(2, []))}.",
+        "DEBUG",
+    )
+
+    if not terminal_pairs:
+        return [], []
+
+    grouped_items = group_items_by_name(item_labels)
+
+    rows = []
+    debug_terminals = []
+
+    for item_name, item_occurrences in grouped_items.items():
+        item_pairs = get_item_pair_candidates(
+            item_occurrences,
+            terminal_pairs,
+        )
+
+        (
+            step_6_pairs,
+            step_7_pairs,
+            step_14_pairs,
+        ) = choose_step_pairs(item_pairs)
+
+        if (
+            len(step_6_pairs) != 1
+            or len(step_7_pairs) != 2
+        ):
+            write_log(
+                log_callback,
+                f"Item={item_name}: skipped; "
+                "requires one Step 6 pair and two "
+                "Step 7 pairs.",
+                "DEBUG",
+            )
+            continue
+
+        for pair in step_6_pairs + step_7_pairs:
+            debug_terminals.extend(
+                pair["terminals"]
+            )
+
+        rows.append(
+            {
+                "Item": item_name,
+                "G1 - Step 6": format_pairs(
+                    step_6_pairs
+                ),
+                "G1 - Step 7": format_pairs(
+                    step_7_pairs
+                ),
+                "G1 - Step 14": format_pairs(
+                    step_14_pairs
+                ),
+                "Review Status": "Draft",
+                "Engineer Remarks": (
+                    "Candidate generated from Continuous "
+                    "Transmission title-block identification "
+                    "and coloured circuit geometry. Cable rack "
+                    "topology was not used. Verify against "
+                    "controlled drawing."
+                ),
+            }
+        )
+
+        write_log(
+            log_callback,
+            f"Item={item_name}; "
+            f"Step6={[pair['text'] for pair in step_6_pairs]}; "
+            f"Step7={[pair['text'] for pair in step_7_pairs]}; "
+            f"Step14={[pair['text'] for pair in step_14_pairs]}.",
+            "DEBUG",
+        )
+
+    return (
+        rows,
+        remove_duplicate_terminals(debug_terminals),
+    )
+
+
+# ---------------------------------------------------------------------
 # Page relevance
 # ---------------------------------------------------------------------
 
@@ -1378,24 +1363,28 @@ def page_is_relevant(
 ) -> bool:
     (
         has_continuous_transmission,
-        continuous_transmission_source,
+        transmission_source,
     ) = page_has_continuous_transmission(
         page,
         page_text,
     )
 
-    terminals = TERMINAL_PATTERN.findall(page_text)
+    terminal_matches = TERMINAL_PATTERN.findall(
+        page_text
+    )
 
-    items = (
+    item_matches = (
         ITEM_PATTERN.findall(page_text)
-        or FALLBACK_ITEM_PATTERN.findall(page_text)
+        or FALLBACK_ITEM_PATTERN.findall(
+            page_text
+        )
     )
 
     coloured_segments = get_coloured_vector_segments(
         page
     )
 
-    colour_groups = get_two_dominant_colour_bins(
+    colour_bins = get_two_dominant_colour_bins(
         coloured_segments
     )
 
@@ -1404,19 +1393,19 @@ def page_is_relevant(
         "Page relevance: "
         f"continuous_transmission="
         f"{has_continuous_transmission}; "
-        f"source={continuous_transmission_source}; "
-        f"terminals={len(terminals)}; "
-        f"items={len(items)}; "
+        f"source={transmission_source}; "
+        f"terminals={len(terminal_matches)}; "
+        f"items={len(item_matches)}; "
         f"coloured_segments={len(coloured_segments)}; "
-        f"colour_groups={colour_groups or 'NOT FOUND'}.",
+        f"colour_bins={colour_bins or 'NOT FOUND'}.",
         "DEBUG",
     )
 
     return (
         has_continuous_transmission
-        and bool(terminals)
-        and bool(items)
-        and colour_groups is not None
+        and bool(terminal_matches)
+        and bool(item_matches)
+        and colour_bins is not None
     )
 
 
@@ -1429,16 +1418,15 @@ def create_debug_image(
     selected_terminals: list[dict],
 ) -> bytes:
     """
-    Boxes only terminals included in final candidate rows.
+    Red boxes are drawn only around terminals used in final rows.
 
-    It will not draw a box around every regex reference on the page.
+    It does not box all terminal-looking text on the page.
     """
+    padding = 2.5
     shape = page.new_shape()
 
-    padding = 2.5
-
     for terminal in selected_terminals:
-        terminal_box = fitz.Rect(
+        rectangle = fitz.Rect(
             max(0, terminal["x0"] - padding),
             max(0, terminal["y0"] - padding),
             min(
@@ -1451,12 +1439,12 @@ def create_debug_image(
             ),
         )
 
-        shape.draw_rect(terminal_box)
+        shape.draw_rect(rectangle)
 
     if selected_terminals:
         shape.finish(
             color=(1.0, 0.0, 0.0),
-            width=1.3,
+            width=1.25,
             stroke_opacity=1.0,
         )
 
@@ -1527,32 +1515,23 @@ def extract_pdf(
                     )
                     continue
 
-                drawing_number = (
-                    get_drawing_number_from_title_block(page)
-                )
-
-                drawing_revision = (
-                    get_revision_from_title_block(page)
-                )
+                drawing_number = get_drawing_number(page)
+                drawing_revision = get_revision(page)
 
                 if not drawing_number:
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
-                        "drawing number not found.",
+                        "drawing number missing.",
                         "WARNING",
                     )
                     continue
-
-                drawing_number = drawing_number.upper().strip()
-                drawing_revision = drawing_revision.upper().strip()
 
                 location = get_location_from_drawing_number(
                     drawing_number
                 )
 
                 terminals = extract_terminal_references(page)
-
                 item_labels = extract_item_labels(page)
 
                 write_log(
@@ -1569,7 +1548,7 @@ def extract_pdf(
                 if not terminals or not item_labels:
                     continue
 
-                rows, output_terminals = create_ct_loop_rows(
+                rows, debug_terminals = create_ct_loop_rows(
                     page,
                     terminals,
                     item_labels,
@@ -1579,7 +1558,7 @@ def extract_pdf(
                 debug_images[page_number] = (
                     create_debug_image(
                         page,
-                        output_terminals,
+                        debug_terminals,
                     )
                 )
 
