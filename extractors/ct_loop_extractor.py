@@ -611,9 +611,10 @@ def build_coloured_circuit_components(
 
         for index, segment in enumerate(colour_segments):
             candidate_indices: set[int] = set()
-            for grid_key in segment_grid_keys(segment, snap_distance):
-                for nearby_key in nearby_grid_keys(grid_key):
-                    candidate_indices.update(segment_index[nearby_key])
+            search_rect = expand_rect(segment["rect"], snap_distance)
+            search_segment = {"rect": search_rect}
+            for grid_key in segment_grid_keys(search_segment, snap_distance * 2.0):
+                candidate_indices.update(segment_index.get(grid_key, ()))
 
             for existing_index in candidate_indices:
                 existing = colour_segments[existing_index]
@@ -630,7 +631,7 @@ def build_coloured_circuit_components(
                 if kind == "endpoint":
                     disjoint_set.union(index, existing_index)
 
-            for grid_key in segment_grid_keys(segment, snap_distance):
+            for grid_key in segment_grid_keys(segment, snap_distance * 2.0):
                 segment_index[grid_key].append(index)
 
         grouped_segments: defaultdict[int, list[dict]] = defaultdict(list)
@@ -756,36 +757,108 @@ def extract_terminal_references(page: fitz.Page) -> list[dict]:
 
 def extract_item_labels(page: fitz.Page) -> list[dict]:
     words = get_structured_words(page)
-    item_labels = []
-    seen = set()
+    primary_labels = []
+    fallback_labels = []
+    primary_seen = set()
+    fallback_seen = set()
 
-    for pattern_name, pattern in (
-        ("PRIMARY", ITEM_PATTERN),
-        ("FALLBACK", FALLBACK_ITEM_PATTERN),
-    ):
-        for window in contiguous_word_windows(words):
-            candidate_text, rectangle = join_word_window(window)
-            match = pattern.fullmatch(candidate_text.strip(" ,;"))
-            if not match:
-                continue
-            item_name = f"{match.group('item').upper()}({match.group('suffix').upper()})"
-            key = (item_name, round(rectangle.x0, 1), round(rectangle.y0, 1))
-            if key in seen:
-                continue
-            seen.add(key)
-            item_labels.append(
-                {
-                    "item": item_name,
-                    "rect": rectangle,
-                    "x_center": round((rectangle.x0 + rectangle.x1) / 2, 2),
-                    "y_center": round((rectangle.y0 + rectangle.y1) / 2, 2),
-                    "source": pattern_name,
-                }
-            )
-        if item_labels:
-            break
-    return item_labels
+    for window in contiguous_word_windows(words):
+        candidate_text, rectangle = join_word_window(window)
+        candidate_text = candidate_text.strip(" ,;")
 
+        primary_match = ITEM_PATTERN.fullmatch(candidate_text)
+        fallback_match = None if primary_match else FALLBACK_ITEM_PATTERN.fullmatch(candidate_text)
+        match = primary_match or fallback_match
+        if not match:
+            continue
+
+        source = "PRIMARY" if primary_match else "FALLBACK"
+        item_name = f"{match.group('item').upper()}({match.group('suffix').upper()})"
+        key = (item_name, round(rectangle.x0, 1), round(rectangle.y0, 1))
+        seen = primary_seen if primary_match else fallback_seen
+        if key in seen:
+            continue
+        seen.add(key)
+
+        label = {
+            "item": item_name,
+            "rect": rectangle,
+            "x_center": round((rectangle.x0 + rectangle.x1) / 2, 2),
+            "y_center": round((rectangle.y0 + rectangle.y1) / 2, 2),
+            "source": source,
+        }
+        if primary_match:
+            primary_labels.append(label)
+        else:
+            fallback_labels.append(label)
+
+    return primary_labels if primary_labels else fallback_labels
+
+
+# ---------------------------------------------------------------------
+# Spatial index helpers
+# ---------------------------------------------------------------------
+
+class RectGridIndex:
+    """A lightweight uniform-grid spatial index for PDF geometry."""
+
+    def __init__(self, cell_size: float) -> None:
+        self.cell_size = max(float(cell_size), 1.0)
+        self.cells: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
+
+    def _keys(self, rectangle: fitz.Rect) -> Iterable[tuple[int, int]]:
+        x_min = int(math.floor(rectangle.x0 / self.cell_size))
+        x_max = int(math.floor(rectangle.x1 / self.cell_size))
+        y_min = int(math.floor(rectangle.y0 / self.cell_size))
+        y_max = int(math.floor(rectangle.y1 / self.cell_size))
+        for x_index in range(x_min, x_max + 1):
+            for y_index in range(y_min, y_max + 1):
+                yield x_index, y_index
+
+    def add(self, index: int, rectangle: fitz.Rect) -> None:
+        for key in self._keys(rectangle):
+            self.cells[key].append(index)
+
+    def query(self, rectangle: fitz.Rect) -> set[int]:
+        result: set[int] = set()
+        for key in self._keys(rectangle):
+            result.update(self.cells.get(key, ()))
+        return result
+
+
+def build_terminal_grid_index(
+    page: fitz.Page,
+    terminals: list[dict],
+) -> tuple[RectGridIndex, float]:
+    terminal_distance = get_terminal_connection_distance(page)
+    index = RectGridIndex(max(terminal_distance * 2.0, 24.0))
+    for terminal_index, terminal in enumerate(terminals):
+        index.add(terminal_index, terminal["rect"])
+    return index, terminal_distance
+
+
+def get_component_terminals_indexed(
+    component: dict,
+    terminals: list[dict],
+    terminal_index: RectGridIndex,
+    terminal_distance: float,
+) -> list[dict]:
+    candidate_indices: set[int] = set()
+    for segment in component["segments"]:
+        candidate_indices.update(
+            terminal_index.query(expand_rect(segment["rect"], terminal_distance))
+        )
+
+    connected = []
+    for index in sorted(candidate_indices):
+        terminal = terminals[index]
+        if terminal_is_connected_to_component(
+            terminal,
+            component,
+            terminal_distance,
+        ):
+            connected.append(terminal)
+    return connected
 
 # ---------------------------------------------------------------------
 # Component association
@@ -927,11 +1000,20 @@ def create_ct_loop_rows(
     terminals: list[dict],
     item_labels: list[dict],
     log_callback: LogCallback | None = None,
+    terminal_index: RectGridIndex | None = None,
+    terminal_distance: float | None = None,
 ) -> list[dict]:
     rows = []
+    if terminal_index is None or terminal_distance is None:
+        terminal_index, terminal_distance = build_terminal_grid_index(page, terminals)
     for component_index, component in enumerate(components, start=1):
         component_terminals = unique_terminals(
-            get_component_terminals(page, component, terminals)
+            get_component_terminals_indexed(
+                component,
+                terminals,
+                terminal_index,
+                terminal_distance,
+            )
         )
         if not component_terminals:
             write_log(
@@ -1182,12 +1264,18 @@ def extract_pdf(
                     "DEBUG",
                 )
 
+                terminal_index, terminal_distance = build_terminal_grid_index(
+                    page,
+                    terminals,
+                )
                 ct_loop_rows = create_ct_loop_rows(
                     page,
                     components,
                     terminals,
                     item_labels,
                     log_callback=log_callback,
+                    terminal_index=terminal_index,
+                    terminal_distance=terminal_distance,
                 )
 
                 if create_debug_images:
