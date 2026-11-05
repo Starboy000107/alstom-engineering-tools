@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import time
 from collections import defaultdict
@@ -10,13 +11,9 @@ import pandas as pd
 
 
 # ---------------------------------------------------------------------
-# Patterns
+# Text patterns
 # ---------------------------------------------------------------------
 
-# Examples:
-# 1252/W/OLY/ALT/R32/501
-# 1252/W/KOW/ALT/R32/531
-# 1252/W/KOW/ALT/R32/555/A1
 DRAWING_PATTERN = re.compile(
     r"\b"
     r"\d+"
@@ -28,42 +25,88 @@ DRAWING_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Examples:
-# V0.C89
-# V1.D87
-# V10.A123
-# V0.R40.7
-# V1:R40.10
-# V2:R23.11
+# Matches references such as:
+# V0.R42.1
+# V0:R42.1
+# V1.A65
+# V10.B87
+# X1.R40.10
+#
+# The extractor does NOT use the rack identity for topology selection.
+# It is retained only because it is part of the terminal reference text.
 TERMINAL_PATTERN = re.compile(
     r"\b"
-    r"(?P<rack>V\d+)"
+    r"(?P<prefix>[A-Z]{1,6}\d{0,4})"
     r"\s*"
     r"[:.]"
     r"\s*"
-    r"(?P<column>[A-Z]+)"
+    r"(?P<column>[A-Z]{1,6})"
     r"(?P<terminal>\d+(?:[.-]\d+)*)"
     r"\b",
     re.IGNORECASE,
 )
 
 # Examples:
-# CT.GN1(UP)
+# CT.AY1B(UP)
+# CT.YA1B(UP)
 # TC.BW1(REP)
 # CT.BD1(UP)
 ITEM_PATTERN = re.compile(
     r"\b(?:CT|TC)\.?\s*"
-    r"([A-Z]{1,}\d+)\s*"
-    r"\(\s*([A-Z0-9]+)\s*\)",
+    r"(?P<item>[A-Z][A-Z0-9-]*)\s*"
+    r"\(\s*(?P<suffix>[A-Z0-9-]+)\s*\)",
     re.IGNORECASE,
 )
 
-# Used only if no prefixed CT./TC. Items are found.
+# Used only if no CT./TC. item label is found.
 FALLBACK_ITEM_PATTERN = re.compile(
-    r"\b([A-Z]{2,}\d+)\s*"
-    r"\(\s*([A-Z0-9]+)\s*\)",
+    r"\b"
+    r"(?P<item>[A-Z]{2,}[A-Z0-9-]*)"
+    r"\s*"
+    r"\(\s*(?P<suffix>[A-Z0-9-]+)\s*\)",
     re.IGNORECASE,
 )
+
+# The page must be a Continuous Transmission page.
+# This deliberately accepts truncated text such as:
+# CONTINUOUS TRANSMISSI
+CT_LOOP_PAGE_PATTERN = re.compile(
+    r"CONTINUOUS\s+TRANSMISSI",
+    re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------
+# Colour settings
+# ---------------------------------------------------------------------
+#
+# The supplied example contains RED and CYAN circuits.
+#
+# In drawings cyan is commonly used instead of dark blue. Therefore the
+# "BLUE" category below includes both blue and cyan / light-blue circuits.
+#
+# PyMuPDF returns drawing colours as tuples of floats:
+# (red, green, blue), where every channel is between 0.0 and 1.0.
+# ---------------------------------------------------------------------
+
+RED_MIN = 0.45
+RED_DOMINANCE = 0.16
+
+BLUE_MIN = 0.40
+BLUE_DOMINANCE = 0.10
+
+CYAN_MIN = 0.45
+CYAN_RED_MAX = 0.45
+
+# Geometry tolerances are dynamically scaled from PDF page dimensions.
+MIN_SNAP_DISTANCE = 3.0
+MAX_SNAP_DISTANCE = 12.0
+
+MIN_TERMINAL_DISTANCE = 8.0
+MAX_TERMINAL_DISTANCE = 30.0
+
+MIN_ITEM_DISTANCE = 15.0
+MAX_ITEM_DISTANCE = 110.0
 
 
 # ---------------------------------------------------------------------
@@ -74,13 +117,13 @@ def write_log(
     log_callback,
     message: str,
     level: str = "INFO",
-):
+) -> None:
     if log_callback is not None:
         log_callback(message, level)
 
 
 # ---------------------------------------------------------------------
-# Title-block metadata
+# Basic helpers
 # ---------------------------------------------------------------------
 
 def normalise_drawing_number(
@@ -98,8 +141,6 @@ def get_location_from_drawing_number(
 
     Returns:
         OLY
-
-    Location is the segment two places before R<number>.
     """
     parts = drawing_number.upper().split("/")
 
@@ -111,12 +152,101 @@ def get_location_from_drawing_number(
     return ""
 
 
+def point_distance(
+    first: tuple[float, float],
+    second: tuple[float, float],
+) -> float:
+    return math.hypot(
+        first[0] - second[0],
+        first[1] - second[1],
+    )
+
+
+def rect_distance(
+    first: fitz.Rect,
+    second: fitz.Rect,
+) -> float:
+    """
+    Shortest Euclidean distance between two rectangles.
+
+    Returns zero if the rectangles overlap.
+    """
+    horizontal_gap = max(
+        first.x0 - second.x1,
+        second.x0 - first.x1,
+        0,
+    )
+
+    vertical_gap = max(
+        first.y0 - second.y1,
+        second.y0 - first.y1,
+        0,
+    )
+
+    return math.hypot(
+        horizontal_gap,
+        vertical_gap,
+    )
+
+
+def make_rect_from_points(
+    first: tuple[float, float],
+    second: tuple[float, float],
+    padding: float = 0.0,
+) -> fitz.Rect:
+    return fitz.Rect(
+        min(first[0], second[0]) - padding,
+        min(first[1], second[1]) - padding,
+        max(first[0], second[0]) + padding,
+        max(first[1], second[1]) + padding,
+    )
+
+
+def get_snap_distance(
+    page,
+) -> float:
+    return max(
+        MIN_SNAP_DISTANCE,
+        min(
+            float(page.rect.width) * 0.004,
+            MAX_SNAP_DISTANCE,
+        ),
+    )
+
+
+def get_terminal_connection_distance(
+    page,
+) -> float:
+    return max(
+        MIN_TERMINAL_DISTANCE,
+        min(
+            float(page.rect.width) * 0.020,
+            MAX_TERMINAL_DISTANCE,
+        ),
+    )
+
+
+def get_item_connection_distance(
+    page,
+) -> float:
+    return max(
+        MIN_ITEM_DISTANCE,
+        min(
+            float(page.rect.width) * 0.075,
+            MAX_ITEM_DISTANCE,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------
+# Title block metadata
+# ---------------------------------------------------------------------
+
 def get_bottom_title_block_words(
     page,
     bottom_ratio: float = 0.18,
 ) -> list[dict]:
     page_height = float(page.rect.height)
-    page_width = float(page.rect.width)
 
     title_block_top = page_height * (
         1 - bottom_ratio
@@ -147,28 +277,18 @@ def get_bottom_title_block_words(
                     (y0 + y1) / 2,
                     2,
                 ),
-                "page_width": page_width,
-                "page_height": page_height,
             }
         )
 
     return words
 
 
-def join_title_block_words(
-    title_block_words: list[dict],
-) -> str:
-    return " ".join(
-        word["value"]
-        for word in title_block_words
-    )
-
-
 def get_drawing_number_from_title_block(
     title_block_words: list[dict],
 ) -> str:
-    title_block_text = join_title_block_words(
-        title_block_words
+    title_block_text = " ".join(
+        word["value"]
+        for word in title_block_words
     )
 
     matches = list(
@@ -198,9 +318,7 @@ def get_revision_from_title_block(
     revision_labels = []
 
     for word in title_block_words:
-        value = word["value"].strip(
-            " ,;:()[]{}"
-        ).upper()
+        value = word["value"].upper()
 
         if re.fullmatch(r"REV\.?", value):
             revision_labels.append(word)
@@ -215,9 +333,7 @@ def get_revision_from_title_block(
 
     for revision_label in revision_labels:
         for word in title_block_words:
-            value = word["value"].strip(
-                " ,;:()[]{}"
-            ).upper()
+            value = word["value"].upper()
 
             if not is_revision_value(value):
                 continue
@@ -278,8 +394,7 @@ def get_title_block_metadata(
         log_callback,
         "Title-block extraction: "
         f"drawing={drawing_number or 'NOT FOUND'}; "
-        f"revision={drawing_revision}; "
-        f"words={len(title_block_words)}.",
+        f"revision={drawing_revision}.",
         "DEBUG",
     )
 
@@ -287,101 +402,406 @@ def get_title_block_metadata(
 
 
 # ---------------------------------------------------------------------
-# Terminal extraction
+# Red / blue / cyan circuit colour detection
 # ---------------------------------------------------------------------
 
-def parse_terminal_number(
-    terminal_number: str,
-) -> tuple[int, ...]:
-    """
-    Examples:
-        87      -> (87,)
-        40.9    -> (40, 9)
-        40.10   -> (40, 10)
-        12-3    -> (12, 3)
-    """
-    parts = re.split(
-        r"[.-]",
-        str(terminal_number),
-    )
-
-    return tuple(
-        int(part)
-        for part in parts
-        if part.isdigit()
-    )
-
-
-def terminal_numbers_are_consecutive(
-    first_terminal: dict,
-    second_terminal: dict,
+def colour_is_red(
+    colour,
 ) -> bool:
-    first_parts = first_terminal[
-        "terminal_number_parts"
-    ]
-
-    second_parts = second_terminal[
-        "terminal_number_parts"
-    ]
-
-    if not first_parts or not second_parts:
+    if not colour or len(colour) < 3:
         return False
 
-    if len(first_parts) != len(second_parts):
-        return False
-
-    if len(first_parts) == 1:
-        return (
-            second_parts[0]
-            == first_parts[0] + 1
-        )
+    red, green, blue = colour[:3]
 
     return (
-        first_parts[:-1] == second_parts[:-1]
-        and second_parts[-1]
-        == first_parts[-1] + 1
+        red >= RED_MIN
+        and red > green + RED_DOMINANCE
+        and red > blue + RED_DOMINANCE
     )
 
 
-def remove_duplicate_terminals(
-    terminals: list[dict],
+def colour_is_blue_or_cyan(
+    colour,
+) -> bool:
+    """
+    Includes normal blue and cyan/light-blue CAD circuit colours.
+    """
+    if not colour or len(colour) < 3:
+        return False
+
+    red, green, blue = colour[:3]
+
+    is_blue = (
+        blue >= BLUE_MIN
+        and blue > red + BLUE_DOMINANCE
+        and blue > green * 0.60
+    )
+
+    is_cyan = (
+        green >= CYAN_MIN
+        and blue >= CYAN_MIN
+        and red <= CYAN_RED_MAX
+    )
+
+    return is_blue or is_cyan
+
+
+def get_colour_name(
+    colour,
+) -> str:
+    if colour_is_red(colour):
+        return "RED"
+
+    if colour_is_blue_or_cyan(colour):
+        return "BLUE/CYAN"
+
+    return ""
+
+
+# ---------------------------------------------------------------------
+# Coloured vector circuit extraction
+# ---------------------------------------------------------------------
+
+def point_tuple(
+    point,
+) -> tuple[float, float]:
+    return (
+        float(point.x),
+        float(point.y),
+    )
+
+
+def get_drawing_line_segments(
+    drawing: dict,
 ) -> list[dict]:
-    unique_terminals = []
+    """
+    Extract usable line segments from a PyMuPDF vector drawing.
 
-    for terminal in terminals:
-        duplicate_found = False
+    Engineering PDFs normally represent wires as "l" line objects.
+    Curved wires are also supported through cubic ("c") and quadratic
+    ("qu") path commands.
 
-        for existing in unique_terminals:
-            same_terminal = (
-                terminal["terminal"]
-                == existing["terminal"]
+    This code does not use rack names, lane position, cable-rack labels,
+    or fixed drawing layout assumptions.
+    """
+    segments = []
+
+    for item in drawing.get("items", []):
+        if not item:
+            continue
+
+        operation = item[0]
+
+        # Straight vector line:
+        # ("l", Point(start), Point(end))
+        if operation == "l" and len(item) >= 3:
+            first = point_tuple(item[1])
+            second = point_tuple(item[2])
+
+            segments.append(
+                {
+                    "start": first,
+                    "end": second,
+                    "rect": make_rect_from_points(
+                        first,
+                        second,
+                    ),
+                }
             )
 
-            same_position = (
-                abs(
-                    terminal["x_center"]
-                    - existing["x_center"]
-                ) <= 2
-                and abs(
-                    terminal["y_center"]
-                    - existing["y_center"]
-                ) <= 2
+        # Cubic Bezier:
+        # ("c", start, control_1, control_2, end)
+        #
+        # The end-to-end segment is enough for connectivity matching.
+        elif operation == "c" and len(item) >= 5:
+            first = point_tuple(item[1])
+            second = point_tuple(item[4])
+
+            segments.append(
+                {
+                    "start": first,
+                    "end": second,
+                    "rect": make_rect_from_points(
+                        first,
+                        second,
+                    ),
+                }
             )
 
-            if same_terminal and same_position:
-                duplicate_found = True
-                break
+        # Quadratic Bezier:
+        # ("qu", start, control, end)
+        elif operation == "qu" and len(item) >= 4:
+            first = point_tuple(item[1])
+            second = point_tuple(item[3])
 
-        if not duplicate_found:
-            unique_terminals.append(terminal)
+            segments.append(
+                {
+                    "start": first,
+                    "end": second,
+                    "rect": make_rect_from_points(
+                        first,
+                        second,
+                    ),
+                }
+            )
 
-    return unique_terminals
+    return segments
 
+
+def extract_coloured_segments(
+    page,
+    log_callback=None,
+) -> list[dict]:
+    """
+    Extract RED and BLUE/CYAN vector wire segments.
+
+    The result is geometry only. No cable-rack or terminal-lane logic is
+    used here.
+    """
+    segments = []
+
+    for drawing in page.get_drawings():
+        colour_name = get_colour_name(
+            drawing.get("color")
+        )
+
+        if not colour_name:
+            colour_name = get_colour_name(
+                drawing.get("fill")
+            )
+
+        if not colour_name:
+            continue
+
+        drawing_segments = get_drawing_line_segments(
+            drawing
+        )
+
+        for segment in drawing_segments:
+            segment["colour"] = colour_name
+            segments.append(segment)
+
+    colour_counts = defaultdict(int)
+
+    for segment in segments:
+        colour_counts[segment["colour"]] += 1
+
+    write_log(
+        log_callback,
+        "Coloured vector extraction: "
+        f"red_segments={colour_counts['RED']}; "
+        f"blue_cyan_segments={colour_counts['BLUE/CYAN']}.",
+        "DEBUG",
+    )
+
+    return segments
+
+
+# ---------------------------------------------------------------------
+# Coloured circuit graph construction
+# ---------------------------------------------------------------------
+
+class DisjointSet:
+    def __init__(
+        self,
+        count: int,
+    ) -> None:
+        self.parent = list(range(count))
+        self.rank = [0] * count
+
+    def find(
+        self,
+        value: int,
+    ) -> int:
+        if self.parent[value] != value:
+            self.parent[value] = self.find(
+                self.parent[value]
+            )
+
+        return self.parent[value]
+
+    def union(
+        self,
+        first: int,
+        second: int,
+    ) -> None:
+        first_root = self.find(first)
+        second_root = self.find(second)
+
+        if first_root == second_root:
+            return
+
+        if self.rank[first_root] < self.rank[second_root]:
+            self.parent[first_root] = second_root
+
+        elif self.rank[first_root] > self.rank[second_root]:
+            self.parent[second_root] = first_root
+
+        else:
+            self.parent[second_root] = first_root
+            self.rank[first_root] += 1
+
+
+def endpoint_grid_key(
+    point: tuple[float, float],
+    grid_size: float,
+) -> tuple[int, int]:
+    return (
+        int(point[0] // grid_size),
+        int(point[1] // grid_size),
+    )
+
+
+def nearby_grid_keys(
+    key: tuple[int, int],
+) -> list[tuple[int, int]]:
+    keys = []
+
+    for x_offset in (-1, 0, 1):
+        for y_offset in (-1, 0, 1):
+            keys.append(
+                (
+                    key[0] + x_offset,
+                    key[1] + y_offset,
+                )
+            )
+
+    return keys
+
+
+def build_coloured_circuit_components(
+    page,
+    segments: list[dict],
+) -> list[dict]:
+    """
+    Build connected circuits from coloured vector line segments.
+
+    Segments are connected when their endpoints meet or are close enough
+    to be joined visually in the drawing.
+
+    Red and BLUE/CYAN circuits are intentionally kept separate. A red
+    circuit will never be merged into a nearby cyan circuit merely due to
+    visual proximity.
+    """
+    if not segments:
+        return []
+
+    snap_distance = get_snap_distance(page)
+
+    components = []
+
+    for colour_name in ("RED", "BLUE/CYAN"):
+        colour_segments = [
+            segment
+            for segment in segments
+            if segment["colour"] == colour_name
+        ]
+
+        if not colour_segments:
+            continue
+
+        disjoint_set = DisjointSet(
+            len(colour_segments)
+        )
+
+        endpoint_index = defaultdict(list)
+
+        for index, segment in enumerate(colour_segments):
+            for endpoint_name in ("start", "end"):
+                point = segment[endpoint_name]
+
+                grid_key = endpoint_grid_key(
+                    point,
+                    snap_distance,
+                )
+
+                for nearby_key in nearby_grid_keys(
+                    grid_key
+                ):
+                    for (
+                        existing_index,
+                        existing_point,
+                    ) in endpoint_index[nearby_key]:
+                        if point_distance(
+                            point,
+                            existing_point,
+                        ) <= snap_distance:
+                            disjoint_set.union(
+                                index,
+                                existing_index,
+                            )
+
+                endpoint_index[grid_key].append(
+                    (index, point)
+                )
+
+        grouped_segments = defaultdict(list)
+
+        for index, segment in enumerate(colour_segments):
+            root = disjoint_set.find(index)
+
+            grouped_segments[root].append(segment)
+
+        for component_segments in grouped_segments.values():
+            x_values = []
+            y_values = []
+            endpoint_counts = defaultdict(int)
+
+            for segment in component_segments:
+                for endpoint_name in ("start", "end"):
+                    point = segment[endpoint_name]
+
+                    x_values.append(point[0])
+                    y_values.append(point[1])
+
+                    key = (
+                        round(point[0] / snap_distance),
+                        round(point[1] / snap_distance),
+                    )
+
+                    endpoint_counts[key] += 1
+
+            component_rect = fitz.Rect(
+                min(x_values),
+                min(y_values),
+                max(x_values),
+                max(y_values),
+            )
+
+            loose_endpoints = []
+
+            for key, count in endpoint_counts.items():
+                if count != 1:
+                    continue
+
+                loose_endpoints.append(
+                    (
+                        key[0] * snap_distance,
+                        key[1] * snap_distance,
+                    )
+                )
+
+            components.append(
+                {
+                    "colour": colour_name,
+                    "segments": component_segments,
+                    "rect": component_rect,
+                    "endpoints": loose_endpoints,
+                }
+            )
+
+    return components
+
+
+# ---------------------------------------------------------------------
+# Terminal and item extraction
+# ---------------------------------------------------------------------
 
 def extract_terminal_references(
     page,
 ) -> list[dict]:
     terminals = []
+    seen = set()
 
     for word in page.get_text("words", sort=True):
         x0, y0, x1, y1, value = word[:5]
@@ -397,34 +817,29 @@ def extract_terminal_references(
         if not match:
             continue
 
-        rack = match.group("rack").upper()
-        terminal_column = match.group(
-            "column"
-        ).upper()
+        prefix = match.group("prefix").upper()
+        column = match.group("column").upper()
+        terminal_number = match.group("terminal")
 
-        terminal_number = match.group(
-            "terminal"
+        terminal_reference = (
+            f"{prefix}.{column}{terminal_number}"
         )
+
+        key = (
+            terminal_reference,
+            round(float(x0), 1),
+            round(float(y0), 1),
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
 
         terminals.append(
             {
-                "terminal": (
-                    f"{rack}."
-                    f"{terminal_column}"
-                    f"{terminal_number}"
-                ),
-                "rack": rack,
-                "terminal_column": terminal_column,
-                "terminal_number": terminal_number,
-                "terminal_number_parts": (
-                    parse_terminal_number(
-                        terminal_number
-                    )
-                ),
-                "x0": float(x0),
-                "y0": float(y0),
-                "x1": float(x1),
-                "y1": float(y1),
+                "terminal": terminal_reference,
+                "rect": fitz.Rect(x0, y0, x1, y1),
                 "x_center": round(
                     (x0 + x1) / 2,
                     2,
@@ -433,270 +848,11 @@ def extract_terminal_references(
                     (y0 + y1) / 2,
                     2,
                 ),
-                "page_width": float(
-                    page.rect.width
-                ),
             }
         )
 
-    return remove_duplicate_terminals(terminals)
+    return terminals
 
-
-# ---------------------------------------------------------------------
-# Physical terminal-lane detection
-# ---------------------------------------------------------------------
-
-def get_lane_tolerance(
-    terminals: list[dict],
-) -> float:
-    """
-    Calculate physical lane tolerance from PDF page width.
-
-    This is not tied to any location, rack ID, terminal number,
-    Item name, or drawing number.
-    """
-    if not terminals:
-        return 20.0
-
-    page_width = terminals[0].get(
-        "page_width",
-        1000.0,
-    )
-
-    return max(
-        12.0,
-        min(page_width * 0.02, 45.0),
-    )
-
-
-def build_physical_terminal_lanes(
-    terminals: list[dict],
-) -> list[dict]:
-    """
-    Split terminals into physical left-to-right lanes.
-
-    Example:
-
-        V1 left | V0 middle | V1 right
-
-    The two V1 areas become separate lanes because their physical
-    X positions are different.
-    """
-    if not terminals:
-        return []
-
-    tolerance = get_lane_tolerance(terminals)
-
-    ordered_terminals = sorted(
-        terminals,
-        key=lambda terminal: terminal["x_center"],
-    )
-
-    raw_lanes = []
-
-    for terminal in ordered_terminals:
-        if not raw_lanes:
-            raw_lanes.append(
-                {
-                    "x_values": [
-                        terminal["x_center"]
-                    ],
-                    "terminals": [terminal],
-                }
-            )
-            continue
-
-        current_lane = raw_lanes[-1]
-
-        lane_x_center = sum(
-            current_lane["x_values"]
-        ) / len(current_lane["x_values"])
-
-        if abs(
-            terminal["x_center"] - lane_x_center
-        ) <= tolerance:
-            current_lane["x_values"].append(
-                terminal["x_center"]
-            )
-
-            current_lane["terminals"].append(
-                terminal
-            )
-
-        else:
-            raw_lanes.append(
-                {
-                    "x_values": [
-                        terminal["x_center"]
-                    ],
-                    "terminals": [terminal],
-                }
-            )
-
-    lanes = []
-
-    for lane_id, raw_lane in enumerate(raw_lanes):
-        rack_counts = defaultdict(int)
-
-        for terminal in raw_lane["terminals"]:
-            rack_counts[terminal["rack"]] += 1
-
-        primary_rack = max(
-            rack_counts,
-            key=rack_counts.get,
-        )
-
-        lanes.append(
-            {
-                "lane_id": lane_id,
-                "x_center": round(
-                    sum(raw_lane["x_values"])
-                    / len(raw_lane["x_values"]),
-                    2,
-                ),
-                "terminals": raw_lane["terminals"],
-                "primary_rack": primary_rack,
-            }
-        )
-
-    return lanes
-
-
-# ---------------------------------------------------------------------
-# Terminal pairing inside physical lanes
-# ---------------------------------------------------------------------
-
-def pair_terminals_in_lane(
-    lane: dict,
-) -> list[dict]:
-    """
-    Pair consecutive terminals only within one physical lane.
-
-    This prevents the two V1 sides of a drawing from being merged
-    simply because they have the same rack name.
-    """
-    terminals_by_block = defaultdict(list)
-
-    for terminal in lane["terminals"]:
-        key = (
-            terminal["rack"],
-            terminal["terminal_column"],
-        )
-
-        terminals_by_block[key].append(
-            terminal
-        )
-
-    pairs = []
-
-    for block_terminals in terminals_by_block.values():
-        ordered = sorted(
-            block_terminals,
-            key=lambda terminal: (
-                terminal["terminal_number_parts"],
-                terminal["y_center"],
-            ),
-        )
-
-        index = 0
-
-        while index < len(ordered):
-            first = ordered[index]
-
-            if index + 1 >= len(ordered):
-                pairs.append(
-                    {
-                        "text": (
-                            f"{first['terminal']} "
-                            "(UNPAIRED - REVIEW)"
-                        ),
-                        "rack": first["rack"],
-                        "column": first[
-                            "terminal_column"
-                        ],
-                        "lane_id": lane["lane_id"],
-                        "x_center": first["x_center"],
-                        "y_center": first["y_center"],
-                        "review_required": True,
-                    }
-                )
-
-                index += 1
-                continue
-
-            second = ordered[index + 1]
-
-            if terminal_numbers_are_consecutive(
-                first,
-                second,
-            ):
-                pairs.append(
-                    {
-                        "text": (
-                            f"{first['terminal']} & "
-                            f"{second['terminal']}"
-                        ),
-                        "rack": first["rack"],
-                        "column": first[
-                            "terminal_column"
-                        ],
-                        "lane_id": lane["lane_id"],
-                        "x_center": round(
-                            (
-                                first["x_center"]
-                                + second["x_center"]
-                            ) / 2,
-                            2,
-                        ),
-                        "y_center": round(
-                            (
-                                first["y_center"]
-                                + second["y_center"]
-                            ) / 2,
-                            2,
-                        ),
-                        "review_required": False,
-                    }
-                )
-
-                index += 2
-
-            else:
-                pairs.append(
-                    {
-                        "text": (
-                            f"{first['terminal']} "
-                            "(UNPAIRED - REVIEW)"
-                        ),
-                        "rack": first["rack"],
-                        "column": first[
-                            "terminal_column"
-                        ],
-                        "lane_id": lane["lane_id"],
-                        "x_center": first["x_center"],
-                        "y_center": first["y_center"],
-                        "review_required": True,
-                    }
-                )
-
-                index += 1
-
-    return pairs
-
-
-def add_pairs_to_lanes(
-    lanes: list[dict],
-) -> list[dict]:
-    for lane in lanes:
-        lane["pairs"] = pair_terminals_in_lane(lane)
-        lane["pair_count"] = len(lane["pairs"])
-
-    return lanes
-
-
-# ---------------------------------------------------------------------
-# Item extraction
-# ---------------------------------------------------------------------
 
 def extract_item_labels(
     page,
@@ -709,16 +865,14 @@ def extract_item_labels(
     item_labels = []
     seen = set()
 
-    patterns = [
+    for pattern in (
         ITEM_PATTERN,
         FALLBACK_ITEM_PATTERN,
-    ]
-
-    for pattern in patterns:
+    ):
         for match in pattern.finditer(page_text):
             item_name = (
-                f"{match.group(1).upper()}"
-                f"({match.group(2).upper()})"
+                f"{match.group('item').upper()}"
+                f"({match.group('suffix').upper()})"
             )
 
             source_text = match.group(0)
@@ -740,6 +894,7 @@ def extract_item_labels(
                 item_labels.append(
                     {
                         "item": item_name,
+                        "rect": fitz.Rect(rectangle),
                         "x_center": round(
                             (
                                 rectangle.x0
@@ -764,172 +919,192 @@ def extract_item_labels(
 
 
 # ---------------------------------------------------------------------
-# Generic in-between topology:
-# same outer rack | different middle rack | same outer rack
+# Circuit-to-terminal / circuit-to-item association
 # ---------------------------------------------------------------------
 
-def select_ct_loop_lanes(
-    lanes: list[dict],
-    log_callback=None,
-) -> tuple[dict | None, list[dict]]:
+def terminal_is_connected_to_component(
+    terminal: dict,
+    component: dict,
+    terminal_distance: float,
+) -> bool:
     """
-    Select a generic three-lane topology:
+    A terminal is considered part of a coloured circuit if it is close to
+    any individual vector segment in that circuit.
 
-        outer rack A | middle rack B | outer rack A
-
-    For example:
-
-        V1 | V0 | V1
-        V2 | V1 | V2
-        V5 | V3 | V5
-
-    Output:
-        source lane       = middle lane
-        destination lanes = [right outer lane, left outer lane]
-
-    The right lane is intentionally first. This gives the desired
-    Step 7 order and makes the first Step 7 pair Step 14.
+    Individual segment testing is important: the bounding rectangle of a
+    large circuit can cover unrelated labels inside the rectangle.
     """
-    if len(lanes) < 3:
-        write_log(
-            log_callback,
-            "Cannot select CT-loop lanes: fewer than "
-            "three physical terminal lanes were detected.",
-            "WARNING",
-        )
-        return None, []
+    terminal_rect = terminal["rect"]
 
-    candidates = []
+    for segment in component["segments"]:
+        segment_rect = segment["rect"]
 
-    for index in range(len(lanes) - 2):
-        left_lane = lanes[index]
-        middle_lane = lanes[index + 1]
-        right_lane = lanes[index + 2]
-
-        outer_racks_match = (
-            left_lane["primary_rack"]
-            == right_lane["primary_rack"]
+        expanded_segment_rect = fitz.Rect(
+            segment_rect.x0 - terminal_distance,
+            segment_rect.y0 - terminal_distance,
+            segment_rect.x1 + terminal_distance,
+            segment_rect.y1 + terminal_distance,
         )
 
-        middle_rack_differs = (
-            middle_lane["primary_rack"]
-            != left_lane["primary_rack"]
-        )
+        if terminal_rect.intersects(
+            expanded_segment_rect
+        ):
+            return True
 
-        if not outer_racks_match:
-            continue
+        if rect_distance(
+            terminal_rect,
+            segment_rect,
+        ) <= terminal_distance:
+            return True
 
-        if not middle_rack_differs:
-            continue
+    return False
 
-        if not middle_lane["pairs"]:
-            continue
 
-        if not left_lane["pairs"]:
-            continue
-
-        if not right_lane["pairs"]:
-            continue
-
-        left_to_middle = abs(
-            middle_lane["x_center"]
-            - left_lane["x_center"]
-        )
-
-        middle_to_right = abs(
-            right_lane["x_center"]
-            - middle_lane["x_center"]
-        )
-
-        candidates.append(
-            {
-                "left_lane": left_lane,
-                "source_lane": middle_lane,
-                "right_lane": right_lane,
-                "pair_count": (
-                    left_lane["pair_count"]
-                    + middle_lane["pair_count"]
-                    + right_lane["pair_count"]
-                ),
-                "geometry_balance": abs(
-                    left_to_middle
-                    - middle_to_right
-                ),
-            }
-        )
-
-    if not candidates:
-        write_log(
-            log_callback,
-            "No valid in-between topology found. "
-            "Expected: same outer rack | different "
-            "middle rack | same outer rack.",
-            "WARNING",
-        )
-        return None, []
-
-    candidates.sort(
-        key=lambda candidate: (
-            -candidate["pair_count"],
-            candidate["geometry_balance"],
-            candidate["source_lane"]["x_center"],
-        )
+def get_component_terminals(
+    page,
+    component: dict,
+    terminals: list[dict],
+) -> list[dict]:
+    terminal_distance = get_terminal_connection_distance(
+        page
     )
 
-    selected = candidates[0]
+    connected = []
 
-    left_lane = selected["left_lane"]
-    source_lane = selected["source_lane"]
-    right_lane = selected["right_lane"]
+    for terminal in terminals:
+        if terminal_is_connected_to_component(
+            terminal,
+            component,
+            terminal_distance,
+        ):
+            connected.append(terminal)
 
-    destination_lanes = [
-        right_lane,
-        left_lane,
-    ]
+    return connected
 
-    write_log(
-        log_callback,
-        "In-between topology selected: "
-        f"left=(lane={left_lane['lane_id']}, "
-        f"rack={left_lane['primary_rack']}); "
-        f"middle_step6=(lane={source_lane['lane_id']}, "
-        f"rack={source_lane['primary_rack']}); "
-        f"right_step7=(lane={right_lane['lane_id']}, "
-        f"rack={right_lane['primary_rack']}).",
-        "DEBUG",
+
+def get_component_end_terminal_groups(
+    page,
+    component: dict,
+    component_terminals: list[dict],
+) -> list[list[dict]]:
+    """
+    Attempts to identify terminal groups at circuit ends.
+
+    This does not inspect rack identifiers or assume left/middle/right
+    cable rack geometry.
+
+    For each physical loose end of the coloured vector path, nearby
+    terminal references are collected. This is useful for populating
+    Step 6 and Step 7 with the two ends of a coloured test circuit.
+
+    If the PDF has no identifiable loose vector endpoints, callers can
+    fall back to the complete Test Terminals list.
+    """
+    if not component_terminals:
+        return []
+
+    terminal_distance = get_terminal_connection_distance(
+        page
     )
 
-    return source_lane, destination_lanes
+    endpoint_groups = []
+
+    for endpoint in component["endpoints"]:
+        nearby_terminals = []
+
+        for terminal in component_terminals:
+            terminal_center = (
+                terminal["x_center"],
+                terminal["y_center"],
+            )
+
+            if point_distance(
+                endpoint,
+                terminal_center,
+            ) <= terminal_distance * 2:
+                nearby_terminals.append(terminal)
+
+        if nearby_terminals:
+            endpoint_groups.append(
+                sorted(
+                    nearby_terminals,
+                    key=lambda terminal: (
+                        terminal["y_center"],
+                        terminal["x_center"],
+                    ),
+                )
+            )
+
+    unique_groups = []
+    seen = set()
+
+    for group in endpoint_groups:
+        key = tuple(
+            terminal["terminal"]
+            for terminal in group
+        )
+
+        if not key or key in seen:
+            continue
+
+        seen.add(key)
+        unique_groups.append(group)
+
+    return unique_groups
 
 
-# ---------------------------------------------------------------------
-# Item grouping
-# ---------------------------------------------------------------------
-
-def find_nearest_item(
-    pair: dict,
+def find_nearest_item_for_component(
+    page,
+    component: dict,
     item_labels: list[dict],
 ) -> str:
+    """
+    Associate a coloured circuit with its nearest CT/TC item label.
+
+    The score strongly prefers labels vertically aligned with the
+    coloured circuit but still works for drawings where labels are placed
+    above, below, left, or right of the circuit.
+    """
     if not item_labels:
         return "REVIEW REQUIRED"
+
+    item_distance = get_item_connection_distance(page)
 
     selected_item = "REVIEW REQUIRED"
     selected_score = None
 
+    component_center_x = (
+        component["rect"].x0
+        + component["rect"].x1
+    ) / 2
+
+    component_center_y = (
+        component["rect"].y0
+        + component["rect"].y1
+    ) / 2
+
     for item_label in item_labels:
+        item_rect = item_label["rect"]
+
+        direct_distance = rect_distance(
+            component["rect"],
+            item_rect,
+        )
+
         horizontal_distance = abs(
-            pair["x_center"]
+            component_center_x
             - item_label["x_center"]
         )
 
         vertical_distance = abs(
-            pair["y_center"]
+            component_center_y
             - item_label["y_center"]
         )
 
         score = (
-            vertical_distance * 5
-            + horizontal_distance
+            direct_distance * 4
+            + vertical_distance * 1.5
+            + horizontal_distance * 0.35
         )
 
         if (
@@ -939,256 +1114,209 @@ def find_nearest_item(
             selected_score = score
             selected_item = item_label["item"]
 
+    if selected_score is None:
+        return "REVIEW REQUIRED"
+
+    # Do not force an Item assignment when the closest label is clearly
+    # unrelated to the coloured circuit.
+    if selected_score > item_distance * 8:
+        return "REVIEW REQUIRED"
+
     return selected_item
 
 
-def group_pairs_by_item(
-    pairs: list[dict],
-    item_labels: list[dict],
-) -> dict[str, list[dict]]:
-    grouped = defaultdict(list)
+# ---------------------------------------------------------------------
+# Output formatting
+# ---------------------------------------------------------------------
 
-    for pair in pairs:
-        item_name = find_nearest_item(
-            pair,
-            item_labels,
-        )
-
-        grouped[item_name].append(pair)
-
-    return dict(grouped)
-
-
-def group_item_labels_by_name(
-    item_labels: list[dict],
-) -> dict[str, list[dict]]:
-    """
-    One final output row per Item name, even if the same Item label
-    appears more than once in the PDF.
-    """
-    grouped = defaultdict(list)
-
-    for item_label in item_labels:
-        grouped[item_label["item"]].append(
-            item_label
-        )
-
-    return dict(grouped)
-
-
-def remove_duplicate_pairs(
-    pairs: list[dict],
+def unique_terminals(
+    terminals: list[dict],
 ) -> list[dict]:
-    unique_pairs = []
+    unique = []
     seen = set()
 
-    for pair in pairs:
-        key = (
-            pair["text"],
-            pair["rack"],
-            pair["column"],
-            pair["lane_id"],
-            round(pair["x_center"], 1),
-            round(pair["y_center"], 1),
-        )
+    for terminal in terminals:
+        terminal_name = terminal["terminal"]
 
-        if key in seen:
+        if terminal_name in seen:
             continue
 
-        seen.add(key)
-        unique_pairs.append(pair)
+        seen.add(terminal_name)
+        unique.append(terminal)
 
-    return unique_pairs
-
-
-def distance_to_item_occurrences(
-    pair: dict,
-    item_occurrences: list[dict],
-) -> tuple[float, float]:
-    distances = []
-
-    for item_label in item_occurrences:
-        distances.append(
-            (
-                abs(
-                    pair["y_center"]
-                    - item_label["y_center"]
-                ),
-                abs(
-                    pair["x_center"]
-                    - item_label["x_center"]
-                ),
-            )
-        )
-
-    if not distances:
-        return 999999.0, 999999.0
-
-    return min(distances)
+    return unique
 
 
-def format_pairs(
-    pairs: list[dict],
+def format_terminal_list(
+    terminals: list[dict],
 ) -> str:
+    terminals = unique_terminals(terminals)
+
+    if not terminals:
+        return ""
+
     return "\n".join(
-        f"- {pair['text']}"
-        for pair in pairs
+        f"- {terminal['terminal']}"
+        for terminal in terminals
+    )
+
+
+def create_circuit_id(
+    component: dict,
+    component_index: int,
+) -> str:
+    return (
+        f"{component['colour']} "
+        f"CIRCUIT {component_index:02d}"
     )
 
 
 # ---------------------------------------------------------------------
-# CT-loop row creation
+# CT test row creation
 # ---------------------------------------------------------------------
 
 def create_ct_loop_rows(
+    page,
+    components: list[dict],
     terminals: list[dict],
     item_labels: list[dict],
     log_callback=None,
 ) -> list[dict]:
     """
-    Create one CT-loop checklist row per unique Item.
+    Create one row per coloured circuit that has identified terminals.
 
-    Generic topology:
-
-        Outer lane A | Middle lane B | Outer lane A
-
-    Step 6:
-        Terminal pairs in middle lane B.
-
-    Step 7:
-        Terminal pairs in both outer lanes.
-        Right outer lane is listed before left outer lane.
-
-    Step 14:
-        First Step 7 pair, which is the right-most destination pair.
-
-    Example:
-
-        V1 left | V0 middle | V1 right
-
-    Step 6:
-        V0.A65 & V0.A66
-
-    Step 7:
-        V1.B5 & V1.B6
-        V1.A5 & V1.A6
-
-    Step 14:
-        V1.B5 & V1.B6
+    Important:
+    - No cable-rack logic is used.
+    - No left/middle/right lane logic is used.
+    - No assumptions are made about V0, V1, V2, rack names, or drawing
+      orientation.
+    - Test circuits are selected only from red / blue / cyan PDF vector
+      geometry.
     """
-    if not terminals or not item_labels:
-        return []
-
-    lanes = build_physical_terminal_lanes(
-        terminals
-    )
-
-    lanes = add_pairs_to_lanes(lanes)
-
-    source_lane, destination_lanes = (
-        select_ct_loop_lanes(
-            lanes,
-            log_callback=log_callback,
-        )
-    )
-
-    if source_lane is None or not destination_lanes:
-        return []
-
-    source_pairs = source_lane["pairs"]
-
-    destination_pairs = []
-
-    # Right destination lane is added first, then left destination lane.
-    for destination_lane in destination_lanes:
-        destination_pairs.extend(
-            destination_lane["pairs"]
-        )
-
-    source_by_item = group_pairs_by_item(
-        source_pairs,
-        item_labels,
-    )
-
-    destination_by_item = group_pairs_by_item(
-        destination_pairs,
-        item_labels,
-    )
-
-    item_labels_by_name = group_item_labels_by_name(
-        item_labels
-    )
-
     rows = []
 
-    for item_name, item_occurrences in (
-        item_labels_by_name.items()
+    for component_index, component in enumerate(
+        components,
+        start=1,
     ):
-        item_source_pairs = remove_duplicate_pairs(
-            source_by_item.get(item_name, [])
+        component_terminals = get_component_terminals(
+            page,
+            component,
+            terminals,
         )
 
-        item_destination_pairs = remove_duplicate_pairs(
-            destination_by_item.get(item_name, [])
+        component_terminals = unique_terminals(
+            component_terminals
         )
 
-        # Step 6 = nearest source/middle pair to Item.
-        item_source_pairs = sorted(
-            item_source_pairs,
-            key=lambda pair: distance_to_item_occurrences(
-                pair,
-                item_occurrences,
-            ),
-        )
-
-        step_6_pairs = item_source_pairs[:1]
-
-        # Step 7:
-        # Right-most terminal pair first.
-        # If X positions are similar, use vertical position.
-        step_7_pairs = sorted(
-            item_destination_pairs,
-            key=lambda pair: (
-                -pair["x_center"],
-                pair["y_center"],
-            ),
-        )
-
-        # Step 14 = right-most Step 7 pair.
-        step_14_pairs = []
-
-        if step_7_pairs:
-            step_14_pairs = [step_7_pairs[0]]
-
-        # Do not create incomplete candidate rows.
-        if not step_6_pairs or not step_7_pairs:
+        if not component_terminals:
             write_log(
                 log_callback,
-                f"Item={item_name}: skipped; "
-                "Step 6 or Step 7 not found.",
+                f"Circuit {component_index}: skipped; "
+                "no terminal reference connected to "
+                f"{component['colour']} geometry.",
                 "DEBUG",
             )
             continue
 
-        review_required = any(
-            pair["review_required"]
-            for pair in (
-                step_6_pairs
-                + step_7_pairs
+        item_name = find_nearest_item_for_component(
+            page,
+            component,
+            item_labels,
+        )
+
+        endpoint_groups = get_component_end_terminal_groups(
+            page,
+            component,
+            component_terminals,
+        )
+
+        # G1 Step 6 and Step 7 are derived from the two physical ends of
+        # the coloured circuit, if endpoints can be identified.
+        #
+        # The complete terminal list is always retained in Test Terminals
+        # for engineering review and traceability.
+        step_6_terminals = []
+        step_7_terminals = []
+
+        if len(endpoint_groups) >= 2:
+            endpoint_groups.sort(
+                key=lambda group: (
+                    min(
+                        terminal["x_center"]
+                        for terminal in group
+                    ),
+                    min(
+                        terminal["y_center"]
+                        for terminal in group
+                    ),
+                )
             )
+
+            step_6_terminals = endpoint_groups[0]
+            step_7_terminals = endpoint_groups[-1]
+
+        elif len(component_terminals) >= 2:
+            # Fallback: choose the two furthest-apart terminal references.
+            # This remains geometry-based and does not use rack identity.
+            maximum_distance = -1.0
+            selected_pair = None
+
+            for first_index, first_terminal in enumerate(
+                component_terminals
+            ):
+                for second_terminal in component_terminals[
+                    first_index + 1:
+                ]:
+                    distance = point_distance(
+                        (
+                            first_terminal["x_center"],
+                            first_terminal["y_center"],
+                        ),
+                        (
+                            second_terminal["x_center"],
+                            second_terminal["y_center"],
+                        ),
+                    )
+
+                    if distance > maximum_distance:
+                        maximum_distance = distance
+                        selected_pair = (
+                            first_terminal,
+                            second_terminal,
+                        )
+
+            if selected_pair is not None:
+                step_6_terminals = [selected_pair[0]]
+                step_7_terminals = [selected_pair[1]]
+
+        elif len(component_terminals) == 1:
+            step_6_terminals = component_terminals
+
+        review_required = (
+            len(step_6_terminals) == 0
+            or len(step_7_terminals) == 0
         )
 
         rows.append(
             {
                 "Item": item_name,
-                "G1 - Step 6": format_pairs(
-                    step_6_pairs
+                "Circuit ID": create_circuit_id(
+                    component,
+                    component_index,
                 ),
-                "G1 - Step 7": format_pairs(
-                    step_7_pairs
+                "Circuit Colour": component["colour"],
+                "Test Terminals": format_terminal_list(
+                    component_terminals
                 ),
-                "G1 - Step 14": format_pairs(
-                    step_14_pairs
+                "G1 - Step 6": format_terminal_list(
+                    step_6_terminals
+                ),
+                "G1 - Step 7": format_terminal_list(
+                    step_7_terminals
+                ),
+                "G1 - Step 14": format_terminal_list(
+                    step_7_terminals
                 ),
                 "Review Status": (
                     "REVIEW REQUIRED"
@@ -1196,19 +1324,21 @@ def create_ct_loop_rows(
                     else "Draft"
                 ),
                 "Engineer Remarks": (
-                    "Candidate created from dynamic "
-                    "outer-middle-outer physical lane "
-                    "topology. Verify controlled drawing."
+                    "Test candidate created from "
+                    f"{component['colour']} circuit geometry. "
+                    "No cable-rack or terminal-lane logic used. "
+                    "Verify final test points against the "
+                    "controlled drawing."
                 ),
             }
         )
 
         write_log(
             log_callback,
-            f"CT loop: Item={item_name}; "
-            f"Step6={[pair['text'] for pair in step_6_pairs]}; "
-            f"Step7={[pair['text'] for pair in step_7_pairs]}; "
-            f"Step14={[pair['text'] for pair in step_14_pairs]}.",
+            f"Circuit {component_index}: "
+            f"colour={component['colour']}; "
+            f"item={item_name}; "
+            f"terminals={[terminal['terminal'] for terminal in component_terminals]}.",
             "DEBUG",
         )
 
@@ -1216,70 +1346,111 @@ def create_ct_loop_rows(
 
 
 # ---------------------------------------------------------------------
-# Page relevance and debug image
+# Page relevance
 # ---------------------------------------------------------------------
 
 def page_is_relevant(
     page_text: str,
     log_callback=None,
 ) -> bool:
+    is_ct_loop_page = bool(
+        CT_LOOP_PAGE_PATTERN.search(page_text)
+    )
+
     terminal_matches = TERMINAL_PATTERN.findall(
         page_text
     )
 
     item_matches = (
         ITEM_PATTERN.findall(page_text)
-        or FALLBACK_ITEM_PATTERN.findall(
-            page_text
-        )
+        or FALLBACK_ITEM_PATTERN.findall(page_text)
     )
 
     write_log(
         log_callback,
         "Page relevance: "
-        f"terminals={terminal_matches[:10]}; "
-        f"items={item_matches[:10]}.",
+        f"continuous_transmission={is_ct_loop_page}; "
+        f"terminal_count={len(terminal_matches)}; "
+        f"item_count={len(item_matches)}.",
         "DEBUG",
     )
 
-    return bool(terminal_matches) and bool(
-        item_matches
+    return (
+        is_ct_loop_page
+        and bool(terminal_matches)
     )
+
+
+# ---------------------------------------------------------------------
+# Debug image
+# ---------------------------------------------------------------------
+
+def draw_rectangle(
+    page,
+    rectangle: fitz.Rect,
+    colour: tuple[float, float, float],
+    width: float = 1.0,
+) -> None:
+    shape = page.new_shape()
+    shape.draw_rect(rectangle)
+    shape.finish(
+        color=colour,
+        width=width,
+        stroke_opacity=1.0,
+    )
+    shape.commit()
 
 
 def create_debug_image(
     page,
+    components: list[dict],
     terminals: list[dict],
 ) -> bytes:
-    red_colour = (1.0, 0.0, 0.0)
-    padding = 2.5
+    """
+    Debug colours:
+      Green      = extracted RED vector circuit component.
+      Purple     = extracted BLUE/CYAN vector circuit component.
+      Orange     = terminal reference.
+    """
+    for component in components:
+        if component["colour"] == "RED":
+            component_colour = (0.0, 0.75, 0.0)
+        else:
+            component_colour = (0.55, 0.0, 0.85)
 
-    shape = page.new_shape()
+        for segment in component["segments"]:
+            rect = fitz.Rect(segment["rect"])
+
+            padded_rect = fitz.Rect(
+                rect.x0 - 1.5,
+                rect.y0 - 1.5,
+                rect.x1 + 1.5,
+                rect.y1 + 1.5,
+            )
+
+            draw_rectangle(
+                page,
+                padded_rect,
+                component_colour,
+                width=0.7,
+            )
 
     for terminal in terminals:
-        terminal_box = fitz.Rect(
-            max(0, terminal["x0"] - padding),
-            max(0, terminal["y0"] - padding),
-            min(
-                page.rect.width,
-                terminal["x1"] + padding,
-            ),
-            min(
-                page.rect.height,
-                terminal["y1"] + padding,
-            ),
+        rect = terminal["rect"]
+
+        padded_rect = fitz.Rect(
+            rect.x0 - 2.0,
+            rect.y0 - 2.0,
+            rect.x1 + 2.0,
+            rect.y1 + 2.0,
         )
 
-        shape.draw_rect(terminal_box)
-
-    if terminals:
-        shape.finish(
-            color=red_colour,
-            width=1.3,
-            stroke_opacity=1.0,
+        draw_rectangle(
+            page,
+            padded_rect,
+            (1.0, 0.55, 0.0),
+            width=1.1,
         )
-
-        shape.commit()
 
     pixmap = page.get_pixmap(
         matrix=fitz.Matrix(1.5, 1.5),
@@ -1298,6 +1469,19 @@ def extract_pdf(
     log_callback=None,
     progress_callback=None,
 ) -> tuple[pd.DataFrame, dict[int, bytes]]:
+    """
+    Extract Continuous Transmission CT-loop test candidates.
+
+    Selection logic:
+      1. Find pages containing "CONTINUOUS TRANSMISSI".
+      2. Extract red and blue/cyan vector circuit wires.
+      3. Connect wire segments into coloured physical circuit components.
+      4. Find terminal references physically close to each circuit.
+      5. Create test rows only for coloured circuits with terminals.
+
+    No cable-rack, lane, rack-ID, V0/V1/V2, left/right, or fixed drawing
+    layout logic is used.
+    """
     start_time = time.perf_counter()
 
     records = []
@@ -1339,7 +1523,8 @@ def extract_pdf(
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
-                        "no Item / terminal pattern.",
+                        "not a Continuous Transmission page "
+                        "or no terminal references found.",
                         "DEBUG",
                     )
                     continue
@@ -1372,13 +1557,36 @@ def extract_pdf(
                     drawing_number
                 )
 
-                terminals = extract_terminal_references(
-                    page
+                coloured_segments = extract_coloured_segments(
+                    page,
+                    log_callback=log_callback,
                 )
 
-                item_labels = extract_item_labels(
-                    page
+                if not coloured_segments:
+                    write_log(
+                        log_callback,
+                        f"Page {page_number}: skipped; "
+                        "no red or blue/cyan vector circuits found.",
+                        "DEBUG",
+                    )
+                    continue
+
+                components = build_coloured_circuit_components(
+                    page,
+                    coloured_segments,
                 )
+
+                terminals = extract_terminal_references(page)
+                item_labels = extract_item_labels(page)
+
+                if not terminals:
+                    write_log(
+                        log_callback,
+                        f"Page {page_number}: skipped; "
+                        "no terminal references found.",
+                        "WARNING",
+                    )
+                    continue
 
                 write_log(
                     log_callback,
@@ -1386,22 +1594,15 @@ def extract_pdf(
                     f"drawing={drawing_number}; "
                     f"revision={drawing_revision}; "
                     f"location={location or 'NOT FOUND'}; "
+                    f"coloured_components={len(components)}; "
                     f"terminals={len(terminals)}; "
                     f"items={len(item_labels)}.",
                     "DEBUG",
                 )
 
-                if not terminals or not item_labels:
-                    write_log(
-                        log_callback,
-                        f"Page {page_number}: skipped; "
-                        f"terminals={len(terminals)}, "
-                        f"items={len(item_labels)}.",
-                        "WARNING",
-                    )
-                    continue
-
                 ct_loop_rows = create_ct_loop_rows(
+                    page,
+                    components,
                     terminals,
                     item_labels,
                     log_callback=log_callback,
@@ -1410,6 +1611,7 @@ def extract_pdf(
                 debug_images[page_number] = (
                     create_debug_image(
                         page,
+                        components,
                         terminals,
                     )
                 )
@@ -1427,6 +1629,13 @@ def extract_pdf(
                             "Drawing Rev.": drawing_revision,
                             "A11 CoV Work Procedure Appendix": (
                                 "G1"
+                            ),
+                            "Circuit ID": row["Circuit ID"],
+                            "Circuit Colour": (
+                                row["Circuit Colour"]
+                            ),
+                            "Test Terminals": (
+                                row["Test Terminals"]
                             ),
                             "G1 - Step 6": (
                                 row["G1 - Step 6"]
@@ -1475,10 +1684,9 @@ def extract_pdf(
                 "Item",
                 "Drawing No. Check list",
                 "Drawing Rev.",
-                "A11 CoV Work Procedure Appendix",
-                "G1 - Step 6",
-                "G1 - Step 7",
-                "G1 - Step 14",
+                "Circuit ID",
+                "Circuit Colour",
+                "Test Terminals",
                 "PDF Page",
             ],
             keep="first",
@@ -1498,7 +1706,9 @@ def extract_pdf(
         dataframe = dataframe.sort_values(
             by=[
                 "_drawing_sort",
+                "PDF Page",
                 "Item",
+                "Circuit ID",
             ],
             ascending=True,
             kind="stable",
