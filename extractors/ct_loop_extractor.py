@@ -1280,30 +1280,29 @@ def choose_step_pairs(
     item_pairs: list[dict],
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """
-    Select G1 Steps 6, 7 and 14 using physical circuit geometry.
+    Select Step 6 / Step 7 / Step 14 using circuit-row geometry.
 
-    No rack ID, terminal column, terminal name, Item name, drawing
-    number, location, or fixed colour value is used.
+    Generic required arrangement:
 
-    Required topology:
+        coloured outer pair A
+                 |
+                 |--- middle terminal pair = Step 6
+                 |
+        coloured outer pair B
 
-        Step 7 pair A ----- Step 6 bridge pair ----- Step 7 pair B
+    Step 7 = the two outer pairs.
+    Step 14 = the right-most Step 7 pair.
 
-    The Step 6 pair must lie geometrically between two outer Step 7
-    pairs. Step 14 is the right-most Step 7 pair.
-
-    Example:
-
-        V2.B87 & V2.B88      V1.D89 & V1.D90      V2.C3 & V2.C4
-             Step 7                Step 6                Step 7
-                                                           Step 14
+    No rack name, terminal column, terminal number, Item name,
+    location, or drawing number is used as a selection rule.
     """
     if len(item_pairs) < 3:
         return [], [], []
 
-    # Use only the most relevant candidates for the Item. This avoids
-    # comparing every unrelated terminal pair on a complex sheet.
-    candidate_pairs = sorted(
+    # Work only with reasonably related pairs for the Item.
+    # The list is capped to avoid comparing unrelated items on a
+    # crowded engineering drawing.
+    candidates = sorted(
         item_pairs,
         key=lambda pair: (
             pair["item_distance"],
@@ -1314,139 +1313,162 @@ def choose_step_pairs(
 
     topology_candidates = []
 
-    # Select every possible Step 6 candidate.
-    for source_index, source_pair in enumerate(
-        candidate_pairs
+    # Step 7 consists of two outer candidates.
+    for first_index, left_or_right_pair in enumerate(
+        candidates
     ):
-        remaining_pairs = [
-            pair
-            for index, pair in enumerate(candidate_pairs)
-            if index != source_index
-        ]
+        for other_pair in candidates[first_index + 1:]:
+            first_pair = left_or_right_pair
+            second_pair = other_pair
 
-        # Select every possible pair of Step 7 outer candidates.
-        for first_index, first_destination in enumerate(
-            remaining_pairs
-        ):
-            for second_destination in remaining_pairs[
-                first_index + 1:
-            ]:
-                first_point = first_destination["point"]
-                second_point = second_destination["point"]
-                source_point = source_pair["point"]
-
-                outer_span = point_distance(
-                    first_point,
-                    second_point,
+            # Sort physically: left outer pair first, right outer pair
+            # second. This is geometry only.
+            if first_pair["x_center"] > second_pair["x_center"]:
+                first_pair, second_pair = (
+                    second_pair,
+                    first_pair,
                 )
 
-                # Two destination pairs must not overlap physically.
-                if outer_span < 20.0:
-                    continue
+            outer_x_distance = (
+                second_pair["x_center"]
+                - first_pair["x_center"]
+            )
 
-                # Step 6 must fall on / near the line between the
-                # two Step 7 pairs.
-                source_to_outer_line = (
-                    point_to_segment_distance(
-                        source_point,
-                        first_point,
-                        second_point,
-                    )
-                )
+            # Outer terminal pairs must be meaningfully separated.
+            if outer_x_distance < 35.0:
+                continue
 
-                source_projection = get_segment_projection(
-                    source_point,
-                    first_point,
-                    second_point,
-                )
+            # Step 7 pairs should normally represent the same coloured
+            # circuit family. Dynamic group IDs are used; no RGB/hue is
+            # hardcoded here.
+            same_colour_group = (
+                first_pair["colour_group_id"]
+                == second_pair["colour_group_id"]
+            )
 
-                # The bridge pair should be inside the outer-pair span.
-                # A small tolerance permits imperfect PDF coordinates.
+            if not same_colour_group:
+                continue
+
+            outer_mid_x = (
+                first_pair["x_center"]
+                + second_pair["x_center"]
+            ) / 2
+
+            outer_mid_y = (
+                first_pair["y_center"]
+                + second_pair["y_center"]
+            ) / 2
+
+            outer_y_difference = abs(
+                first_pair["y_center"]
+                - second_pair["y_center"]
+            )
+
+            # The two Step 7 branches should be approximately on the
+            # same circuit row. A proportional tolerance prevents a
+            # fixed page-specific coordinate rule.
+            maximum_outer_y_difference = max(
+                25.0,
+                outer_x_distance * 0.35,
+            )
+
+            if outer_y_difference > maximum_outer_y_difference:
+                continue
+
+            for source_pair in candidates:
                 if (
-                    source_projection < -0.15
-                    or source_projection > 1.15
+                    source_pair is first_pair
+                    or source_pair is second_pair
                 ):
                     continue
 
-                first_to_source = point_distance(
-                    first_point,
-                    source_point,
-                )
-
-                second_to_source = point_distance(
-                    second_point,
-                    source_point,
-                )
-
-                # A good middle pair is reasonably balanced between
-                # the two outer terminal pairs.
-                balance_error = abs(
-                    first_to_source
-                    - second_to_source
-                )
-
-                # Prefer outer pairs sharing a circuit colour family.
-                # No actual colour is hardcoded: these group IDs come
-                # from dynamic PDF colour extraction.
-                destination_colour_penalty = 0.0
-
-                if (
-                    first_destination["colour_group_id"]
-                    != second_destination["colour_group_id"]
+                # Step 6 must be physically inside the Step 7 span.
+                # This specifically rejects a red terminal pair located
+                # to the left or right of both cyan branch pairs.
+                if not (
+                    first_pair["x_center"]
+                    < source_pair["x_center"]
+                    < second_pair["x_center"]
                 ):
-                    destination_colour_penalty = 80.0
+                    continue
 
-                # Prefer the bridge pair to be near the same coloured
-                # circuit family, but do not reject it if the bridge
-                # terminal text itself is black.
+                # Normalised source location:
+                # 0.0 = exactly at left outer pair
+                # 0.5 = exact middle
+                # 1.0 = exactly at right outer pair
+                source_position = (
+                    source_pair["x_center"]
+                    - first_pair["x_center"]
+                ) / outer_x_distance
+
+                # Step 6 must be materially inside the span rather than
+                # nearly on top of either Step 7 terminal pair.
+                if (
+                    source_position < 0.20
+                    or source_position > 0.80
+                ):
+                    continue
+
+                source_to_circuit_row = abs(
+                    source_pair["y_center"]
+                    - outer_mid_y
+                )
+
+                maximum_source_y_offset = max(
+                    30.0,
+                    outer_x_distance * 0.45,
+                )
+
+                if source_to_circuit_row > maximum_source_y_offset:
+                    continue
+
+                # Prefer the real centre of the outer pair span.
+                middle_error = abs(
+                    source_position - 0.50
+                )
+
+                # Step 6 is normally black/uncoloured or belongs to a
+                # different circuit family from the two coloured Step 7
+                # branches. It is a preference, not an absolute rule.
                 source_colour_penalty = 0.0
 
                 if (
                     source_pair["colour_group_id"]
-                    not in {
-                        first_destination["colour_group_id"],
-                        second_destination["colour_group_id"],
-                    }
+                    == first_pair["colour_group_id"]
                 ):
-                    source_colour_penalty = 20.0
+                    source_colour_penalty = 25.0
 
                 # Lower score is better.
                 #
-                # Priority:
-                # 1. Step 6 must lie on the Step 7-to-Step 7 path.
-                # 2. Step 6 should be between the outer pairs.
-                # 3. Outer pairs should belong to the same circuit
-                #    colour group where possible.
-                # 4. All three pairs should be related to the Item.
+                # Main priorities:
+                # - middle terminal is centred between the outer pairs;
+                # - all three pairs share a circuit row;
+                # - Step 7 outer pairs share a colour family;
+                # - pairs remain associated with the same Item.
                 score = (
-                    source_to_outer_line * 8.0
-                    + balance_error * 1.5
-                    + destination_colour_penalty
+                    middle_error * 300.0
+                    + source_to_circuit_row * 3.0
+                    + outer_y_difference * 2.0
                     + source_colour_penalty
                     + (
                         source_pair["item_distance"]
-                        + first_destination["item_distance"]
-                        + second_destination["item_distance"]
-                    ) * 0.15
-                    - outer_span * 0.05
+                        + first_pair["item_distance"]
+                        + second_pair["item_distance"]
+                    ) * 0.10
+                    - outer_x_distance * 0.05
                 )
 
                 topology_candidates.append(
                     {
                         "score": score,
                         "source_pair": source_pair,
-                        "destination_pairs": [
-                            first_destination,
-                            second_destination,
-                        ],
-                        "outer_span": outer_span,
-                        "source_to_outer_line": (
-                            source_to_outer_line
+                        "left_step_7_pair": first_pair,
+                        "right_step_7_pair": second_pair,
+                        "source_position": source_position,
+                        "source_to_circuit_row": (
+                            source_to_circuit_row
                         ),
-                        "source_projection": (
-                            source_projection
-                        ),
-                        "balance_error": balance_error,
+                        "outer_x_distance": outer_x_distance,
                     }
                 )
 
@@ -1456,9 +1478,9 @@ def choose_step_pairs(
     topology_candidates.sort(
         key=lambda candidate: (
             candidate["score"],
-            candidate["source_to_outer_line"],
-            candidate["balance_error"],
-            -candidate["outer_span"],
+            abs(candidate["source_position"] - 0.50),
+            candidate["source_to_circuit_row"],
+            -candidate["outer_x_distance"],
         )
     )
 
@@ -1468,17 +1490,13 @@ def choose_step_pairs(
         selected["source_pair"]
     ]
 
-    # Required Step 7 order:
-    # right-most pair first, then left-most pair.
-    step_7_pairs = sorted(
-        selected["destination_pairs"],
-        key=lambda pair: (
-            -pair["x_center"],
-            pair["y_center"],
-        ),
-    )
+    # Required order:
+    # right-most Step 7 pair first, then left-most Step 7 pair.
+    step_7_pairs = [
+        selected["right_step_7_pair"],
+        selected["left_step_7_pair"],
+    ]
 
-    # Step 14 = first / right-most Step 7 pair.
     step_14_pairs = step_7_pairs[:1]
 
     return (
