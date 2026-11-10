@@ -1667,16 +1667,73 @@ def colour_is_cyan(
     )
 
 
+def drawing_is_dashed(
+    drawing: dict,
+) -> bool:
+    """
+    Ignore dashed PDF paths.
+
+    Revision clouds, red dashed boundaries and temporary drawing
+    mark-ups are commonly dashed. The CT circuit paths of interest
+    are expected to be solid vector paths.
+    """
+    dashes = drawing.get("dashes")
+
+    if dashes is None:
+        return False
+
+    dashes_text = str(dashes).strip()
+
+    return dashes_text not in {
+        "",
+        "[] 0",
+        "[]0",
+        "None",
+    }
+
+
+def drawing_segment_length(
+    drawing: dict,
+) -> float:
+    """
+    Return total vector length for a drawing object.
+    """
+    total_length = 0.0
+
+    for item in drawing.get("items", []):
+        for start, end in drawing_item_to_segments(item):
+            total_length += point_distance(
+                start,
+                end,
+            )
+
+    return total_length
+
+
 def get_circuit_colours(
     page,
 ) -> set[str]:
     """
-    Finds red and cyan vector objects on the PDF page.
+    Detect meaningful red/cyan circuit vector linework.
 
-    The red/cyan circuit lines in your screenshot are normally PDF
-    vector drawings, so page.get_drawings() is used.
+    Excludes:
+      - dashed revision / boundary lines;
+      - title-block and notes area;
+      - tiny isolated coloured objects.
+
+    This avoids treating a red dashed rectangle or red notes as a
+    red circuit.
     """
     found_colours = set()
+
+    page_height = float(page.rect.height)
+
+    # Bottom area normally contains title block, notes, revision marks.
+    # Do not treat colours there as circuit wiring.
+    circuit_bottom_limit = page_height * 0.82
+
+    # A real circuit normally consists of substantial vector linework.
+    minimum_total_length = 80.0
 
     try:
         drawings = page.get_drawings()
@@ -1684,6 +1741,27 @@ def get_circuit_colours(
         return found_colours
 
     for drawing in drawings:
+        drawing_rect = drawing.get("rect")
+
+        if drawing_rect is None:
+            continue
+
+        # Ignore title block / notes / bottom revision area.
+        if drawing_rect.y0 >= circuit_bottom_limit:
+            continue
+
+        # Ignore dashed boxes and dashed mark-ups.
+        if drawing_is_dashed(drawing):
+            continue
+
+        total_length = drawing_segment_length(
+            drawing
+        )
+
+        # Ignore tiny coloured objects such as marks / symbols.
+        if total_length < minimum_total_length:
+            continue
+
         stroke_colour = drawing.get("color")
         fill_colour = drawing.get("fill")
 
@@ -1732,17 +1810,28 @@ def get_bottom_title_block_text(
 
 def is_continuous_transmission_page(
     page_text: str,
+    circuit_colours: set[str],
 ) -> bool:
     """
-    Fast text-only Continuous Transmission detector.
+    A valid CT Loop candidate page must contain:
 
-    Do not inspect vector drawings here. Most PDF pages are not CT
-    drawings, and page.get_drawings() is expensive on engineering PDFs.
+      1. CONTINUOUS TRANSMISSION in the extracted page text.
+      2. Meaningful solid red and/or cyan vector circuit linework.
+
+    circuit_colours must come from get_circuit_colours(), which
+    excludes dashed boxes, title-block colours and small mark-ups.
     """
-    return bool(
+    has_continuous_transmission = bool(
         CONTINUOUS_TRANSMISSION_PATTERN.search(
             normalise_text(page_text)
         )
+    )
+
+    has_coloured_circuit = bool(circuit_colours)
+
+    return (
+        has_continuous_transmission
+        and has_coloured_circuit
     )
 
 # ---------------------------------------------------------------------
@@ -1788,15 +1877,15 @@ def extract_pdf(
                     sort=True,
                 )
 
-                # Fast initial filter: check text only.
-                # Do not call page.get_drawings() on every PDF page.
-                # Fast initial filter: check text only.
-                # Do not call page.get_drawings() on every PDF page.
-                is_ct_page = is_continuous_transmission_page(
-                    page_text
+                # Fast first filter: do not inspect vectors unless the page title
+                # contains CONTINUOUS TRANSMISSION.
+                has_continuous_transmission = bool(
+                    CONTINUOUS_TRANSMISSION_PATTERN.search(
+                        normalise_text(page_text)
+                    )
                 )
 
-                if not is_ct_page:
+                if not has_continuous_transmission:
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
@@ -1805,9 +1894,24 @@ def extract_pdf(
                     )
                     continue
 
-                # Only inspect PDF vector drawings after the page has passed
-                # the inexpensive Continuous Transmission title check.
+                # This calls page.get_drawings(), so do it only after the fast
+                # title-text check above.
                 circuit_colours = get_circuit_colours(page)
+
+                is_ct_page = is_continuous_transmission_page(
+                    page_text,
+                    circuit_colours,
+                )
+
+                if not is_ct_page:
+                    write_log(
+                        log_callback,
+                        f"Page {page_number}: skipped; "
+                        "Continuous Transmission found but no valid "
+                        "solid red/cyan circuit linework was found.",
+                        "DEBUG",
+                    )
+                    continue
 
                 write_log(
                     log_callback,
