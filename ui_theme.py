@@ -809,6 +809,58 @@ def render_global_theme(theme_mode: str):
         hr {{
             border-color: {colours["border"]} !important;
         }}
+        /* ====================================================
+        FORCE WHITE TEXT INSIDE BUTTONS
+        ==================================================== */
+
+        .stButton > button,
+        .stButton > button *,
+        .stButton > button span,
+        .stButton > button p,
+        .stButton > button div {{
+            color: #FFFFFF !important;
+            -webkit-text-fill-color: #FFFFFF !important;
+        }}
+
+        .stButton > button svg,
+        .stButton > button svg path {{
+            color: #FFFFFF !important;
+            fill: #FFFFFF !important;
+            stroke: #FFFFFF !important;
+        }}
+
+        /* Download buttons */
+        .stDownloadButton > button,
+        .stDownloadButton > button *,
+        .stDownloadButton > button span,
+        .stDownloadButton > button p,
+        .stDownloadButton > button div {{
+            color: #FFFFFF !important;
+            -webkit-text-fill-color: #FFFFFF !important;
+        }}
+
+        .stDownloadButton > button svg,
+        .stDownloadButton > button svg path {{
+            color: #FFFFFF !important;
+            fill: #FFFFFF !important;
+            stroke: #FFFFFF !important;
+        }}
+
+        /* File uploader Browse / Upload buttons */
+        [data-testid="stFileUploader"] button,
+        [data-testid="stFileUploader"] button *,
+        [data-testid="stFileUploader"] button span,
+        [data-testid="stFileUploader"] button p {{
+            color: #FFFFFF !important;
+            -webkit-text-fill-color: #FFFFFF !important;
+        }}
+
+        [data-testid="stFileUploader"] button svg,
+        [data-testid="stFileUploader"] button svg path {{
+            color: #FFFFFF !important;
+            fill: #FFFFFF !important;
+            stroke: #FFFFFF !important;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
