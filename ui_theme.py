@@ -505,6 +505,48 @@ def render_global_theme(theme_mode: str):
             transform: translateY(1px) !important;
             box-shadow: none !important;
         }}
+        /* Download buttons */
+        .stDownloadButton > button {{
+            min-height: 42px !important;
+            padding: 0.55rem 1rem !important;
+
+            background: {colours["green"]} !important;
+            color: #FFFFFF !important;
+
+            border: 1px solid {colours["green"]} !important;
+            border-radius: 7px !important;
+
+            font-size: 14px !important;
+            font-weight: 650 !important;
+            letter-spacing: 0.1px !important;
+
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.10) !important;
+
+            transition:
+                background-color 0.16s ease,
+                border-color 0.16s ease,
+                box-shadow 0.16s ease,
+                transform 0.10s ease !important;
+        }}
+
+        .stDownloadButton > button:hover {{
+            background: {colours["download_hover"]} !important;
+            border-color: {colours["download_hover"]} !important;
+            color: #FFFFFF !important;
+
+            box-shadow: 0 3px 8px rgba(27, 94, 32, 0.22) !important;
+        }}
+
+        .stDownloadButton > button:focus,
+        .stDownloadButton > button:focus-visible {{
+            outline: none !important;
+            box-shadow: 0 0 0 3px rgba(46, 125, 50, 0.22) !important;
+        }}
+
+        .stDownloadButton > button:active {{
+            transform: translateY(1px) !important;
+            box-shadow: none !important;
+        }}
 
         /* ====================================================
            TEXT / NUMBER INPUTS
@@ -568,65 +610,6 @@ def render_global_theme(theme_mode: str):
         [data-testid="stMetricValue"],
         [data-testid="stMetricValue"] div {{
             color: {colours["navy"]} !important;
-        }}
-
-        /* ====================================================
-        STREAMLIT ALERTS
-        Chrome / Google Material-inspired information alerts.
-        ==================================================== */
-
-        /*
-            Streamlit does not consistently expose the alert type
-            as a stable CSS attribute in every version.
-
-            Therefore this reliably styles st.info() alerts.
-            It may also affect success/warning/error alerts depending
-            on your Streamlit version.
-        */
-
-        div[data-testid="stAlert"] {{
-            margin-top: 0.75rem !important;
-            margin-bottom: 0.75rem !important;
-        }}
-
-
-        /* Add a subtle Chrome-style left accent line */
-        div[data-testid="stAlert"] [role="alert"]::before,
-        div[data-testid="stAlert"] [data-baseweb="notification"]::before {{
-            content: "" !important;
-            position: absolute !important;
-            top: 0 !important;
-            bottom: 0 !important;
-            left: 0 !important;
-            width: 3px !important;
-            background: {colours["info_border"]} !important;
-            border-radius: 8px 0 0 8px !important;
-        }}
-
-        /* Alert panel must be relative for the accent line */
-        div[data-testid="stAlert"] [role="alert"],
-        div[data-testid="stAlert"] [data-baseweb="notification"] {{
-            position: relative !important;
-        }}
-
-        /* Alert message text */
-        div[data-testid="stAlert"] [role="alert"] p,
-        div[data-testid="stAlert"] [role="alert"] span,
-        div[data-testid="stAlert"] [role="alert"] div,
-        div[data-testid="stAlert"] [data-baseweb="notification"] p,
-        div[data-testid="stAlert"] [data-baseweb="notification"] span,
-        div[data-testid="stAlert"] [data-baseweb="notification"] div {{
-            color: {colours["info_text"]} !important;
-        }}
-
-        /* Alert icon */
-        div[data-testid="stAlert"] svg {{
-            color: {colours["info_icon"]} !important;
-            fill: {colours["info_icon"]} !important;
-        }}
-
-        div[data-testid="stAlert"] svg path {{
-            fill: {colours["info_icon"]} !important;
         }}
 
         pre,
