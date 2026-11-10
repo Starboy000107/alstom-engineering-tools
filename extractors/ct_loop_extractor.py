@@ -989,6 +989,149 @@ def build_terminal_pair_candidates(
 
     return unique_pairs
 
+def build_fallback_terminal_pair_candidates(
+    page,
+    terminals: list[dict],
+) -> list[dict]:
+    """
+    Fallback pairing for Continuous Transmission drawings.
+
+    Some valid terminal text labels are not physically close enough to
+    the red/cyan vector lines for strict colour-to-terminal association.
+
+    This fallback uses:
+      - same rack;
+      - same terminal column;
+      - consecutive terminal numbers;
+      - reasonable physical label distance.
+
+    It deliberately does not require a terminal to be close to a
+    coloured circuit segment.
+    """
+    page_scale = max(
+        float(page.rect.width),
+        float(page.rect.height),
+    )
+
+    maximum_pair_distance = max(
+        35.0,
+        min(page_scale * 0.18, 250.0),
+    )
+
+    candidates = []
+
+    for first_index, first_terminal in enumerate(
+        terminals
+    ):
+        for second_terminal in terminals[
+            first_index + 1:
+        ]:
+            if (
+                first_terminal["rack"]
+                != second_terminal["rack"]
+            ):
+                continue
+
+            if (
+                first_terminal["column"]
+                != second_terminal["column"]
+            ):
+                continue
+
+            if not terminal_numbers_are_consecutive(
+                first_terminal,
+                second_terminal,
+            ):
+                continue
+
+            pair_distance = point_distance(
+                first_terminal["point"],
+                second_terminal["point"],
+            )
+
+            if pair_distance > maximum_pair_distance:
+                continue
+
+            pair_x = round(
+                (
+                    first_terminal["x_center"]
+                    + second_terminal["x_center"]
+                ) / 2,
+                2,
+            )
+
+            pair_y = round(
+                (
+                    first_terminal["y_center"]
+                    + second_terminal["y_center"]
+                ) / 2,
+                2,
+            )
+
+            candidates.append(
+                {
+                    "text": (
+                        f"{first_terminal['terminal']} & "
+                        f"{second_terminal['terminal']}"
+                    ),
+                    "rack": first_terminal["rack"],
+                    "column": first_terminal["column"],
+
+                    # Group 0 means fallback/non-colour-specific.
+                    "colour_group_id": 0,
+                    "colour_distance": 999.0,
+
+                    "pair_distance": pair_distance,
+                    "x_center": pair_x,
+                    "y_center": pair_y,
+                    "point": fitz.Point(pair_x, pair_y),
+                    "terminals": [
+                        first_terminal,
+                        second_terminal,
+                    ],
+                }
+            )
+
+    candidates.sort(
+        key=lambda pair: (
+            pair["pair_distance"],
+            pair["y_center"],
+            pair["x_center"],
+        )
+    )
+
+    # A terminal must belong to only one selected pair.
+    used_terminals = set()
+    selected_pairs = []
+
+    for pair in candidates:
+        first_terminal = pair["terminals"][0]
+        second_terminal = pair["terminals"][1]
+
+        first_key = (
+            first_terminal["terminal"],
+            round(first_terminal["x_center"], 1),
+            round(first_terminal["y_center"], 1),
+        )
+
+        second_key = (
+            second_terminal["terminal"],
+            round(second_terminal["x_center"], 1),
+            round(second_terminal["y_center"], 1),
+        )
+
+        if (
+            first_key in used_terminals
+            or second_key in used_terminals
+        ):
+            continue
+
+        used_terminals.add(first_key)
+        used_terminals.add(second_key)
+
+        selected_pairs.append(pair)
+
+    return selected_pairs
 
 # ---------------------------------------------------------------------
 # Item grouping and Step selection
@@ -1106,6 +1249,14 @@ def choose_step_pairs(
             pair["colour_group_id"]
         ].append(pair)
 
+    # Fallback pairs use colour group 0. They are valid terminal pairs,
+    # but they do not carry reliable red/cyan association. In that case,
+    # skip colour-group selection and use the geometry ordering below.
+    has_only_fallback_pairs = (
+        len(pairs_by_colour) == 1
+        and 0 in pairs_by_colour
+    )
+
     for pairs in pairs_by_colour.values():
         pairs.sort(
             key=lambda pair: (
@@ -1126,7 +1277,10 @@ def choose_step_pairs(
     )
 
     # Preferred: Step 7 has two pairs from one colour group.
-    for step_7_colour, step_7_candidates in colour_groups:
+    # Do not use this route when all pairs came from the fallback.
+    for step_7_colour, step_7_candidates in (
+        [] if has_only_fallback_pairs else colour_groups
+    ):
         if len(step_7_candidates) < 2:
             continue
 
@@ -1267,11 +1421,39 @@ def create_ct_loop_rows(
         colour_groups,
     )
 
+    strict_pair_count = len(terminal_pairs)
+
+    # Pages such as 501 and 503 can have valid terminal references
+    # but the terminal text can be physically separated from the
+    # red/cyan linework. If strict colour geometry gives fewer than
+    # three pairs, use the terminal-number/physical-layout fallback.
+    if len(terminal_pairs) < 3:
+        fallback_pairs = (
+            build_fallback_terminal_pair_candidates(
+                page,
+                terminals,
+            )
+        )
+
+        if len(fallback_pairs) > len(terminal_pairs):
+            terminal_pairs = fallback_pairs
+
+            write_log(
+                log_callback,
+                "Using fallback terminal pairing because "
+                "strict coloured-circuit pairing found fewer "
+                f"than three pairs. strict_pairs="
+                f"{strict_pair_count}; "
+                f"fallback_pairs={len(fallback_pairs)}.",
+                "INFO",
+            )
+
     write_log(
         log_callback,
         "Circuit candidates: "
         f"terminals={len(terminals)}; "
-        f"pairs={len(terminal_pairs)}; "
+        f"strict_pairs={strict_pair_count}; "
+        f"usable_pairs={len(terminal_pairs)}; "
         f"colour_1_segments="
         f"{len(colour_groups.get(1, []))}; "
         f"colour_2_segments="
