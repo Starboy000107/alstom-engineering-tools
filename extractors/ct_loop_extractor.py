@@ -1699,8 +1699,7 @@ def extract_pdf(
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
-                        "not a Continuous Transmission "
-                        "coloured circuit page.",
+                        "no Item / terminal pattern.",
                         "DEBUG",
                     )
                     continue
