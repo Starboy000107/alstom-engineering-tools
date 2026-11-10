@@ -534,8 +534,8 @@ def render_drawing_extractor_app():
     )
 
     available_extraction_types = [
-        "CT Loop",
-        "Return Channel",
+        "CT Loop2",
+        "Return Channel2",
     ]
 
     extraction_type = st.selectbox(
