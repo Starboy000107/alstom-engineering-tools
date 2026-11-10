@@ -1464,15 +1464,6 @@ def create_debug_image(
 # Continuous Transmission drawing/page filter
 # ---------------------------------------------------------------------
 
-def normalise_text(
-    value: str,
-) -> str:
-    return re.sub(
-        r"\s+",
-        " ",
-        value or "",
-    ).strip()
-
 
 def colour_is_red(
     colour,
@@ -1691,15 +1682,18 @@ def extract_pdf(
                     f"fallback_item_matches={len(fallback_item_matches)}.",
                     "INFO",
                 )
-                # Keep your existing terminal/item relevance check.
+                # Check Continuous Transmission title, terminal/item text,
+                # and coloured circuit-vector groups.
                 if not page_is_relevant(
+                    page,
                     page_text,
                     log_callback=log_callback,
                 ):
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
-                        "no Item / terminal pattern.",
+                        "missing terminal/item pattern or usable "
+                        "coloured circuit groups.",
                         "DEBUG",
                     )
                     continue
