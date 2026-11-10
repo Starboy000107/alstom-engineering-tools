@@ -1245,141 +1245,246 @@ def get_item_pair_candidates(
     return candidates
 
 
+def get_segment_projection(
+    point: fitz.Point,
+    start: fitz.Point,
+    end: fitz.Point,
+) -> float:
+    """
+    Return the relative projection of point onto the line:
+
+        start ---------------- end
+
+    0.0 = at start
+    1.0 = at end
+    0.5 = in the middle
+
+    Values below 0 or above 1 mean the point is outside the
+    start/end span.
+    """
+    dx = end.x - start.x
+    dy = end.y - start.y
+
+    length_squared = dx * dx + dy * dy
+
+    if length_squared == 0:
+        return 999.0
+
+    return (
+        (point.x - start.x) * dx
+        + (point.y - start.y) * dy
+    ) / length_squared
+
+
 def choose_step_pairs(
     item_pairs: list[dict],
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """
-    Produce required output shape:
+    Select G1 Steps 6, 7 and 14 using physical circuit geometry.
 
-        Step 6:
-            exactly one terminal pair
+    No rack ID, terminal column, terminal name, Item name, drawing
+    number, location, or fixed colour value is used.
 
-        Step 7:
-            exactly two terminal pairs
+    Required topology:
 
-        Step 14:
-            first Step 7 pair
+        Step 7 pair A ----- Step 6 bridge pair ----- Step 7 pair B
 
-    Preferred selection:
-        - Step 7 comes from one coloured circuit group containing
-          at least two terminal pairs.
-        - Step 6 comes from the other coloured circuit group.
+    The Step 6 pair must lie geometrically between two outer Step 7
+    pairs. Step 14 is the right-most Step 7 pair.
 
-    Fallback:
-        - If PDF colour grouping is fragmented, the best three
-          geometrically associated pairs are used.
+    Example:
 
-    No cable-rack topology is used.
+        V2.B87 & V2.B88      V1.D89 & V1.D90      V2.C3 & V2.C4
+             Step 7                Step 6                Step 7
+                                                           Step 14
     """
     if len(item_pairs) < 3:
         return [], [], []
 
-    pairs_by_colour = defaultdict(list)
-
-    for pair in item_pairs:
-        pairs_by_colour[
-            pair["colour_group_id"]
-        ].append(pair)
-
-    # Fallback pairs use colour group 0. They are valid terminal pairs,
-    # but they do not carry reliable red/cyan association. In that case,
-    # skip colour-group selection and use the geometry ordering below.
-    has_only_fallback_pairs = (
-        len(pairs_by_colour) == 1
-        and 0 in pairs_by_colour
-    )
-
-    for pairs in pairs_by_colour.values():
-        pairs.sort(
-            key=lambda pair: (
-                pair["item_distance"],
-                pair["colour_distance"],
-                -pair["x_center"],
-                pair["y_center"],
-            )
-        )
-
-    colour_groups = sorted(
-        pairs_by_colour.items(),
-        key=lambda group: (
-            len(group[1]),
-            -group[1][0]["item_distance"],
-        ),
-        reverse=True,
-    )
-
-    # Preferred: Step 7 has two pairs from one colour group.
-    # Do not use this route when all pairs came from the fallback.
-    for step_7_colour, step_7_candidates in (
-        [] if has_only_fallback_pairs else colour_groups
-    ):
-        if len(step_7_candidates) < 2:
-            continue
-
-        step_6_candidates = []
-
-        for colour_id, candidates in colour_groups:
-            if colour_id == step_7_colour:
-                continue
-
-            step_6_candidates.extend(candidates)
-
-        if not step_6_candidates:
-            continue
-
-        step_6_candidates.sort(
-            key=lambda pair: (
-                pair["item_distance"],
-                pair["colour_distance"],
-            )
-        )
-
-        step_6_pairs = step_6_candidates[:1]
-
-        step_7_pairs = sorted(
-            step_7_candidates[:2],
-            key=lambda pair: (
-                -pair["x_center"],
-                pair["y_center"],
-            ),
-        )
-
-        step_14_pairs = step_7_pairs[:1]
-
-        return (
-            step_6_pairs,
-            step_7_pairs,
-            step_14_pairs,
-        )
-
-    # Fallback for fragmented colour vectors:
-    ordered_pairs = sorted(
+    # Use only the most relevant candidates for the Item. This avoids
+    # comparing every unrelated terminal pair on a complex sheet.
+    candidate_pairs = sorted(
         item_pairs,
         key=lambda pair: (
             pair["item_distance"],
             pair["colour_distance"],
-            -pair["x_center"],
-            pair["y_center"],
+            pair["pair_distance"],
+        ),
+    )[:12]
+
+    topology_candidates = []
+
+    # Select every possible Step 6 candidate.
+    for source_index, source_pair in enumerate(
+        candidate_pairs
+    ):
+        remaining_pairs = [
+            pair
+            for index, pair in enumerate(candidate_pairs)
+            if index != source_index
+        ]
+
+        # Select every possible pair of Step 7 outer candidates.
+        for first_index, first_destination in enumerate(
+            remaining_pairs
+        ):
+            for second_destination in remaining_pairs[
+                first_index + 1:
+            ]:
+                first_point = first_destination["point"]
+                second_point = second_destination["point"]
+                source_point = source_pair["point"]
+
+                outer_span = point_distance(
+                    first_point,
+                    second_point,
+                )
+
+                # Two destination pairs must not overlap physically.
+                if outer_span < 20.0:
+                    continue
+
+                # Step 6 must fall on / near the line between the
+                # two Step 7 pairs.
+                source_to_outer_line = (
+                    point_to_segment_distance(
+                        source_point,
+                        first_point,
+                        second_point,
+                    )
+                )
+
+                source_projection = get_segment_projection(
+                    source_point,
+                    first_point,
+                    second_point,
+                )
+
+                # The bridge pair should be inside the outer-pair span.
+                # A small tolerance permits imperfect PDF coordinates.
+                if (
+                    source_projection < -0.15
+                    or source_projection > 1.15
+                ):
+                    continue
+
+                first_to_source = point_distance(
+                    first_point,
+                    source_point,
+                )
+
+                second_to_source = point_distance(
+                    second_point,
+                    source_point,
+                )
+
+                # A good middle pair is reasonably balanced between
+                # the two outer terminal pairs.
+                balance_error = abs(
+                    first_to_source
+                    - second_to_source
+                )
+
+                # Prefer outer pairs sharing a circuit colour family.
+                # No actual colour is hardcoded: these group IDs come
+                # from dynamic PDF colour extraction.
+                destination_colour_penalty = 0.0
+
+                if (
+                    first_destination["colour_group_id"]
+                    != second_destination["colour_group_id"]
+                ):
+                    destination_colour_penalty = 80.0
+
+                # Prefer the bridge pair to be near the same coloured
+                # circuit family, but do not reject it if the bridge
+                # terminal text itself is black.
+                source_colour_penalty = 0.0
+
+                if (
+                    source_pair["colour_group_id"]
+                    not in {
+                        first_destination["colour_group_id"],
+                        second_destination["colour_group_id"],
+                    }
+                ):
+                    source_colour_penalty = 20.0
+
+                # Lower score is better.
+                #
+                # Priority:
+                # 1. Step 6 must lie on the Step 7-to-Step 7 path.
+                # 2. Step 6 should be between the outer pairs.
+                # 3. Outer pairs should belong to the same circuit
+                #    colour group where possible.
+                # 4. All three pairs should be related to the Item.
+                score = (
+                    source_to_outer_line * 8.0
+                    + balance_error * 1.5
+                    + destination_colour_penalty
+                    + source_colour_penalty
+                    + (
+                        source_pair["item_distance"]
+                        + first_destination["item_distance"]
+                        + second_destination["item_distance"]
+                    ) * 0.15
+                    - outer_span * 0.05
+                )
+
+                topology_candidates.append(
+                    {
+                        "score": score,
+                        "source_pair": source_pair,
+                        "destination_pairs": [
+                            first_destination,
+                            second_destination,
+                        ],
+                        "outer_span": outer_span,
+                        "source_to_outer_line": (
+                            source_to_outer_line
+                        ),
+                        "source_projection": (
+                            source_projection
+                        ),
+                        "balance_error": balance_error,
+                    }
+                )
+
+    if not topology_candidates:
+        return [], [], []
+
+    topology_candidates.sort(
+        key=lambda candidate: (
+            candidate["score"],
+            candidate["source_to_outer_line"],
+            candidate["balance_error"],
+            -candidate["outer_span"],
         )
     )
 
-    if len(ordered_pairs) < 3:
-        return [], [], []
+    selected = topology_candidates[0]
 
-    step_6_pairs = ordered_pairs[:1]
+    step_6_pairs = [
+        selected["source_pair"]
+    ]
 
+    # Required Step 7 order:
+    # right-most pair first, then left-most pair.
     step_7_pairs = sorted(
-        ordered_pairs[1:3],
+        selected["destination_pairs"],
         key=lambda pair: (
             -pair["x_center"],
             pair["y_center"],
         ),
     )
 
+    # Step 14 = first / right-most Step 7 pair.
+    step_14_pairs = step_7_pairs[:1]
+
     return (
         step_6_pairs,
         step_7_pairs,
-        step_7_pairs[:1],
+        step_14_pairs,
     )
 
 
@@ -1513,6 +1618,18 @@ def create_ct_loop_rows(
             step_14_pairs,
         ) = choose_step_pairs(item_pairs)
 
+        write_log(
+            log_callback,
+            f"Item={item_name}: pair candidates="
+            f"{[(pair['text'], pair['colour_group_id'], "
+            f"round(pair['item_distance'], 1), "
+            f"round(pair['x_center'], 1), "
+            f"round(pair['y_center'], 1)) for pair in item_pairs]}; "
+            f"Step6={[pair['text'] for pair in step_6_pairs]}; "
+            f"Step7={[pair['text'] for pair in step_7_pairs]}.",
+            "DEBUG",
+        )
+        
         if (
             len(step_6_pairs) != 1
             or len(step_7_pairs) != 2
