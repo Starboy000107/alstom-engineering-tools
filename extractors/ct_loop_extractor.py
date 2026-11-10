@@ -1617,7 +1617,7 @@ def create_ct_loop_rows(
             step_7_pairs,
             step_14_pairs,
         ) = choose_step_pairs(item_pairs)
-
+        
         write_log(
             log_callback,
             f"Item={item_name}: pair candidates="
