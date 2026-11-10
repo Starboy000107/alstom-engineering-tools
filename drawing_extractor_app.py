@@ -12,10 +12,15 @@ import streamlit as st
 from exports.ct_loop_excel_export import (
     build_excel as build_ct_loop_excel,
 )
+from exports.return_channel_excel_export import (
+    build_excel as build_return_channel_excel,
+)
 from extractors.ct_loop_extractor import (
     extract_pdf as extract_ct_loop_pdf,
 )
-
+from extractors.return_channel_extractor import (
+    extract_pdf as extract_return_channel_pdf,
+)
 
 APP_NAME = "drawing_extractor"
 
@@ -430,9 +435,8 @@ def render_processing_logs():
 
 def get_extractor_configuration(extraction_type):
     """
-    Return configured functions for the selected extraction type.
-
-    Add future drawing extractor types here.
+    Return functions and UI configuration for the selected
+    drawing extraction type.
     """
 
     extraction_options = {
@@ -440,6 +444,19 @@ def get_extractor_configuration(extraction_type):
             "extract_function": extract_ct_loop_pdf,
             "excel_function": build_ct_loop_excel,
             "review_function": render_ct_loop_review_area,
+            "download_file_name": (
+                "CT_Loop_Drawing_Extract.xlsx"
+            ),
+        },
+        "Return Channel": {
+            "extract_function": extract_return_channel_pdf,
+            "excel_function": build_return_channel_excel,
+            "review_function": (
+                render_return_channel_review_area
+            ),
+            "download_file_name": (
+                "Return_Channel_Drawing_Extract.xlsx"
+            ),
         },
     }
 
@@ -454,6 +471,7 @@ def render_drawing_extractor_app():
 
     Current supported extraction type:
     - CT Loop
+    - Return Channel
     """
 
     initialize_drawing_extractor_state()
@@ -508,7 +526,7 @@ def render_drawing_extractor_app():
             </div>
 
             <div class="extractor-card-description">
-                CT Loop is currently available. Additional drawing extraction
+                CT Loop and Return Channel are currently available. Additional drawing extraction
                 formats can be added to this platform later.
             </div>
         </div>
@@ -517,6 +535,7 @@ def render_drawing_extractor_app():
 
     available_extraction_types = [
         "CT Loop",
+        "Return Channel",
     ]
 
     extraction_type = st.selectbox(
@@ -1023,4 +1042,210 @@ def render_ct_loop_review_area(
         ),
         type="primary",
         key="drawing_extractor_download_excel",
+    )
+
+def render_return_channel_review_area(
+    pdf_bytes,
+    checklist,
+    extraction_type,
+    excel_function,
+):
+    """
+    Return Channel review interface.
+    """
+
+    left_column, right_column = st.columns(
+        [1.1, 1.5],
+    )
+
+    with left_column:
+        st.markdown(
+            """
+            <div class="extractor-review-heading">
+                Source Drawing Review
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        pages_with_candidates = sorted(
+            checklist["PDF Page"]
+            .dropna()
+            .astype(int)
+            .unique()
+            .tolist()
+        )
+
+        if not pages_with_candidates:
+            st.warning(
+                "No detected Return Channel pages are available "
+                "for review."
+            )
+            return
+
+        selected_page = st.selectbox(
+            "Detected drawing page",
+            options=pages_with_candidates,
+            key=(
+                "return_channel_selected_detected_page"
+            ),
+        )
+
+        page_image = render_pdf_page(
+            pdf_bytes,
+            selected_page,
+        )
+
+        st.image(
+            page_image,
+            caption=(
+                f"Controlled {extraction_type} drawing "
+                f"PDF page {selected_page}"
+            ),
+            use_container_width=True,
+        )
+
+        show_debug = st.checkbox(
+            "Show detected terminal references",
+            value=False,
+            key="return_channel_show_debug",
+        )
+
+        if show_debug:
+            debug_image = (
+                st.session_state
+                .drawing_extractor_debug_images
+                .get(selected_page)
+            )
+
+            if debug_image is None:
+                st.info(
+                    "No debug image was generated for this page."
+                )
+            else:
+                st.image(
+                    debug_image,
+                    caption=(
+                        "Detection overlay: red boxes show "
+                        "terminal references selected during "
+                        "Return Channel extraction."
+                    ),
+                    use_container_width=True,
+                )
+
+    with right_column:
+        st.markdown(
+            """
+            <div class="extractor-review-heading">
+                Engineering Review
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        page_filter = st.checkbox(
+            "Show selected PDF page only",
+            value=True,
+            key="return_channel_page_filter",
+        )
+
+        if page_filter:
+            displayed_data = checklist[
+                checklist["PDF Page"] == selected_page
+            ].copy()
+        else:
+            displayed_data = checklist.copy()
+
+        edited_data = st.data_editor(
+            displayed_data,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            key="return_channel_data_editor",
+            column_config={
+                "Include": st.column_config.CheckboxColumn(
+                    "Include",
+                    help="Include this row in Excel output.",
+                ),
+                "PDF Page": st.column_config.NumberColumn(
+                    "PDF Page",
+                    min_value=1,
+                    step=1,
+                ),
+                "Review Status": (
+                    st.column_config.SelectboxColumn(
+                        "Review Status",
+                        options=[
+                            "Draft",
+                            "Checked",
+                            "Approved",
+                            "Rejected",
+                            "REVIEW REQUIRED",
+                        ],
+                    )
+                ),
+            },
+        )
+
+        if st.button(
+            "Save edited rows",
+            key="return_channel_save_edited_rows",
+        ):
+            if page_filter:
+                full_data = (
+                    st.session_state
+                    .drawing_extractor_checklist
+                    .copy()
+                )
+
+                for index in edited_data.index:
+                    for column in edited_data.columns:
+                        full_data.loc[index, column] = (
+                            edited_data.loc[index, column]
+                        )
+
+                st.session_state.drawing_extractor_checklist = (
+                    full_data
+                )
+
+            else:
+                st.session_state.drawing_extractor_checklist = (
+                    edited_data.copy()
+                )
+
+            st.success(
+                "Edited rows saved for this session."
+            )
+
+    st.divider()
+
+    approved_only = st.checkbox(
+        "Export approved rows only",
+        value=False,
+        key="return_channel_approved_only",
+    )
+
+    export_data = (
+        st.session_state
+        .drawing_extractor_checklist
+        .copy()
+    )
+
+    if approved_only:
+        export_data = export_data[
+            export_data["Review Status"] == "Approved"
+        ].copy()
+
+    excel_bytes = excel_function(export_data)
+
+    st.download_button(
+        label="Download Return Channel Excel checklist",
+        data=excel_bytes,
+        file_name="Return_Channel_Drawing_Extract.xlsx",
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        type="primary",
+        key="return_channel_download_excel",
     )
