@@ -581,19 +581,6 @@ def render_global_theme(theme_mode: str):
             margin-bottom: 0.75rem !important;
         }}
 
-        /* Actual alert notification panel */
-        div[data-testid="stAlert"] [role="alert"],
-        div[data-testid="stAlert"] [data-baseweb="notification"] {{
-            background-color: {colours["info_background"]} !important;
-            border: 1px solid {colours["info_border"]} !important;
-            border-radius: 8px !important;
-
-            box-shadow: none !important;
-
-            color: {colours["info_text"]} !important;
-
-            padding: 0.85rem 1rem !important;
-        }}
 
         /* Add a subtle Chrome-style left accent line */
         div[data-testid="stAlert"] [role="alert"]::before,
@@ -714,6 +701,58 @@ def render_global_theme(theme_mode: str):
 
         hr {{
             border-color: {colours["border"]} !important;
+        }}
+
+        /* ====================================================
+        STREAMLIT ALERTS
+        Chrome-style st.info() theme styling
+        ==================================================== */
+
+        /* Main Streamlit alert container */
+        .stApp div[data-testid="stAlert"] {{
+            margin-top: 0.75rem !important;
+            margin-bottom: 0.75rem !important;
+
+            background-color: {colours["info_background"]} !important;
+            border: 1px solid {colours["info_border"]} !important;
+            border-left: 3px solid {colours["info_icon"]} !important;
+
+            border-radius: 8px !important;
+            box-shadow: none !important;
+            overflow: hidden !important;
+        }}
+
+        /* Streamlit can add an inner div with its own background */
+        .stApp div[data-testid="stAlert"] > div {{
+            background-color: transparent !important;
+        }}
+
+        /* IMPORTANT:
+        This targets the real st.info() text container. */
+        .stApp div[data-testid="stAlert"]
+        [data-testid="stMarkdownContainer"],
+        .stApp div[data-testid="stAlert"]
+        [data-testid="stMarkdownContainer"] p,
+        .stApp div[data-testid="stAlert"]
+        [data-testid="stMarkdownContainer"] span,
+        .stApp div[data-testid="stAlert"] p,
+        .stApp div[data-testid="stAlert"] span {{
+            color: {colours["info_text"]} !important;
+            -webkit-text-fill-color: {colours["info_text"]} !important;
+        }}
+
+        /* Alert icon */
+        .stApp div[data-testid="stAlert"] svg {{
+            color: {colours["info_icon"]} !important;
+            fill: {colours["info_icon"]} !important;
+            stroke: {colours["info_icon"]} !important;
+        }}
+
+        /* Some Streamlit SVG icons use paths instead of SVG fill */
+        .stApp div[data-testid="stAlert"] svg path {{
+            color: {colours["info_icon"]} !important;
+            fill: {colours["info_icon"]} !important;
+            stroke: {colours["info_icon"]} !important;
         }}
         </style>
         """,
