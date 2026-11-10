@@ -32,7 +32,7 @@ TERMINAL_PATTERN = re.compile(
 
 ITEM_PATTERN = re.compile(
     r"\b(?:CT|TC)\.?\s*"
-    r"(?P<item>[A-Z]+\d+)"
+    r"(?P<item>[A-Z]+\d+[A-Z0-9]*)"
     r"\s*\(\s*"
     r"(?P<state>[A-Z0-9]+)"
     r"\s*\)",
@@ -41,7 +41,7 @@ ITEM_PATTERN = re.compile(
 
 FALLBACK_ITEM_PATTERN = re.compile(
     r"\b"
-    r"(?P<item>[A-Z]{2,}\d+)"
+    r"(?P<item>[A-Z]{2,}\d+[A-Z0-9]*)"
     r"\s*\(\s*"
     r"(?P<state>[A-Z0-9]+)"
     r"\s*\)",
