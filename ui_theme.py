@@ -810,56 +810,84 @@ def render_global_theme(theme_mode: str):
             border-color: {colours["border"]} !important;
         }}
         /* ====================================================
-        FORCE WHITE TEXT INSIDE BUTTONS
+        FORCE WHITE TEXT INSIDE ALL ACTION BUTTONS
+        Must be the LAST button CSS section in this file.
         ==================================================== */
 
-        .stButton > button,
-        .stButton > button *,
-        .stButton > button span,
-        .stButton > button p,
-        .stButton > button div {{
+        /* Streamlit primary and secondary buttons */
+        button[data-testid="stBaseButton-primary"],
+        button[data-testid="stBaseButton-secondary"],
+        [data-testid="stButton"] button,
+        .stButton button {{
+            background-color: {colours["blue"]} !important;
+            border-color: {colours["blue"]} !important;
             color: #FFFFFF !important;
             -webkit-text-fill-color: #FFFFFF !important;
         }}
 
-        .stButton > button svg,
-        .stButton > button svg path {{
-            color: #FFFFFF !important;
-            fill: #FFFFFF !important;
-            stroke: #FFFFFF !important;
-        }}
-
-        /* Download buttons */
-        .stDownloadButton > button,
-        .stDownloadButton > button *,
-        .stDownloadButton > button span,
-        .stDownloadButton > button p,
-        .stDownloadButton > button div {{
+        /* Hover state */
+        button[data-testid="stBaseButton-primary"]:hover,
+        button[data-testid="stBaseButton-secondary"]:hover,
+        [data-testid="stButton"] button:hover,
+        .stButton button:hover {{
+            background-color: {colours["button_hover"]} !important;
+            border-color: {colours["button_hover"]} !important;
             color: #FFFFFF !important;
             -webkit-text-fill-color: #FFFFFF !important;
         }}
 
-        .stDownloadButton > button svg,
-        .stDownloadButton > button svg path {{
+        /* Every text element inside standard Streamlit buttons */
+        button[data-testid="stBaseButton-primary"] *,
+        button[data-testid="stBaseButton-secondary"] *,
+        [data-testid="stButton"] button *,
+        .stButton button * {{
             color: #FFFFFF !important;
             fill: #FFFFFF !important;
             stroke: #FFFFFF !important;
+            -webkit-text-fill-color: #FFFFFF !important;
         }}
 
-        /* File uploader Browse / Upload buttons */
+        /* Specifically targets button text rendered inside paragraphs/spans */
+        button[data-testid="stBaseButton-primary"] p,
+        button[data-testid="stBaseButton-primary"] span,
+        button[data-testid="stBaseButton-secondary"] p,
+        button[data-testid="stBaseButton-secondary"] span,
+        [data-testid="stButton"] button p,
+        [data-testid="stButton"] button span {{
+            color: #FFFFFF !important;
+            -webkit-text-fill-color: #FFFFFF !important;
+        }}
+
+        /* Download buttons remain green */
+        [data-testid="stDownloadButton"] button,
+        .stDownloadButton button {{
+            background-color: {colours["green"]} !important;
+            border-color: {colours["green"]} !important;
+            color: #FFFFFF !important;
+            -webkit-text-fill-color: #FFFFFF !important;
+        }}
+
+        [data-testid="stDownloadButton"] button:hover,
+        .stDownloadButton button:hover {{
+            background-color: {colours["download_hover"]} !important;
+            border-color: {colours["download_hover"]} !important;
+        }}
+
+        [data-testid="stDownloadButton"] button *,
+        .stDownloadButton button * {{
+            color: #FFFFFF !important;
+            fill: #FFFFFF !important;
+            stroke: #FFFFFF !important;
+            -webkit-text-fill-color: #FFFFFF !important;
+        }}
+
+        /* File uploader Browse button */
         [data-testid="stFileUploader"] button,
-        [data-testid="stFileUploader"] button *,
-        [data-testid="stFileUploader"] button span,
-        [data-testid="stFileUploader"] button p {{
-            color: #FFFFFF !important;
-            -webkit-text-fill-color: #FFFFFF !important;
-        }}
-
-        [data-testid="stFileUploader"] button svg,
-        [data-testid="stFileUploader"] button svg path {{
+        [data-testid="stFileUploader"] button * {{
             color: #FFFFFF !important;
             fill: #FFFFFF !important;
             stroke: #FFFFFF !important;
+            -webkit-text-fill-color: #FFFFFF !important;
         }}
         </style>
         """,
