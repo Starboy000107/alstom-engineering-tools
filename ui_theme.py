@@ -28,10 +28,9 @@ def get_theme_colours(theme_mode: str) -> dict:
             "download_hover": "#5BB974",
             "focus_shadow": "rgba(138, 180, 248, 0.28)",
 
-            # Streamlit alert colours
-            "info_background": "#1F3A5F",
+            "info_background": "#202B3B",
             "info_border": "#8AB4F8",
-            "info_text": "#E8F0FE",
+            "info_text": "#D2E3FC",
             "info_icon": "#8AB4F8",
 
             "success_background": "#1E3A2A",
@@ -71,9 +70,8 @@ def get_theme_colours(theme_mode: str) -> dict:
         "download_hover": "#137333",
         "focus_shadow": "rgba(26, 115, 232, 0.20)",
 
-        # Streamlit alert colours
         "info_background": "#E8F0FE",
-        "info_border": "#1A73E8",
+        "info_border": "#AECBFA",
         "info_text": "#174EA6",
         "info_icon": "#1A73E8",
 
@@ -566,34 +564,63 @@ def render_global_theme(theme_mode: str):
 
         /* ====================================================
         STREAMLIT ALERTS
-        Reliable fallback styling for Streamlit alerts.
-
-        This styles st.info(), st.success(), st.warning()
-        and st.error() using the active theme colours.
+        Chrome / Google Material-inspired information alerts.
         ==================================================== */
 
-        div[data-testid="stAlert"],
-        div[data-testid="stAlert"] > div,
-        div[data-testid="stAlert"] [role="alert"] {{
-            background: {colours["info_background"]} !important;
-            background-color: {colours["info_background"]} !important;
+        /*
+            Streamlit does not consistently expose the alert type
+            as a stable CSS attribute in every version.
 
-            border: 1px solid {colours["info_border"]} !important;
-            border-left: 4px solid {colours["info_border"]} !important;
+            Therefore this reliably styles st.info() alerts.
+            It may also affect success/warning/error alerts depending
+            on your Streamlit version.
+        */
 
-            border-radius: 10px !important;
-            color: {colours["info_text"]} !important;
-
-            box-shadow: none !important;
+        div[data-testid="stAlert"] {{
+            margin-top: 0.75rem !important;
+            margin-bottom: 0.75rem !important;
         }}
 
-        /* Alert text */
-        div[data-testid="stAlert"] *,
-        div[data-testid="stAlert"] p,
-        div[data-testid="stAlert"] span,
-        div[data-testid="stAlert"] div,
-        div[data-testid="stAlert"] [data-testid="stMarkdownContainer"],
-        div[data-testid="stAlert"] [data-testid="stMarkdownContainer"] p {{
+        /* Actual alert notification panel */
+        div[data-testid="stAlert"] [role="alert"],
+        div[data-testid="stAlert"] [data-baseweb="notification"] {{
+            background-color: {colours["info_background"]} !important;
+            border: 1px solid {colours["info_border"]} !important;
+            border-radius: 8px !important;
+
+            box-shadow: none !important;
+
+            color: {colours["info_text"]} !important;
+
+            padding: 0.85rem 1rem !important;
+        }}
+
+        /* Add a subtle Chrome-style left accent line */
+        div[data-testid="stAlert"] [role="alert"]::before,
+        div[data-testid="stAlert"] [data-baseweb="notification"]::before {{
+            content: "" !important;
+            position: absolute !important;
+            top: 0 !important;
+            bottom: 0 !important;
+            left: 0 !important;
+            width: 3px !important;
+            background: {colours["info_border"]} !important;
+            border-radius: 8px 0 0 8px !important;
+        }}
+
+        /* Alert panel must be relative for the accent line */
+        div[data-testid="stAlert"] [role="alert"],
+        div[data-testid="stAlert"] [data-baseweb="notification"] {{
+            position: relative !important;
+        }}
+
+        /* Alert message text */
+        div[data-testid="stAlert"] [role="alert"] p,
+        div[data-testid="stAlert"] [role="alert"] span,
+        div[data-testid="stAlert"] [role="alert"] div,
+        div[data-testid="stAlert"] [data-baseweb="notification"] p,
+        div[data-testid="stAlert"] [data-baseweb="notification"] span,
+        div[data-testid="stAlert"] [data-baseweb="notification"] div {{
             color: {colours["info_text"]} !important;
         }}
 
@@ -601,13 +628,10 @@ def render_global_theme(theme_mode: str):
         div[data-testid="stAlert"] svg {{
             color: {colours["info_icon"]} !important;
             fill: {colours["info_icon"]} !important;
-            stroke: {colours["info_icon"]} !important;
         }}
 
         div[data-testid="stAlert"] svg path {{
-            color: {colours["info_icon"]} !important;
             fill: {colours["info_icon"]} !important;
-            stroke: {colours["info_icon"]} !important;
         }}
 
         pre,
