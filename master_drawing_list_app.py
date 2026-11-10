@@ -23,8 +23,6 @@ import requests
 # ============================================================
 
 ICON_PATH = Path(__file__).parent / "img" / "page_icon.png"
-
-
 # ============================================================
 # APPLICATION LOGGING
 # ============================================================
@@ -1100,6 +1098,20 @@ STATION_WORKSHEET_EXCEPTIONS = {
     # SUN & YOT worksheet contains both SUN and YOT drawings.
     "SUN": "SUN & YOT",
     "YOT": "SUN & YOT",
+
+    # TUC worksheet contains both TUC and YOY drawings.
+    "TUC": "TUC",
+    "YOY": "TUC",
+
+    # TCE worksheet contains both TCE and TCETUC drawings.
+    "TCE": "TCE",
+    "TCETUC": "TCE",
+
+    # SHD worksheet contains AB11, AB3 and MB drawings.
+    "SHD": "SHD",
+    "AB11": "SHD",
+    "AB3": "SHD",
+    "MB": "SHD",
 }
 
 
@@ -1110,6 +1122,9 @@ def get_station_worksheet_name(station_name):
     Exceptional grouping rules:
         AIR + AWE -> AIR
         SUN + YOT -> SUN & YOT
+        TUC + YOY -> TUC
+        TCE + TCETUC -> TCE
+        SHD + AB11 + AB3 + MB = SHD
 
     All other stations keep their own worksheet name.
     """
@@ -1482,6 +1497,26 @@ def normalize_header(value):
 
 
 def normalize_drawing_number(value):
+    """
+    Normalizes a C1252 drawing number.
+
+    A valid C1252 drawing number has exactly six sections:
+
+        1252 / W / STATION / ALT / RXX / NUMBER
+
+    Example:
+
+        1252/W/TUT/ALT/R32/105
+
+    Any additional slash-separated text, such as a revision
+    appended by a transmittal form, is excluded.
+
+    Example:
+
+        1252/W/TUT/ALT/R32/105/D3
+            -> 1252/W/TUT/ALT/R32/105
+    """
+
     if is_blank(value):
         return ""
 
@@ -1494,7 +1529,25 @@ def normalize_drawing_number(value):
     text = text.replace("\t", "")
     text = text.replace(" ", "")
 
-    return re.sub(r"/+", "/", text).upper().strip()
+    text = re.sub(r"/+", "/", text)
+    text = text.strip().rstrip(
+        ".,;:)]}>"
+    ).upper()
+
+    parts = text.split("/")
+
+    # A normal C1252 drawing number contains:
+    #
+    # 1252/W/TUT/ALT/R32/105
+    #
+    # Therefore retain only the first six segments.
+    if (
+        len(parts) >= 6
+        and parts[0] == "1252"
+    ):
+        return "/".join(parts[:6])
+
+    return text
 
 
 def extract_drawing_ref(value):
@@ -1673,11 +1726,105 @@ def validate_uploaded_file(
 
 DRAWING_NUMBER_PATTERN = re.compile(
     r"(?i)(?<![A-Z0-9])"
-    r"1252(?:/[A-Z0-9.-]+){5,}"
-    r"(?![A-Z0-9])"
+    r"1252(?:/[A-Z0-9.-]+){5}"
+    r"(?![A-Z0-9.-])"
 )
 
+TRANSMITTAL_DRAWING_WITH_OPTIONAL_REVISION_PATTERN = (
+    re.compile(
+        r"(?i)(?<![A-Z0-9])"
+        r"(?P<drawing>"
+        r"1252(?:/[A-Z0-9.-]+){5}"
+        r")"
+        r"(?:/"
+        r"(?P<revision>"
+        r"AZ|[A-Z]{1,3}\d+[A-Z]?"
+        r")"
+        r")?"
+        r"(?![A-Z0-9./-])"
+    )
+)
 
+def extract_transmittal_drawing_revision_pairs(
+    value,
+):
+    """
+    Extracts drawing numbers from a transmittal Drawing / Doc No.
+    cell and detects an optional revision appended after the drawing
+    number.
+
+    Examples:
+
+        1252/W/TUT/ALT/R32/105
+            -> (
+                "1252/W/TUT/ALT/R32/105",
+                ""
+            )
+
+        1252/W/TUT/ALT/R32/105/D3
+            -> (
+                "1252/W/TUT/ALT/R32/105",
+                "D3"
+            )
+
+        1252/W/THW/ALT/R05/001A
+            -> (
+                "1252/W/THW/ALT/R05/001A",
+                ""
+            )
+
+    The drawing number always retains exactly six segments.
+    The optional seventh segment is used only when it is a valid
+    revision marker.
+    """
+
+    if is_blank(value):
+        return []
+
+    text = str(value)
+    text = text.replace("\r\n", "\n")
+    text = text.replace("\r", "\n")
+    text = text.replace("\t", " ")
+
+    results = []
+    seen = set()
+
+    for match in (
+        TRANSMITTAL_DRAWING_WITH_OPTIONAL_REVISION_PATTERN
+        .finditer(text)
+    ):
+        drawing_number = normalize_drawing_number(
+            match.group("drawing")
+        )
+
+        appended_revision = (
+            normalize_transmittal_revision(
+                match.group("revision") or ""
+            )
+        )
+
+        if not drawing_number:
+            continue
+
+        key = (
+            drawing_number,
+            appended_revision,
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        results.append(
+            {
+                "Drawing Number": drawing_number,
+                "Appended Revision": appended_revision,
+            }
+        )
+
+    return results
+    
 def extract_embedded_drawing_numbers(value):
     if is_blank(value):
         return []
@@ -1702,7 +1849,7 @@ def extract_embedded_drawing_numbers(value):
 
         parts = drawing_number.split("/")
 
-        if len(parts) < 6:
+        if len(parts) != 6:
             continue
 
         if parts[0] != "1252":
@@ -1757,7 +1904,7 @@ def select_drawing_matching_ref(
     )
 
     if re.fullmatch(
-        r"1252(?:/[A-Z0-9.-]+){5,}",
+        r"1252(?:/[A-Z0-9.-]+){5}",
         fallback,
         flags=re.IGNORECASE,
     ):
@@ -2812,20 +2959,22 @@ def extract_transmittal_table_records(
                 approval_date_index,
             )
 
-            drawing_numbers = (
-                extract_embedded_drawing_numbers(
+            drawing_revision_pairs = (
+                extract_transmittal_drawing_revision_pairs(
                     drawing_text
                 )
             )
 
-            if not drawing_numbers:
+            if not drawing_revision_pairs:
                 continue
 
-            revision = normalize_transmittal_revision(
+            # This is the normal transmittal-table revision,
+            # for example D4.
+            table_revision = normalize_transmittal_revision(
                 revision_text
             )
 
-            if not revision:
+            if not table_revision:
                 continue
 
             status = normalize_approval_status(
@@ -2839,13 +2988,19 @@ def extract_transmittal_table_records(
             if not approval_date:
                 approval_date = document_date
 
-            stage_source_text = " | ".join(
-                [
-                    description_text,
-                    drawing_text,
-                    status_text,
-                ]
+            # Include text from every table cell.
+            #
+            # Some Alstom transmittal forms contain more than one
+            # "Description" column. For example, the actual drawing title
+            # "SER LAYOUT FOR THW TAT-D11" may be in the second Description
+            # column, not the first one detected by the header logic.
+            full_row_text = " | ".join(
+                clean_value(cell.text)
+                for cell in table_row.cells
+                if clean_value(cell.text)
             )
+
+            stage_source_text = full_row_text
 
             stage = (
                 detect_stage_from_description(
@@ -2856,31 +3011,51 @@ def extract_transmittal_table_records(
                 )
             )
 
-            for drawing_number in drawing_numbers:
+            for drawing_revision_pair in (
+                drawing_revision_pairs
+            ):
+                drawing_number = (
+                    drawing_revision_pair[
+                        "Drawing Number"
+                    ]
+                )
+
+                appended_revision = (
+                    drawing_revision_pair[
+                        "Appended Revision"
+                    ]
+                )
+
+                # A revision included after the sixth drawing
+                # segment is specific to that drawing and overrides
+                # the general Rev. value in the transmittal table.
+                #
+                # Example:
+                #
+                # Table Rev.: D4
+                # Drawing: 1252/W/TUT/ALT/R32/105/D3
+                #
+                # Result:
+                # Drawing Number: 1252/W/TUT/ALT/R32/105
+                # Transmittal Revision: D3
+                drawing_revision = (
+                    appended_revision
+                    or table_revision
+                )
+
                 records.append(
                     {
                         "Normalized Drawing Number":
-                            normalize_drawing_number(
-                                drawing_number
-                            ),
+                            drawing_number,
                         "Transmittal Revision":
-                            revision,
+                            drawing_revision,
                         "Transmittal Stage":
                             stage,
                         "Status":
                             status,
                         "Approval Date":
                             approval_date,
-                        "Source Row":
-                            " | ".join(
-                                [
-                                    drawing_text,
-                                    revision_text,
-                                    description_text,
-                                    status_text,
-                                    approval_date_text,
-                                ]
-                            ),
+                        "Source Row": full_row_text,
                     }
                 )
 
@@ -3663,17 +3838,32 @@ def build_transmittal_record_lookup(
             "Drawing Number": drawing_number,
             "Revision": revision,
             "Stage": stage,
-            "Status": normalize_approval_status(
-                row.get("Status", "")
-            ),
+
+            # Always treat transmittal content as approved.
+            "Status": "APPROVED",
+
             "Approval Date": format_approval_date(
-                row.get("Approval Date", "")
+                row.get(
+                    "Approval Date",
+                    "",
+                )
             ),
-            "Is Modification":
-                is_modification_transmittal(row),
+
+            "Is Modification": is_modification_transmittal(
+                row
+            ),
+
+            "Is Detail Design": is_detail_design_transmittal(
+                row
+            ),
+
             "Source Row": clean_value(
-                row.get("Source Row", "")
+                row.get(
+                    "Source Row",
+                    "",
+                )
             ),
+
             "_TransmittalOrder": row.get(
                 "_TransmittalOrder",
                 order,
@@ -3910,6 +4100,42 @@ def detect_dih_special_category_from_row(
         " ".join(values)
     )
 
+def detect_scheme_bonding_plan_type(value):
+    """
+    Detects whether DIH content relates to a Scheme Plan or
+    Bonding Plan.
+
+    Detection is based on worksheet content, not file name.
+    """
+
+    text = normalize_header(value)
+
+    if "BONDING PLAN" in text:
+        return "Bonding Plan"
+
+    if "SCHEME PLAN" in text:
+        return "Scheme Plan"
+
+    return ""
+
+
+def get_dih_document_text(raw_df):
+    """
+    Converts all DIH worksheet cells into searchable text.
+    """
+
+    if raw_df is None or raw_df.empty:
+        return ""
+
+    values = []
+
+    for value in raw_df.astype(object).to_numpy().ravel():
+        text = clean_value(value)
+
+        if text:
+            values.append(text)
+
+    return " ".join(values)
 
 def read_dih_register(
     file_bytes,
@@ -3972,6 +4198,14 @@ def read_dih_register(
         )
     )
 
+    # Read actual DIH content to identify Scheme Plan or Bonding Plan.
+    # This does not depend on the uploaded file name.
+    document_plan_type = (
+        detect_scheme_bonding_plan_type(
+            get_dih_document_text(raw_df)
+        )
+    )
+
     output = pd.DataFrame(index=df.index)
 
     output["DIH Drawing Number"] = (
@@ -3992,6 +4226,7 @@ def read_dih_register(
 
     categories = []
     revisions = []
+    plan_types = []
 
     for _, row in df.iterrows():
         category = document_category
@@ -4005,6 +4240,17 @@ def read_dih_register(
             )
 
         categories.append(category)
+
+        # Prefer each drawing's own title. If it does not contain
+        # the text, use the overall DIH document heading/content.
+        row_plan_type = detect_scheme_bonding_plan_type(
+            row.get(title_column, "")
+        )
+
+        if not row_plan_type:
+            row_plan_type = document_plan_type
+
+        plan_types.append(row_plan_type)
 
         revision_values = [
             clean_value(value)
@@ -4023,6 +4269,7 @@ def read_dih_register(
 
     output["DIH Category"] = categories
     output["DIH Revision"] = revisions
+    output["DIH Plan Type"] = plan_types
 
     output = output[
         output[
@@ -4220,6 +4467,11 @@ def create_dih_lookup(
     dih_df,
     dynamic_headers,
 ):
+    """
+    Creates a drawing-level DIH lookup containing the first
+    description, mapped revision values and special categories.
+    """
+
     lookup = {}
 
     if dih_df is None or dih_df.empty:
@@ -4233,6 +4485,9 @@ def create_dih_lookup(
         drawing_number = clean_value(
             drawing_number
         )
+
+        if not drawing_number:
+            continue
 
         descriptions = []
         phase_values = {}
@@ -4249,6 +4504,7 @@ def create_dih_lookup(
             if description:
                 descriptions.append(description)
 
+            # Always define category for every DIH row.
             category = clean_value(
                 row.get(
                     "DIH Category",
@@ -4262,16 +4518,16 @@ def create_dih_lookup(
             ):
                 categories.append(category)
 
-            mapped = map_dih_revision_to_headers(
-                row.get(
+            mapped_headers = map_dih_revision_to_headers(
+                revision=row.get(
                     "DIH Revision",
                     "",
                 ),
-                dynamic_headers,
-                category,
+                dynamic_headers=dynamic_headers,
+                category=category,
             )
 
-            for header, value in mapped.items():
+            for header, value in mapped_headers.items():
                 phase_values[header] = (
                     combine_unique_values(
                         [
@@ -4285,10 +4541,9 @@ def create_dih_lookup(
                 )
 
         lookup[drawing_number] = {
-            "Description":
-                first_non_blank_description(
-                    descriptions
-                ),
+            "Description": first_non_blank_description(
+                descriptions
+            ),
             "Phase Values": phase_values,
             "Categories": categories,
         }
@@ -4987,6 +5242,7 @@ def create_final_master(
                 "DIH Description",
                 "DIH Category",
                 "DIH Revision",
+                "DIH Plan Type",
             ]
         )
 
@@ -5869,6 +6125,8 @@ def get_existing_approval_data_for_station(
     Exceptional grouping rules:
         AIR + AWE -> AIR
         SUN + YOT -> SUN & YOT
+        TCE + TCETUC -> TCE
+        SHD + AB11 + AB3 + MB = SHD
 
     Approval data from matching legacy worksheets is combined.
     """
@@ -6362,6 +6620,23 @@ def get_active_stage_groups_for_row(
 
     return active_groups
 
+def is_detail_design_transmittal(row):
+    """
+    Returns True only when the transmittal description/source text
+    contains CIRCUIT BOOK or SER LAYOUT.
+    """
+
+    text = clean_value(
+        row.get("Source Row", "")
+    )
+
+    text = normalize_header(text)
+
+    return (
+        "CIRCUIT BOOK" in text
+        or "SER LAYOUT" in text
+    )
+
 def build_transmittal_scope_lookup(
     transmittal_df,
 ):
@@ -6467,6 +6742,9 @@ def build_transmittal_scope_lookup(
                 )
             ),
             "Transmittal Stage": stage,
+            "Is Detail Design": is_detail_design_transmittal(
+                row
+            ),
             "_TransmittalOrder": row.get(
                 "_TransmittalOrder",
                 order,
@@ -6490,12 +6768,8 @@ def build_transmittal_scope_lookup(
 
         if latest is not None:
             lookup[key] = {
-                "Status": normalize_approval_status(
-                    latest.get(
-                        "Status",
-                        "",
-                    )
-                ),
+                # Every matched transmittal is displayed as approved.
+                "Status": "APPROVED",
                 "Approval Date": format_approval_date(
                     latest.get(
                         "Approval Date",
@@ -6506,6 +6780,13 @@ def build_transmittal_scope_lookup(
                     latest.get(
                         "Transmittal Stage",
                         stage,
+                    )
+                ),
+                # Important: retain the CIRCUIT BOOK / SER LAYOUT flag.
+                "Is Detail Design": bool(
+                    latest.get(
+                        "Is Detail Design",
+                        False,
                     )
                 ),
                 "_TransmittalOrder": latest.get(
@@ -6626,12 +6907,7 @@ def add_transmittal_status_data(
         )
 
         candidate = {
-            "Status": normalize_approval_status(
-                row.get(
-                    "Status",
-                    "",
-                )
-            ),
+            "Status": "APPROVED",
             "Approval Date": format_approval_date(
                 row.get(
                     "Approval Date",
@@ -6639,6 +6915,9 @@ def add_transmittal_status_data(
                 )
             ),
             "Transmittal Stage": stage,
+            "Is Detail Design": is_detail_design_transmittal(
+                row
+            ),
             "_TransmittalOrder": row.get(
                 "_TransmittalOrder",
                 order,
@@ -6667,12 +6946,7 @@ def add_transmittal_status_data(
 
         if latest is not None:
             scope_records[key] = {
-                "Status": normalize_approval_status(
-                    latest.get(
-                        "Status",
-                        "",
-                    )
-                ),
+                "Status": "APPROVED",
                 "Approval Date": format_approval_date(
                     latest.get(
                         "Approval Date",
@@ -6683,6 +6957,12 @@ def add_transmittal_status_data(
                     latest.get(
                         "Transmittal Stage",
                         stage,
+                    )
+                ),
+                "Is Detail Design": bool(
+                    latest.get(
+                        "Is Detail Design",
+                        False,
                     )
                 ),
                 "_TransmittalOrder": latest.get(
@@ -6786,23 +7066,72 @@ def reorder_transmittal_columns(
 # ============================================================
 # VISIBLE COLUMNS
 # ============================================================
+def has_pending_modification_transmittal_value(
+    df,
+    mod_column,
+    transmittal_record_lookup,
+):
+    """
+    Returns True when a modification transmittal will write a value
+    into the specified MOD column for at least one drawing in the
+    current worksheet.
+    """
+
+    if (
+        df is None
+        or df.empty
+        or not transmittal_record_lookup
+        or "C1252 Drawing" not in df.columns
+    ):
+        return False
+
+    worksheet_drawings = {
+        normalize_drawing_number(drawing_number)
+        for drawing_number in df["C1252 Drawing"]
+        if normalize_drawing_number(drawing_number)
+    }
+
+    if not worksheet_drawings:
+        return False
+
+    mod_stage_key = normalize_stage_text(
+        get_header_group(mod_column)
+    )
+
+    for (
+        drawing_number,
+        revision,
+        transmittal_stage,
+    ), record in transmittal_record_lookup.items():
+
+        if drawing_number not in worksheet_drawings:
+            continue
+
+        if not record.get("Is Modification", False):
+            continue
+
+        if not clean_value(revision):
+            continue
+
+        if (
+            normalize_stage_text(transmittal_stage)
+            == mod_stage_key
+        ):
+            return True
+
+    return False
 
 def get_visible_columns_for_sheet(
     df,
     transmittal_df=None,
+    transmittal_record_lookup=None,
 ):
     """
-    Returns only columns that contain values in the current
-    worksheet.
+    Returns only columns that contain values in the current worksheet.
 
-    This is evaluated separately for every worksheet, so a
-    revision column can exist in the Master Drawing List but be
-    omitted from a station worksheet when it has no values there.
-
-    Example:
-        If THW has A1, A2, A3 and MOD values under A2 Stage,
-        but A4 is blank for every THW drawing, A4 is removed
-        from the THW worksheet.
+    MOD columns are removed when they are blank for every drawing in
+    the current worksheet. A MOD column is retained when a matching
+    modification transmittal will write a value into that worksheet.
     """
 
     base_columns = [
@@ -6829,10 +7158,7 @@ def get_visible_columns_for_sheet(
     active_columns = set()
     active_groups = set()
 
-    # --------------------------------------------------------
-    # Detect columns that contain at least one real value in
-    # THIS worksheet/dataframe.
-    # --------------------------------------------------------
+    # Identify columns containing actual values in this worksheet.
     for column in phase_columns:
         values = (
             df[column]
@@ -6852,10 +7178,8 @@ def get_visible_columns_for_sheet(
     visible_phase_columns = []
 
     for column in phase_columns:
-        # ----------------------------------------------------
-        # Transmittal columns are retained only when their
-        # corresponding stage has data in this worksheet.
-        # ----------------------------------------------------
+        # Keep a transmittal column only when its stage/group
+        # has at least one active value in this worksheet.
         if is_transmittal_column(column):
             source_group = get_transmittal_column_group(
                 column
@@ -6866,52 +7190,24 @@ def get_visible_columns_for_sheet(
 
             continue
 
-        # ----------------------------------------------------
-        # Revision / AZ / MOD columns are retained only when
-        # that exact column contains a value.
-        #
-        # This applies dynamically to every stage and every
-        # station worksheet. No stage names are hard-coded.
-        # ----------------------------------------------------
+        # Keep normal revision, AZ and MOD columns only where
+        # the current worksheet has at least one real value.
         if column in active_columns:
             visible_phase_columns.append(column)
+            continue
 
-    # --------------------------------------------------------
-    # Preserve MOD columns needed for modification transmittals.
-    #
-    # These may be written later by
-    # apply_modification_transmittal_values(), so they can be
-    # blank in the dataframe at this point.
-    # --------------------------------------------------------
-    if (
-        transmittal_df is not None
-        and not transmittal_df.empty
-    ):
-        for _, row in transmittal_df.iterrows():
-            if not is_modification_transmittal(row):
-                continue
-
-            stage = clean_value(
-                row.get("Transmittal Stage", "")
+        # A modification transmittal value is written after the
+        # worksheet dataframe is exported. Keep that MOD column
+        # only when it applies to a drawing in this worksheet.
+        if (
+            normalize_header(column).endswith(" MOD")
+            and has_pending_modification_transmittal_value(
+                df,
+                column,
+                transmittal_record_lookup,
             )
-
-            stage = (
-                detect_stage_from_description(stage)
-                or stage
-            )
-
-            if not stage:
-                continue
-
-            mod_header = f"{stage} MOD"
-
-            if (
-                mod_header in df.columns
-                and mod_header not in visible_phase_columns
-            ):
-                visible_phase_columns.append(
-                    mod_header
-                )
+        ):
+            visible_phase_columns.append(column)
 
     return [
         column
@@ -7199,14 +7495,15 @@ def get_status_for_column(
     first_revision_columns=None,
 ):
     """
-    Applies transmittal status to one stage only.
+    Returns:
 
-    If the transmittal stage is detected:
-        Match Station + Revision + Stage.
+        Status,
+        Approval Date,
+        Is Detail Design,
+        Transmittal Match Found
 
-    If the transmittal stage is not detected:
-        Apply the status only to the first stage header
-        containing that revision.
+    Detail Design is True only where the matched transmittal
+    description contains CIRCUIT BOOK or SER LAYOUT.
     """
 
     revision = get_subheader_revision_value(
@@ -7214,19 +7511,16 @@ def get_status_for_column(
     )
 
     if not revision or not transmittal_lookup:
-        return "", ""
+        return "", "", False, False
 
     column_stage_key = normalize_stage_text(
         get_header_group(column_name)
     )
 
     if not column_stage_key:
-        return "", ""
+        return "", "", False, False
 
-    # --------------------------------------------------------
-    # Find stations in the current worksheet
-    # --------------------------------------------------------
-
+    # Find stations in the current worksheet.
     sheet_stations = set()
 
     if (
@@ -7247,13 +7541,14 @@ def get_status_for_column(
     station_revision_records = []
 
     for key, record in transmittal_lookup.items():
-        if not isinstance(key, tuple):
+        if not isinstance(key, tuple) or len(key) != 3:
             continue
 
-        if len(key) != 3:
-            continue
-
-        record_station, record_revision, record_stage = key
+        (
+            record_station,
+            record_revision,
+            record_stage,
+        ) = key
 
         record_station = normalize_header(
             record_station
@@ -7284,11 +7579,7 @@ def get_status_for_column(
         )
 
     if not station_revision_records:
-        return "", ""
-
-    # --------------------------------------------------------
-    # Separate records by whether a stage was actually found.
-    # --------------------------------------------------------
+        return "", "", False, False
 
     stage_specific_records = [
         record
@@ -7305,8 +7596,6 @@ def get_status_for_column(
     ]
 
     if stage_specific_records:
-        # A stage was found in the transmittal description.
-        # Match only the exact stage.
         matching_records = [
             record
             for record_stage_key, record
@@ -7315,9 +7604,6 @@ def get_status_for_column(
         ]
 
     else:
-        # No stage was found in the description.
-        # Apply the status only to the first column for
-        # this revision in the current worksheet.
         if first_revision_columns is None:
             first_revision_columns = (
                 get_first_revision_columns(sheet_df)
@@ -7328,27 +7614,43 @@ def get_status_for_column(
         )
 
         if column_name != first_column:
-            return "", ""
+            return "", "", False, False
 
         matching_records = stage_less_records
 
     if not matching_records:
-        return "", ""
+        return "", "", False, False
 
     latest = get_latest_transmittal_record(
         pd.DataFrame(matching_records)
     )
 
     if latest is None:
-        return "", ""
+        return "", "", False, False
 
+    is_detail_design = bool(
+        latest.get(
+            "Is Detail Design",
+            False,
+        )
+    )
+
+    # Do not change anything in the header unless the matching
+    # transmittal row contains CIRCUIT BOOK or SER LAYOUT.
+    #
+    # Return True as the fourth value so an old approval date from
+    # the existing workbook is NOT applied as a fallback.
+    if not is_detail_design:
+        return "", "", False, True
+
+    # Detail Design transmittals are always displayed as approved.
     return (
-        normalize_approval_status(
-            latest.get("Status", "")
-        ),
+        "APPROVED",
         format_approval_date(
             latest.get("Approval Date", "")
         ),
+        True,
+        True,
     )
 
 
@@ -7530,10 +7832,12 @@ def apply_modification_transmittal_values(
                     f"({approval_date})"
                 )
 
+            # Always show MOD transmittal values as approved/green,
+            # regardless of the transmittal Status field.
             status_format = (
                 create_status_value_format(
                     workbook,
-                    latest.get("Status", ""),
+                    "APPROVED",
                 )
             )
 
@@ -7860,10 +8164,17 @@ def format_worksheet(
                 ).endswith(" MOD"):
                     status = ""
                     approval_date = ""
+                    is_detail_design = False
+                    transmittal_match_found = False
 
                 else:
                     # First use a newly uploaded transmittal status.
-                    status, approval_date = get_status_for_column(
+                    (
+                        status,
+                        approval_date,
+                        is_detail_design,
+                        transmittal_match_found,
+                    ) = get_status_for_column(
                         original_column,
                         sheet_df=status_df,
                         transmittal_lookup=transmittal_lookup,
@@ -7872,9 +8183,9 @@ def format_worksheet(
                         ),
                     )
 
-                    # If no new transmittal status exists, preserve
-                    # the approval date from the existing workbook.
-                    if not approval_date:
+                    # Preserve an old header approval date only when there is
+                    # no matching newly uploaded transmittal record.
+                    if not transmittal_match_found:
                         old_header_status = (
                             existing_header_statuses.get(
                                 original_column,
@@ -7895,10 +8206,12 @@ def format_worksheet(
 
                 header_text = subheader
 
-                if approval_date:
+                # Add the date only when the matched transmittal description
+                # contains CIRCUIT BOOK or SER LAYOUT.
+                if approval_date and is_detail_design:
                     header_text = (
                         f"{subheader}\n"
-                        f"{approval_date}"
+                        f"(Detail Design: {approval_date})"
                     )
 
                 if status in {
@@ -8043,10 +8356,155 @@ def safe_sheet_name(
     return name
 
 
+def is_scheme_or_bonding_plan_description(
+    description,
+):
+    """
+    Returns True when the individual drawing description contains
+    Scheme Plan or Bonding Plan.
+    """
+
+    text = normalize_header(description)
+
+    return (
+        "SCHEME PLAN" in text
+        or "BONDING PLAN" in text
+    )
+
+
+def get_scheme_bonding_plan_drawing_keys(
+    dih_df,
+):
+    """
+    Returns drawing keys classified as Scheme Plan or Bonding Plan
+    from DIH worksheet content.
+
+    The DIH Plan Type is detected from:
+        - each drawing title; or
+        - document text above the DIH table, including the area
+          below Contract Title.
+
+    No filename, station, or drawing-number rule is used.
+    """
+
+    if (
+        dih_df is None
+        or dih_df.empty
+        or "DIH Plan Type" not in dih_df.columns
+        or "Normalized Drawing Number" not in dih_df.columns
+    ):
+        return set()
+
+    matching_rows = dih_df[
+        dih_df["DIH Plan Type"].apply(
+            clean_value
+        ).isin(
+            {
+                "Scheme Plan",
+                "Bonding Plan",
+            }
+        )
+    ]
+
+    return {
+        normalize_drawing_number(
+            drawing_number
+        )
+        for drawing_number in matching_rows[
+            "Normalized Drawing Number"
+        ]
+        if normalize_drawing_number(drawing_number)
+    }
+
+
+def is_scheme_or_bonding_plan_row(
+    row,
+    dih_scheme_bonding_keys=None,
+):
+    """
+    Returns True if the row is either:
+
+    1. Individually described as Scheme Plan or Bonding Plan; or
+    2. Classified from the DIH document content as Scheme Plan or
+       Bonding Plan.
+
+    The second condition handles DIH documents such as:
+
+        ITC-B07-GEN-GEN-DWG-SCHEME PLAN B7 STAGE
+
+    where the individual drawing titles may not repeat the words
+    SCHEME PLAN.
+    """
+
+    description = row.get(
+        "Description",
+        "",
+    )
+
+    if is_scheme_or_bonding_plan_description(
+        description
+    ):
+        return True
+
+    drawing_number = normalize_drawing_number(
+        row.get(
+            "C1252 Drawing",
+            "",
+        )
+    )
+
+    return bool(
+        drawing_number
+        and drawing_number in (
+            dih_scheme_bonding_keys or set()
+        )
+    )
+
+
+def get_scheme_bonding_plan_dataframe(
+    final_df,
+    dih_df,
+):
+    """
+    Returns all final Master Drawing List rows that belong in the
+    Scheme Plan & Bonding Plan worksheet.
+
+    Classification comes from either the final Description or the
+    originating DIH worksheet content.
+    """
+
+    if final_df is None or final_df.empty:
+        return pd.DataFrame(
+            columns=(
+                final_df.columns
+                if final_df is not None
+                else []
+            )
+        )
+
+    dih_scheme_bonding_keys = (
+        get_scheme_bonding_plan_drawing_keys(
+            dih_df
+        )
+    )
+
+    result = final_df[
+        final_df.apply(
+            lambda row: is_scheme_or_bonding_plan_row(
+                row,
+                dih_scheme_bonding_keys,
+            ),
+            axis=1,
+        )
+    ].copy()
+
+    return sort_by_drawing_ref(result)
+
 def generate_output_excel(
     final_df,
     modification_sheet,
     dih_file_details,
+    dih_df=None,
     existing_master_details="",
     transmittal_details="",
     transmittal_lookup=None,
@@ -8090,6 +8548,9 @@ def generate_output_excel(
         main_columns = get_visible_columns_for_sheet(
             main_source_df,
             transmittal_df=transmittal_df,
+            transmittal_record_lookup=(
+                transmittal_record_lookup
+            ),
         )
 
         main_df = main_source_df[
@@ -8131,23 +8592,125 @@ def generate_output_excel(
             existing_approval_data=main_approval_data,
             apply_transmittal_status=False,
         )
+        
+        # ====================================================
+        # SCHEME PLAN & BONDING PLAN WORKSHEET
+        # ====================================================
+
+        scheme_bonding_source_df = (
+            get_scheme_bonding_plan_dataframe(
+                final_df,
+                dih_df,
+            )
+        )
+
+        if not scheme_bonding_source_df.empty:
+            scheme_bonding_columns = (
+                get_visible_columns_for_sheet(
+                    scheme_bonding_source_df,
+                    transmittal_df=transmittal_df,
+                    transmittal_record_lookup=(
+                        transmittal_record_lookup
+                    ),
+                )
+            )
+
+            scheme_bonding_df = (
+                scheme_bonding_source_df[
+                    [
+                        column
+                        for column in scheme_bonding_columns
+                        if column
+                        in scheme_bonding_source_df.columns
+                    ]
+                ]
+                .copy()
+            )
+
+            scheme_bonding_sheet = safe_sheet_name(
+                "Scheme Plan & Bonding Plan",
+                used_names,
+            )
+
+            scheme_bonding_df.to_excel(
+                writer,
+                sheet_name=scheme_bonding_sheet,
+                index=False,
+                startrow=2,
+                header=False,
+            )
+
+            scheme_bonding_approval_data = (
+                get_existing_approval_data_for_worksheet(
+                    existing_approval_data,
+                    scheme_bonding_sheet,
+                )
+            )
+
+            format_worksheet(
+                workbook,
+                writer.sheets[scheme_bonding_sheet],
+                scheme_bonding_df,
+                status_df=scheme_bonding_source_df,
+                transmittal_lookup=transmittal_lookup,
+                transmittal_record_lookup=(
+                    transmittal_record_lookup
+                ),
+                existing_approval_data=(
+                    scheme_bonding_approval_data
+                ),
+                apply_transmittal_status=True,
+            )
+
+        # ----------------------------------------------------
+        # Station worksheets must exclude drawings that belong
+        # in the Scheme Plan & Bonding Plan worksheet.
+        #
+        # This is based only on Description content.
+        # No drawing number, station, filename, or DIH source
+        # is hardcoded.
+        # ----------------------------------------------------
+
+        if (
+            "Description" in final_df.columns
+            and not final_df.empty
+        ):
+            dih_scheme_bonding_keys = (
+                get_scheme_bonding_plan_drawing_keys(
+                    dih_df
+                )
+            )
+
+            station_final_df = final_df[
+                ~final_df.apply(
+                    lambda row: is_scheme_or_bonding_plan_row(
+                        row,
+                        dih_scheme_bonding_keys,
+                    ),
+                    axis=1,
+                )
+            ].copy()
+
+        else:
+            station_final_df = final_df.copy()
 
         # ====================================================
         # LOCATION / STATION WORKSHEETS
         # ====================================================
 
         if (
-            "C1252 Drawing" in final_df.columns
-            and not final_df.empty
+            "C1252 Drawing" in station_final_df.columns
+            and not station_final_df.empty
         ):
-            area_values = final_df[
+            area_values = station_final_df[
                 "C1252 Drawing"
             ].apply(
                 extract_area_from_drawing_number
             ).apply(clean_value)
+
         else:
             area_values = pd.Series(
-                index=final_df.index,
+                index=station_final_df.index,
                 dtype="object",
             )
 
@@ -8157,6 +8720,8 @@ def generate_output_excel(
         # Exceptional cases:
         #   AIR + AWE -> AIR
         #   SUN + YOT -> SUN & YOT
+        #   TUC + YOY -> TUC
+        #   TCE + TCETUC -> TCE
         # ----------------------------------------------------
 
         station_worksheet_values = area_values.apply(
@@ -8172,7 +8737,7 @@ def generate_output_excel(
         for area in areas:
             # Include all drawings belonging to the grouped
             # output worksheet.
-            location_source_df = final_df[
+            location_source_df = station_final_df[
                 station_worksheet_values == area
             ].copy()
 
@@ -8188,6 +8753,9 @@ def generate_output_excel(
                 get_visible_columns_for_sheet(
                     location_source_df,
                     transmittal_df=transmittal_df,
+                    transmittal_record_lookup=(
+                        transmittal_record_lookup
+                    ),
                 )
             )
 
@@ -8500,12 +9068,22 @@ def render_pending_master_actions():
     )
 
     try:
+        # Read the current shared latest file immediately before
+        # publishing. This prevents an old generated workbook
+        # from replacing the current shared workbook.
         latest_now = get_latest_master_file()
 
         expected_github_sha = st.session_state.get(
             "mdl_pending_expected_github_sha"
         )
 
+        # --------------------------------------------------------
+        # Protection 1:
+        # A newly created workbook cannot replace an existing
+        # shared Master Drawing List.
+        #
+        # Create mode is allowed only when no latest file exists.
+        # --------------------------------------------------------
         if (
             pending_mode
             == "Create a new Master Drawing List"
@@ -8526,6 +9104,11 @@ def render_pending_master_actions():
 
             return
 
+        # --------------------------------------------------------
+        # Protection 2:
+        # An update workbook must still be based on the same
+        # latest GitHub file that existed when it was generated.
+        # --------------------------------------------------------
         if (
             pending_mode
             == "Update an existing Master Drawing List"
@@ -8539,6 +9122,15 @@ def render_pending_master_actions():
                 "this workbook was generated."
             )
 
+        # --------------------------------------------------------
+        # Publish the workbook.
+        #
+        # For update mode, pass the expected SHA so GitHub also
+        # performs its own optimistic-locking check.
+        #
+        # For create mode, expected_github_sha is None and is
+        # therefore only allowed when no latest file exists.
+        # --------------------------------------------------------
         publish_sha = None
 
         if (
@@ -8566,6 +9158,8 @@ def render_pending_master_actions():
             workflow_mode=pending_mode,
         )
 
+        # Clear the pending workbook only after successful
+        # publication.
         st.session_state.mdl_pending_master_bytes = None
         st.session_state.mdl_pending_master_filename = ""
         st.session_state.mdl_pending_expected_github_sha = None
@@ -8758,7 +9352,7 @@ def render_master_drawing_list_interface():
 
         .information-card,
         .upload-panel {
-            background:var(--surface, #FFFFFF);
+            background:#FFFFFF;
             border:1px solid var(--border);
             border-radius:14px;
             padding:22px 25px;
@@ -8922,7 +9516,7 @@ def render_master_drawing_list_interface():
             padding: 22px;
             border: 2px solid #D9E2EC;
             border-radius: 14px;
-            background: var(--surface, #FFFFFF);
+            background: #FFFFFF;
             box-shadow: 0 5px 16px rgba(16,42,67,.08);
             margin-bottom: 10px;
         }
@@ -9070,11 +9664,16 @@ def render_master_drawing_list_interface():
     if "mdl_master_list_mode" not in st.session_state:
         st.session_state.mdl_master_list_mode = CREATE_MODE
 
-    master_list_mode = st.session_state.mdl_master_list_mode
+    mdl_master_list_mode = st.session_state.mdl_master_list_mode
 
     render_html(
         """
-        <div class="section-heading">
+        <div style="
+            color:#102A43;
+            font-size:15px;
+            font-weight:750;
+            margin-bottom:10px;
+        ">
             Select workflow
         </div>
         """
@@ -9092,7 +9691,7 @@ def render_master_drawing_list_interface():
 
     with workflow_col_1:
         create_selected = (
-            master_list_mode == CREATE_MODE
+            mdl_master_list_mode == CREATE_MODE
         )
 
         create_card_class = (
@@ -9152,7 +9751,7 @@ def render_master_drawing_list_interface():
 
     with workflow_col_2:
         update_selected = (
-            master_list_mode == UPDATE_MODE
+            mdl_master_list_mode == UPDATE_MODE
         )
 
         update_card_class = (
@@ -9232,7 +9831,7 @@ def render_master_drawing_list_interface():
     # CREATE NEW MASTER DRAWING LIST
     # ============================================================
 
-    if master_list_mode == CREATE_MODE:
+    if mdl_master_list_mode == CREATE_MODE:
         render_html(
             """
             <div class="information-card">
@@ -9618,7 +10217,7 @@ def render_master_drawing_list_interface():
     if generate_button:
         log_info(
             "Master workbook generation started",
-            mode=master_list_mode,
+            mode=mdl_master_list_mode,
             dih_file_count=len(dih_files or []),
             transmittal_file_count=len(
                 transmittal_files or []
@@ -9635,11 +10234,11 @@ def render_master_drawing_list_interface():
         # Validate workflow
         # --------------------------------------------------------
 
-        if master_list_mode == CREATE_MODE:
+        if mdl_master_list_mode == CREATE_MODE:
             if not dih_files:
                 log_warning(
                     "Generation stopped because no DIH file was uploaded",
-                    mode=master_list_mode,
+                    mode=mdl_master_list_mode,
                 )
 
                 st.error(
@@ -9647,12 +10246,12 @@ def render_master_drawing_list_interface():
                 )
                 st.stop()
 
-        elif master_list_mode == UPDATE_MODE:
+        elif mdl_master_list_mode == UPDATE_MODE:
             if existing_master_file is None:
                 log_warning(
                     "Generation stopped because no existing master "
                     "file was uploaded",
-                    mode=master_list_mode,
+                    mode=mdl_master_list_mode,
                 )
 
                 st.error(
@@ -9663,7 +10262,7 @@ def render_master_drawing_list_interface():
 
         else:
             raise ValueError(
-                f"Unknown Master Drawing List mode: {master_list_mode}"
+                f"Unknown Master Drawing List mode: {mdl_master_list_mode}"
             )
         
         try:
@@ -9679,7 +10278,7 @@ def render_master_drawing_list_interface():
             # Prepare and validate the existing master input
             # --------------------------------------------------------
 
-            if master_list_mode == UPDATE_MODE:
+            if mdl_master_list_mode == UPDATE_MODE:
                 existing_master_bytes = (
                     existing_master_file.getvalue()
                 )
@@ -9757,6 +10356,7 @@ def render_master_drawing_list_interface():
                 "DIH Description",
                 "DIH Category",
                 "DIH Revision",
+                "DIH Plan Type",
             ]
         )
 
@@ -9926,19 +10526,24 @@ def render_master_drawing_list_interface():
 
                         dih_file_preview.append(
                             {
-                                "File":
-                                    uploaded_dih_file.name,
-                                "Worksheet":
-                                    single_dih_sheet,
-                                "Header row":
-                                    single_dih_header + 1,
-                                "Detected category":
-                                    (
-                                        single_dih_category
-                                        or "Standard DIH"
-                                    ),
-                                "Rows":
-                                    len(single_dih_df),
+                                "File": uploaded_dih_file.name,
+                                "Worksheet": single_dih_sheet,
+                                "Header row": single_dih_header + 1,
+                                "Detected category": (
+                                    single_dih_category
+                                    or "Standard DIH"
+                                ),
+                                "Scheme / Bonding rows": int(
+                                    single_dih_df["DIH Plan Type"]
+                                    .isin(
+                                        [
+                                            "Scheme Plan",
+                                            "Bonding Plan",
+                                        ]
+                                    )
+                                    .sum()
+                                ),
+                                "Rows": len(single_dih_df),
                             }
                         )
 
@@ -10295,20 +10900,19 @@ def render_master_drawing_list_interface():
                 "Generating the Master Excel file..."
             ):
                 output_bytes = generate_output_excel(
-                    final_df,
-                    modification_sheet,
-                    dih_file_details,
-                    existing_master_details,
-                    transmittal_details,
+                    final_df=final_df,
+                    modification_sheet=modification_sheet,
+                    dih_file_details=dih_file_details,
+                    dih_df=dih_df,
+                    existing_master_details=existing_master_details,
+                    transmittal_details=transmittal_details,
                     transmittal_lookup=transmittal_lookup,
                     transmittal_record_lookup=(
                         transmittal_record_lookup
                     ),
                     transmittal_df=transmittal_df,
                     modification_df=modification_df,
-                    existing_approval_data=(
-                        existing_approval_data
-                    ),
+                    existing_approval_data=existing_approval_data,
                     preserve_input_order=(
                         existing_master_df is not None
                     ),
@@ -10325,7 +10929,7 @@ def render_master_drawing_list_interface():
             )
 
             st.session_state.mdl_pending_master_mode = (
-                master_list_mode
+                mdl_master_list_mode
             )
 
             st.session_state.mdl_pending_master_filename = (
@@ -10584,6 +11188,9 @@ def render_master_drawing_list_interface():
                 get_visible_columns_for_sheet(
                     final_df,
                     transmittal_df=transmittal_df,
+                    transmittal_record_lookup=(
+                        transmittal_record_lookup
+                    ),
                 )
             )
 
@@ -10613,7 +11220,7 @@ def render_master_drawing_list_interface():
             log_info(
                 "Master workbook generation failed",
                 error_id=error_id,
-                mode=master_list_mode,
+                mode=mdl_master_list_mode,
             )
 
             try:
@@ -10648,6 +11255,40 @@ def render_master_drawing_list_interface():
         </div>
         """
     )
+
+if __name__ == "__main__":
+    try:
+        log_info(
+            "Application session started",
+            mode=st.session_state.get(
+                "mdl_master_list_mode",
+                "Not selected",
+            ),
+        )
+
+        main()
+
+        log_info(
+            "Application script completed"
+        )
+
+    except Exception as error:
+        error_id = create_error_id()
+
+        show_application_error(
+            "The application encountered an unexpected error.",
+            error=error,
+            error_id=error_id,
+        )
+
+        log_info(
+            "Uncaught application failure displayed",
+            error_id=error_id,
+        )
+
+# ============================================================
+# ALSTOM ENGINEERING TOOLS INTEGRATION ENTRY POINT
+# ============================================================
 
 def render_master_drawing_list_app():
     """
