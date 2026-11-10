@@ -1579,28 +1579,31 @@ def is_continuous_transmission_page(
     page,
 ) -> tuple[bool, set[str]]:
     """
-    True only when:
-      1. The lower title area contains CONTINUOUS TRANSMISSION.
-      2. The page contains red and/or cyan vector circuitwork.
+    Detect Continuous Transmission drawings by their title text.
+
+    Red/cyan circuit colours are returned for information/logging only.
+    They do NOT reject a page because colours can be represented
+    differently in different PDFs, or may be raster content.
     """
-    title_block_text = get_bottom_title_block_text(
-        page
+    full_page_text = normalise_text(
+        page.get_text(
+            "text",
+            sort=True,
+        )
     )
 
     has_continuous_transmission = bool(
         CONTINUOUS_TRANSMISSION_PATTERN.search(
-            title_block_text
+            full_page_text
         )
     )
 
-    if not has_continuous_transmission:
-        return False, set()
-
     circuit_colours = get_circuit_colours(page)
 
-    has_red_or_cyan_circuit = bool(circuit_colours)
-
-    return has_red_or_cyan_circuit, circuit_colours
+    return (
+        has_continuous_transmission,
+        circuit_colours,
+    )
 
 # ---------------------------------------------------------------------
 # Main extraction
@@ -1655,9 +1658,8 @@ def extract_pdf(
                 if not is_ct_page:
                     write_log(
                         log_callback,
-                        f"Page {page_number}: skipped; not a "
-                        "Continuous Transmission page with "
-                        "red/cyan circuitwork.",
+                        f"Page {page_number}: skipped; "
+                        "CONTINUOUS TRANSMISSION not found in page text.",
                         "DEBUG",
                     )
                     continue
@@ -1665,11 +1667,30 @@ def extract_pdf(
                 write_log(
                     log_callback,
                     f"Page {page_number}: Continuous Transmission "
-                    f"page detected; colours="
-                    f"{', '.join(sorted(circuit_colours))}.",
+                    f"drawing found; vector colours="
+                    f"{', '.join(sorted(circuit_colours)) or 'NOT DETECTED'}.",
                     "INFO",
                 )
+                terminal_matches = TERMINAL_PATTERN.findall(
+                    page_text
+                )
 
+                prefixed_item_matches = ITEM_PATTERN.findall(
+                    page_text
+                )
+
+                fallback_item_matches = FALLBACK_ITEM_PATTERN.findall(
+                    page_text
+                )
+
+                write_log(
+                    log_callback,
+                    f"Page {page_number}: CT diagnostic: "
+                    f"terminal_matches={len(terminal_matches)}; "
+                    f"prefixed_item_matches={len(prefixed_item_matches)}; "
+                    f"fallback_item_matches={len(fallback_item_matches)}.",
+                    "INFO",
+                )
                 # Keep your existing terminal/item relevance check.
                 if not page_is_relevant(
                     page_text,
