@@ -52,8 +52,14 @@ FALLBACK_ITEM_PATTERN = re.compile(
 # Continuous Transmission page detection
 # ---------------------------------------------------------------------
 
-CONTINUOUS_TRANSMISSION_PATTERN = re.compile(
-    r"\bCONTINUOUS\s+TRANSMISSION\b",
+# Drawing types which may contain coloured CT-loop / transmission
+# circuitwork requiring extraction.
+CIRCUIT_DRAWING_TITLE_PATTERN = re.compile(
+    r"\b(?:"
+    r"CONTINUOUS\s+TRANSMISSION"
+    r"|DIFFERENTIAL\s+REPETITION"
+    r"|DIFFERENTIAL\s+TRANSMISSION"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -247,24 +253,22 @@ def get_title_block_text(
     )
 
 
-def page_has_continuous_transmission(
+def page_has_target_circuit_title(
     page,
     page_text: str,
 ) -> tuple[bool, str]:
     """
-    Check both all page text and title-block text.
-
-    This supports drawings where CONTINUOUS TRANSMISSION occurs only
-    in the bottom-right title block.
+    Check whether the page/title block contains an accepted circuit
+    drawing title.
     """
-    if CONTINUOUS_TRANSMISSION_PATTERN.search(
+    if CIRCUIT_DRAWING_TITLE_PATTERN.search(
         normalise_text(page_text)
     ):
         return True, "PAGE TEXT"
 
     title_block_text = get_title_block_text(page)
 
-    if CONTINUOUS_TRANSMISSION_PATTERN.search(
+    if CIRCUIT_DRAWING_TITLE_PATTERN.search(
         normalise_text(title_block_text)
     ):
         return True, "BOTTOM TITLE BLOCK"
@@ -581,51 +585,80 @@ def get_coloured_vector_segments(
     page,
 ) -> list[dict]:
     """
-    Get saturated coloured vector segments.
+    Extract solid red/cyan circuit-vector segments only.
 
-    No cable rack, location, Item name, drawing number, red RGB
-    value, or cyan RGB value is hardcoded.
+    Excludes dashed revision boxes, notes/title-block areas, and
+    non-red/non-cyan coloured vectors. This must use the same filtering
+    principles as get_circuit_colours().
     """
     segments = []
 
+    page_height = float(page.rect.height)
+
+    # Ignore title block, notes, revision text and lower sheet detail.
+    circuit_bottom_limit = page_height * 0.80
+
     for drawing in page.get_drawings():
-        colours = [
-            drawing.get("color"),
-            drawing.get("fill"),
-        ]
+        drawing_rect = drawing.get("rect")
 
-        for colour in colours:
-            hsv = rgb_to_hsv(colour)
+        if drawing_rect is None:
+            continue
 
-            if hsv is None:
-                continue
+        # Ignore lower title / notes / revision area.
+        if drawing_rect.y0 >= circuit_bottom_limit:
+            continue
 
-            hue, saturation, value = hsv
+        # Ignore dashed revision/change boundaries.
+        if drawing_is_dashed(drawing):
+            continue
 
-            # Ignore monochrome and nearly invisible paths.
-            if saturation < 0.28:
-                continue
+        stroke_colour = drawing.get("color")
+        fill_colour = drawing.get("fill")
 
-            if value < 0.20:
-                continue
+        is_red = (
+            colour_is_red(stroke_colour)
+            or colour_is_red(fill_colour)
+        )
 
-            for item in drawing.get("items", []):
-                for start, end in drawing_item_to_segments(
-                    item
-                ):
-                    length = point_distance(start, end)
+        is_cyan = (
+            colour_is_cyan(stroke_colour)
+            or colour_is_cyan(fill_colour)
+        )
 
-                    if length < 1.5:
-                        continue
+        # Your requirement is red/cyan circuitwork only.
+        if not is_red and not is_cyan:
+            continue
 
-                    segments.append(
-                        {
-                            "start": start,
-                            "end": end,
-                            "length": length,
-                            "hue": hue,
-                        }
-                    )
+        # Red occupies hue bin 0; cyan normally occupies bin 12–13.
+        # HSV is retained because downstream logic groups colours by hue.
+        colour = (
+            stroke_colour
+            if stroke_colour is not None
+            else fill_colour
+        )
+
+        hsv = rgb_to_hsv(colour)
+
+        if hsv is None:
+            continue
+
+        hue, _, _ = hsv
+
+        for item in drawing.get("items", []):
+            for start, end in drawing_item_to_segments(item):
+                length = point_distance(start, end)
+
+                if length < 1.5:
+                    continue
+
+                segments.append(
+                    {
+                        "start": start,
+                        "end": end,
+                        "length": length,
+                        "hue": hue,
+                    }
+                )
 
     return segments
 
@@ -1666,79 +1699,61 @@ def colour_is_cyan(
         and blue >= 0.55
     )
 
-
 def drawing_is_dashed(
     drawing: dict,
 ) -> bool:
     """
-    Ignore dashed PDF paths.
-
-    Revision clouds, red dashed boundaries and temporary drawing
-    mark-ups are commonly dashed. The CT circuit paths of interest
-    are expected to be solid vector paths.
+    Dashed objects are commonly revision boundaries, temporary
+    mark-ups, or drawing clouds rather than actual circuit paths.
     """
     dashes = drawing.get("dashes")
 
     if dashes is None:
         return False
 
-    dashes_text = str(dashes).strip()
-
-    return dashes_text not in {
+    normalised_dashes = str(dashes).replace(
+        " ",
         "",
-        "[] 0",
+    ).upper()
+
+    return normalised_dashes not in {
+        "",
+        "NONE",
         "[]0",
-        "None",
     }
-
-
-def drawing_segment_length(
-    drawing: dict,
-) -> float:
-    """
-    Return total vector length for a drawing object.
-    """
-    total_length = 0.0
-
-    for item in drawing.get("items", []):
-        for start, end in drawing_item_to_segments(item):
-            total_length += point_distance(
-                start,
-                end,
-            )
-
-    return total_length
 
 
 def get_circuit_colours(
     page,
 ) -> set[str]:
     """
-    Detect meaningful red/cyan circuit vector linework.
+    Detect substantial solid red/cyan vector circuitwork.
 
     Excludes:
-      - dashed revision / boundary lines;
-      - title-block and notes area;
-      - tiny isolated coloured objects.
+      - dashed revision boxes;
+      - bottom title block / notes;
+      - tiny isolated coloured text/marks.
 
-    This avoids treating a red dashed rectangle or red notes as a
-    red circuit.
+    Unlike the older version, this accumulates vector segment length
+    by colour over the page. That is important because a real circuit
+    is often split into many small vector drawing objects.
     """
-    found_colours = set()
-
     page_height = float(page.rect.height)
 
-    # Bottom area normally contains title block, notes, revision marks.
-    # Do not treat colours there as circuit wiring.
-    circuit_bottom_limit = page_height * 0.82
+    # Exclude title block, notes and revision text at the bottom.
+    circuit_bottom_limit = page_height * 0.80
 
-    # A real circuit normally consists of substantial vector linework.
-    minimum_total_length = 80.0
+    red_length = 0.0
+    cyan_length = 0.0
+
+    # Adjust only if necessary after testing. A real coloured circuit
+    # normally has hundreds or thousands of points of vector length.
+    minimum_circuit_length = 120.0
 
     try:
         drawings = page.get_drawings()
     except Exception:
-        return found_colours
+        return set()
 
     for drawing in drawings:
         drawing_rect = drawing.get("rect")
@@ -1746,36 +1761,56 @@ def get_circuit_colours(
         if drawing_rect is None:
             continue
 
-        # Ignore title block / notes / bottom revision area.
+        # Ignore bottom title block / notes / sheet references.
         if drawing_rect.y0 >= circuit_bottom_limit:
             continue
 
-        # Ignore dashed boxes and dashed mark-ups.
+        # Ignore dashed red revision/change rectangles.
         if drawing_is_dashed(drawing):
-            continue
-
-        total_length = drawing_segment_length(
-            drawing
-        )
-
-        # Ignore tiny coloured objects such as marks / symbols.
-        if total_length < minimum_total_length:
             continue
 
         stroke_colour = drawing.get("color")
         fill_colour = drawing.get("fill")
 
-        if (
+        is_red = (
             colour_is_red(stroke_colour)
             or colour_is_red(fill_colour)
-        ):
-            found_colours.add("RED")
+        )
 
-        if (
+        is_cyan = (
             colour_is_cyan(stroke_colour)
             or colour_is_cyan(fill_colour)
-        ):
-            found_colours.add("CYAN")
+        )
+
+        if not is_red and not is_cyan:
+            continue
+
+        for item in drawing.get("items", []):
+            for start, end in drawing_item_to_segments(
+                item
+            ):
+                segment_length = point_distance(
+                    start,
+                    end,
+                )
+
+                # Ignore extremely small components / dots.
+                if segment_length < 1.5:
+                    continue
+
+                if is_red:
+                    red_length += segment_length
+
+                if is_cyan:
+                    cyan_length += segment_length
+
+    found_colours = set()
+
+    if red_length >= minimum_circuit_length:
+        found_colours.add("RED")
+
+    if cyan_length >= minimum_circuit_length:
+        found_colours.add("CYAN")
 
     return found_colours
 
@@ -1808,30 +1843,19 @@ def get_bottom_title_block_text(
     )
 
 
-def is_continuous_transmission_page(
+def is_target_circuit_drawing(
     page_text: str,
-    circuit_colours: set[str],
 ) -> bool:
     """
-    A valid CT Loop candidate page must contain:
+    Fast title-text filter.
 
-      1. CONTINUOUS TRANSMISSION in the extracted page text.
-      2. Meaningful solid red and/or cyan vector circuit linework.
-
-    circuit_colours must come from get_circuit_colours(), which
-    excludes dashed boxes, title-block colours and small mark-ups.
+    Includes Continuous Transmission and Differential Repetition
+    drawings. Colour/vector analysis happens only after this check.
     """
-    has_continuous_transmission = bool(
-        CONTINUOUS_TRANSMISSION_PATTERN.search(
+    return bool(
+        CIRCUIT_DRAWING_TITLE_PATTERN.search(
             normalise_text(page_text)
         )
-    )
-
-    has_coloured_circuit = bool(circuit_colours)
-
-    return (
-        has_continuous_transmission
-        and has_coloured_circuit
     )
 
 # ---------------------------------------------------------------------
@@ -1879,17 +1903,19 @@ def extract_pdf(
 
                 # Fast first filter: do not inspect vectors unless the page title
                 # contains CONTINUOUS TRANSMISSION.
-                has_continuous_transmission = bool(
-                    CONTINUOUS_TRANSMISSION_PATTERN.search(
-                        normalise_text(page_text)
-                    )
+                (
+                    is_target_title,
+                    target_title_source,
+                ) = page_has_target_circuit_title(
+                    page,
+                    page_text,
                 )
 
-                if not has_continuous_transmission:
+                if not is_target_title:
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
-                        "CONTINUOUS TRANSMISSION not found in page text.",
+                        "target circuit drawing title not found.",
                         "DEBUG",
                     )
                     continue
@@ -1898,26 +1924,20 @@ def extract_pdf(
                 # title-text check above.
                 circuit_colours = get_circuit_colours(page)
 
-                is_ct_page = is_continuous_transmission_page(
-                    page_text,
-                    circuit_colours,
-                )
-
-                if not is_ct_page:
+                if not circuit_colours:
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
-                        "Continuous Transmission found but no valid "
-                        "solid red/cyan circuit linework was found.",
+                        "target drawing title found, but no substantial "
+                        "solid red/cyan circuitwork was detected.",
                         "DEBUG",
                     )
                     continue
 
                 write_log(
                     log_callback,
-                    f"Page {page_number}: Continuous Transmission "
-                    f"drawing found; vector colours="
-                    f"{', '.join(sorted(circuit_colours)) or 'NOT DETECTED'}.",
+                    f"Page {page_number}: target circuit drawing found; "
+                    f"vector colours={', '.join(sorted(circuit_colours))}.",
                     "INFO",
                 )
                 terminal_matches = TERMINAL_PATTERN.findall(
