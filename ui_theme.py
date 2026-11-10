@@ -754,6 +754,70 @@ def render_global_theme(theme_mode: str):
             fill: {colours["info_icon"]} !important;
             stroke: {colours["info_icon"]} !important;
         }}
+        /* ====================================================
+        STREAMLIT TOP HEADER / TOOLBAR
+        Fix dark Streamlit Cloud top bar in Light mode
+        ==================================================== */
+
+        [data-testid="stHeader"] {{
+            background: {colours["surface"]} !important;
+            border-bottom: 1px solid {colours["border"]} !important;
+            box-shadow: none !important;
+        }}
+
+        /* Header inner containers */
+        [data-testid="stHeader"] > div,
+        [data-testid="stHeader"] [data-testid="stToolbar"],
+        [data-testid="stToolbar"] {{
+            background: transparent !important;
+        }}
+
+        /* Streamlit decoration / top gradient line */
+        [data-testid="stDecoration"] {{
+            background: {colours["surface"]} !important;
+        }}
+
+        /* Header buttons: Share, GitHub, menu, sidebar toggle etc. */
+        [data-testid="stHeader"] button,
+        [data-testid="stToolbar"] button {{
+            background: transparent !important;
+            color: {colours["text"]} !important;
+            border: 1px solid transparent !important;
+            border-radius: 7px !important;
+        }}
+
+        /* Header button hover */
+        [data-testid="stHeader"] button:hover,
+        [data-testid="stToolbar"] button:hover {{
+            background: {colours["surface_hover"]} !important;
+            border-color: {colours["border"]} !important;
+            color: {colours["blue"]} !important;
+        }}
+
+        /* Header icons */
+        [data-testid="stHeader"] svg,
+        [data-testid="stToolbar"] svg {{
+            color: {colours["text"]} !important;
+            fill: {colours["text"]} !important;
+        }}
+
+        /* Header icon hover */
+        [data-testid="stHeader"] button:hover svg,
+        [data-testid="stToolbar"] button:hover svg {{
+            color: {colours["blue"]} !important;
+            fill: {colours["blue"]} !important;
+        }}
+
+        /* Share text */
+        [data-testid="stHeader"] span,
+        [data-testid="stHeader"] p,
+        [data-testid="stToolbar"] span,
+        [data-testid="stToolbar"] p {{
+            color: {colours["muted"]} !important;
+        }}
+        hr {{
+            border-color: {colours["border"]} !important;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
