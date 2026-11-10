@@ -35,29 +35,11 @@ TERMINAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Generic Item identifier:
-#
-# AQ1
-# ATC1
-# AY1A
-# UT1
-# GW2
-# X-12A
-#
-# Must:
-# - start with a letter;
-# - contain at least one digit;
-# - allow letters, digits and hyphens.
 ITEM_IDENTIFIER_PATTERN = (
     r"(?=[A-Z0-9-]*\d)"
     r"[A-Z][A-Z0-9-]*"
 )
 
-# Examples:
-# TC.AQ1
-# CT.AY1A
-# TC.UT1(UP)
-# CT.GW2
 ITEM_PATTERN = re.compile(
     r"\b(?:CT|TC)\.?\s*"
     rf"(?P<item>{ITEM_IDENTIFIER_PATTERN})"
@@ -67,20 +49,22 @@ ITEM_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Examples:
-# X1.f1
-# X3.F10
-# X12-f3
-FUSE_PATTERN = re.compile(
-    r"\b"
-    r"(?P<board>X\d+)"
-    r"\s*[:.-]?\s*"
-    r"(?P<fuse>F\d+)"
-    r"\b",
+FUSE_NUMBER_PATTERN = re.compile(
+    r"^\s*#\s*(?P<number>\d+)\s*$",
     re.IGNORECASE,
 )
 
-NS1_RACK_PATTERN = re.compile(
+X_TERMINAL_PATTERN = re.compile(
+    r"^\s*X\s*(?P<number>\d+)\s*$",
+    re.IGNORECASE,
+)
+
+CURRENT_RATING_PATTERN = re.compile(
+    r"^\s*\d+(?:\.\d+)?\s*(?:MA|A)\s*$",
+    re.IGNORECASE,
+)
+
+NS_RACK_PATTERN = re.compile(
     r"\bNS\d+\s+RACK\s+[A-Z0-9-]+\b",
     re.IGNORECASE,
 )
@@ -98,9 +82,9 @@ IXL_CUBICLE_PATTERN = re.compile(
 # Controlled normalisation
 # ---------------------------------------------------------------------
 
-DRAWING_SEGMENT_ALIASES = {}
-
-ITEM_STATE_ALIASES = {}
+DRAWING_SEGMENT_ALIASES = {
+    "ATL": "ALT",
+}
 
 
 # ---------------------------------------------------------------------
@@ -117,7 +101,7 @@ def write_log(
 
 
 # ---------------------------------------------------------------------
-# Generic helpers
+# Generic geometry helpers
 # ---------------------------------------------------------------------
 
 def normalise_text(
@@ -128,31 +112,6 @@ def normalise_text(
         " ",
         str(value).upper(),
     ).strip()
-
-
-def normalise_drawing_number(
-    drawing_number: str,
-) -> str:
-    if not drawing_number:
-        return ""
-
-    parts = drawing_number.upper().strip().split("/")
-
-    return "/".join(
-        DRAWING_SEGMENT_ALIASES.get(part, part)
-        for part in parts
-    )
-
-
-def normalise_item_state(
-    state: str,
-) -> str:
-    state = str(state).upper().strip()
-
-    return ITEM_STATE_ALIASES.get(
-        state,
-        state,
-    )
 
 
 def point_distance(
@@ -185,14 +144,14 @@ def point_to_segment_distance(
 
     t = max(0.0, min(1.0, t))
 
-    closest_point = fitz.Point(
+    closest = fitz.Point(
         start.x + t * dx,
         start.y + t * dy,
     )
 
     return point_distance(
         point,
-        closest_point,
+        closest,
     )
 
 
@@ -272,12 +231,29 @@ def format_lines(
     return "\n".join(
         f"- {value}"
         for value in values
-        if value
+        if str(value).strip()
+    )
+
+
+def normalise_drawing_number(
+    drawing_number: str,
+) -> str:
+    if not drawing_number:
+        return ""
+
+    parts = drawing_number.upper().strip().split("/")
+
+    return "/".join(
+        DRAWING_SEGMENT_ALIASES.get(
+            part,
+            part,
+        )
+        for part in parts
     )
 
 
 # ---------------------------------------------------------------------
-# Drawing metadata
+# Title block / metadata
 # ---------------------------------------------------------------------
 
 def get_bottom_title_block_words(
@@ -297,7 +273,9 @@ def get_bottom_title_block_words(
     ):
         x0, y0, x1, y1, value = word[:5]
 
-        if (y0 + y1) / 2 < title_top:
+        y_center = (y0 + y1) / 2
+
+        if y_center < title_top:
             continue
 
         words.append(
@@ -312,9 +290,7 @@ def get_bottom_title_block_words(
                 "x_center": (
                     x0 + x1
                 ) / 2,
-                "y_center": (
-                    y0 + y1
-                ) / 2,
+                "y_center": y_center,
             }
         )
 
@@ -354,12 +330,10 @@ def page_has_return_channel(
 def get_drawing_number(
     page,
 ) -> str:
-    title_block_text = get_title_block_text(page)
+    title_text = get_title_block_text(page)
 
     matches = list(
-        DRAWING_PATTERN.finditer(
-            title_block_text
-        )
+        DRAWING_PATTERN.finditer(title_text)
     )
 
     if not matches:
@@ -375,7 +349,7 @@ def get_revision(
 ) -> str:
     words = get_bottom_title_block_words(page)
 
-    revision_labels = [
+    labels = [
         word
         for word in words
         if word["value"].upper()
@@ -386,12 +360,12 @@ def get_revision(
         }
     ]
 
-    if not revision_labels:
+    if not labels:
         return "REVIEW"
 
     candidates = []
 
-    for revision_label in revision_labels:
+    for label in labels:
         for word in words:
             value = word["value"].upper()
 
@@ -401,12 +375,12 @@ def get_revision(
             ):
                 continue
 
-            if word["x_center"] <= revision_label["x1"]:
+            if word["x_center"] <= label["x1"]:
                 continue
 
             vertical_distance = abs(
                 word["y_center"]
-                - revision_label["y_center"]
+                - label["y_center"]
             )
 
             if vertical_distance > 20:
@@ -414,7 +388,7 @@ def get_revision(
 
             horizontal_distance = (
                 word["x0"]
-                - revision_label["x1"]
+                - label["x1"]
             )
 
             candidates.append(
@@ -447,6 +421,48 @@ def get_location_from_drawing_number(
 
 
 # ---------------------------------------------------------------------
+# Page word extraction
+# ---------------------------------------------------------------------
+
+def get_page_words(
+    page,
+) -> list[dict]:
+    words = []
+
+    for word in page.get_text(
+        "words",
+        sort=True,
+    ):
+        x0, y0, x1, y1, value = word[:5]
+
+        words.append(
+            {
+                "value": str(value).strip(),
+                "x0": float(x0),
+                "y0": float(y0),
+                "x1": float(x1),
+                "y1": float(y1),
+                "x_center": (
+                    x0 + x1
+                ) / 2,
+                "y_center": (
+                    y0 + y1
+                ) / 2,
+                "point": fitz.Point(
+                    (
+                        x0 + x1
+                    ) / 2,
+                    (
+                        y0 + y1
+                    ) / 2,
+                ),
+            }
+        )
+
+    return words
+
+
+# ---------------------------------------------------------------------
 # Item extraction
 # ---------------------------------------------------------------------
 
@@ -463,10 +479,9 @@ def extract_item_labels(
 
     for match in ITEM_PATTERN.finditer(page_text):
         item_code = match.group("item").upper()
-
-        state = normalise_item_state(
+        state = (
             match.group("state") or ""
-        )
+        ).upper().strip()
 
         item_name = item_code
 
@@ -537,14 +552,11 @@ def extract_terminal_references(
     terminals = []
     seen = set()
 
-    for word in page.get_text(
-        "words",
-        sort=True,
-    ):
-        x0, y0, x1, y1, value = word[:5]
-
+    for word in get_page_words(page):
         match = TERMINAL_PATTERN.fullmatch(
-            value.strip(" ,;:()[]{}")
+            word["value"].strip(
+                " ,;:()[]{}"
+            )
         )
 
         if not match:
@@ -554,24 +566,14 @@ def extract_terminal_references(
         column = match.group("column").upper()
         number = match.group("number")
 
-        terminal_text = (
+        terminal_name = (
             f"{rack}.{column}{number}"
         )
 
-        x_center = round(
-            (x0 + x1) / 2,
-            2,
-        )
-
-        y_center = round(
-            (y0 + y1) / 2,
-            2,
-        )
-
         key = (
-            terminal_text,
-            round(x_center, 1),
-            round(y_center, 1),
+            terminal_name,
+            round(word["x_center"], 1),
+            round(word["y_center"], 1),
         )
 
         if key in seen:
@@ -581,23 +583,20 @@ def extract_terminal_references(
 
         terminals.append(
             {
-                "terminal": terminal_text,
+                "terminal": terminal_name,
                 "rack": rack,
                 "column": column,
                 "number": number,
                 "number_parts": (
                     parse_terminal_number(number)
                 ),
-                "x0": float(x0),
-                "y0": float(y0),
-                "x1": float(x1),
-                "y1": float(y1),
-                "x_center": x_center,
-                "y_center": y_center,
-                "point": fitz.Point(
-                    x_center,
-                    y_center,
-                ),
+                "x0": word["x0"],
+                "y0": word["y0"],
+                "x1": word["x1"],
+                "y1": word["y1"],
+                "x_center": word["x_center"],
+                "y_center": word["y_center"],
+                "point": word["point"],
             }
         )
 
@@ -614,65 +613,49 @@ def build_terminal_pairs(
     )
 
     maximum_pair_distance = max(
-        30.0,
-        min(page_scale * 0.18, 250.0),
+        28.0,
+        min(page_scale * 0.15, 180.0),
     )
 
     candidates = []
 
-    for first_index, first_terminal in enumerate(
-        terminals
-    ):
-        for second_terminal in terminals[
-            first_index + 1:
-        ]:
-            if (
-                first_terminal["rack"]
-                != second_terminal["rack"]
-            ):
+    for first_index, first in enumerate(terminals):
+        for second in terminals[first_index + 1:]:
+            if first["rack"] != second["rack"]:
                 continue
 
-            if (
-                first_terminal["column"]
-                != second_terminal["column"]
-            ):
+            if first["column"] != second["column"]:
                 continue
 
             if not terminal_numbers_are_consecutive(
-                first_terminal,
-                second_terminal,
+                first,
+                second,
             ):
                 continue
 
             pair_distance = point_distance(
-                first_terminal["point"],
-                second_terminal["point"],
+                first["point"],
+                second["point"],
             )
 
             if pair_distance > maximum_pair_distance:
                 continue
 
-            x_center = round(
-                (
-                    first_terminal["x_center"]
-                    + second_terminal["x_center"]
-                ) / 2,
-                2,
-            )
+            x_center = (
+                first["x_center"]
+                + second["x_center"]
+            ) / 2
 
-            y_center = round(
-                (
-                    first_terminal["y_center"]
-                    + second_terminal["y_center"]
-                ) / 2,
-                2,
-            )
+            y_center = (
+                first["y_center"]
+                + second["y_center"]
+            ) / 2
 
             candidates.append(
                 {
                     "text": (
-                        f"{first_terminal['terminal']} & "
-                        f"{second_terminal['terminal']}"
+                        f"{first['terminal']} & "
+                        f"{second['terminal']}"
                     ),
                     "x_center": x_center,
                     "y_center": y_center,
@@ -681,10 +664,7 @@ def build_terminal_pairs(
                         y_center,
                     ),
                     "pair_distance": pair_distance,
-                    "terminals": [
-                        first_terminal,
-                        second_terminal,
-                    ],
+                    "terminals": [first, second],
                 }
             )
 
@@ -692,12 +672,12 @@ def build_terminal_pairs(
 
 
 # ---------------------------------------------------------------------
-# Green circuit detection
+# PDF drawing/vector helpers
 # ---------------------------------------------------------------------
 
 def drawing_item_to_segments(
     item,
-) -> list[tuple[fitz.Point, fitz.Point]]:
+) -> list[tuple[fitz.Point, fitz.Point, str]]:
     if not item:
         return []
 
@@ -708,6 +688,16 @@ def drawing_item_to_segments(
             (
                 fitz.Point(item[1]),
                 fitz.Point(item[2]),
+                "line",
+            )
+        ]
+
+    if item_type == "c" and len(item) >= 5:
+        return [
+            (
+                fitz.Point(item[1]),
+                fitz.Point(item[4]),
+                "curve",
             )
         ]
 
@@ -735,28 +725,10 @@ def drawing_item_to_segments(
         )
 
         return [
-            (top_left, top_right),
-            (top_right, bottom_right),
-            (bottom_right, bottom_left),
-            (bottom_left, top_left),
-        ]
-
-    if item_type == "qu" and len(item) >= 2:
-        quad = item[1]
-
-        return [
-            (quad.ul, quad.ur),
-            (quad.ur, quad.lr),
-            (quad.lr, quad.ll),
-            (quad.ll, quad.ul),
-        ]
-
-    if item_type == "c" and len(item) >= 5:
-        return [
-            (
-                fitz.Point(item[1]),
-                fitz.Point(item[4]),
-            )
+            (top_left, top_right, "rectangle"),
+            (top_right, bottom_right, "rectangle"),
+            (bottom_right, bottom_left, "rectangle"),
+            (bottom_left, top_left, "rectangle"),
         ]
 
     return []
@@ -772,16 +744,16 @@ def is_green_colour(
 
     hue, saturation, value = hsv
 
-    # Green range. Cyan normally starts around 170-180 degrees
-    # and is intentionally excluded.
+    # Generic green region in HSV.
+    # Cyan is normally above this range.
     return (
         65 <= hue <= 165
-        and saturation >= 0.25
+        and saturation >= 0.30
         and value >= 0.20
     )
 
 
-def get_green_vector_segments(
+def get_green_segments(
     page,
 ) -> list[dict]:
     segments = []
@@ -797,12 +769,60 @@ def get_green_vector_segments(
             continue
 
         for item in drawing.get("items", []):
-            for start, end in drawing_item_to_segments(
-                item
+            for start, end, segment_type in (
+                drawing_item_to_segments(item)
             ):
                 length = point_distance(start, end)
 
-                if length < 1.5:
+                if length < 1.0:
+                    continue
+
+                segments.append(
+                    {
+                        "start": start,
+                        "end": end,
+                        "type": segment_type,
+                    }
+                )
+
+    return segments
+
+
+def get_wave_segments(
+    page,
+) -> list[dict]:
+    """
+    Return vector segments likely to belong to fuse-wave symbols.
+
+    Fuse-wave symbols are usually small black curved paths. This does
+    not assume a fixed fuse number, X reference, location, drawing,
+    or Item. It identifies small curved vector objects near fuse text.
+    """
+    segments = []
+
+    for drawing in page.get_drawings():
+        colour = drawing.get("color")
+
+        hsv = rgb_to_hsv(colour)
+
+        if hsv is not None:
+            _, saturation, value = hsv
+
+            # Ignore strongly coloured revision/circuit lines.
+            if saturation > 0.20 and value > 0.20:
+                continue
+
+        for item in drawing.get("items", []):
+            for start, end, segment_type in (
+                drawing_item_to_segments(item)
+            ):
+                if segment_type != "curve":
+                    continue
+
+                length = point_distance(start, end)
+
+                # Fuse waves are normally local/small curves.
+                if length < 2.0 or length > 100.0:
                     continue
 
                 segments.append(
@@ -815,98 +835,331 @@ def get_green_vector_segments(
     return segments
 
 
-def terminal_pair_is_green(
-    terminal_pair: dict,
-    green_segments: list[dict],
+def count_wave_segments_near_point(
+    point: fitz.Point,
+    wave_segments: list[dict],
+    maximum_distance: float,
+) -> int:
+    count = 0
+
+    for segment in wave_segments:
+        distance = point_to_segment_distance(
+            point,
+            segment["start"],
+            segment["end"],
+        )
+
+        if distance <= maximum_distance:
+            count += 1
+
+    return count
+
+
+# ---------------------------------------------------------------------
+# Fuse extraction from local symbol groups
+# ---------------------------------------------------------------------
+
+def extract_fuse_number_words(
+    words: list[dict],
+) -> list[dict]:
+    fuse_numbers = []
+    seen = set()
+
+    for index, word in enumerate(words):
+        value = word["value"].upper()
+
+        match = FUSE_NUMBER_PATTERN.fullmatch(value)
+
+        if match:
+            number = int(match.group("number"))
+
+            key = (
+                number,
+                round(word["x_center"], 1),
+                round(word["y_center"], 1),
+            )
+
+            if key not in seen:
+                seen.add(key)
+
+                fuse_numbers.append(
+                    {
+                        "number": number,
+                        "point": word["point"],
+                    }
+                )
+
+            continue
+
+        # Supports PDFs that split "#7" into separate "#", "7" words.
+        if value != "#":
+            continue
+
+        if index + 1 >= len(words):
+            continue
+
+        next_word = words[index + 1]
+
+        if abs(
+            next_word["y_center"]
+            - word["y_center"]
+        ) > 12:
+            continue
+
+        if (
+            next_word["x0"]
+            - word["x1"]
+        ) > 30:
+            continue
+
+        if not next_word["value"].isdigit():
+            continue
+
+        number = int(next_word["value"])
+
+        point = fitz.Point(
+            (
+                word["x0"]
+                + next_word["x1"]
+            ) / 2,
+            (
+                word["y_center"]
+                + next_word["y_center"]
+            ) / 2,
+        )
+
+        key = (
+            number,
+            round(point.x, 1),
+            round(point.y, 1),
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        fuse_numbers.append(
+            {
+                "number": number,
+                "point": point,
+            }
+        )
+
+    return fuse_numbers
+
+
+def extract_x_terminal_words(
+    words: list[dict],
+) -> list[dict]:
+    x_terminals = []
+    seen = set()
+
+    for index, word in enumerate(words):
+        value = word["value"].upper()
+
+        match = X_TERMINAL_PATTERN.fullmatch(value)
+
+        if match:
+            number = int(match.group("number"))
+
+            key = (
+                number,
+                round(word["x_center"], 1),
+                round(word["y_center"], 1),
+            )
+
+            if key not in seen:
+                seen.add(key)
+
+                x_terminals.append(
+                    {
+                        "number": number,
+                        "point": word["point"],
+                    }
+                )
+
+            continue
+
+        # Supports "X", "3" as separate words.
+        if value != "X":
+            continue
+
+        if index + 1 >= len(words):
+            continue
+
+        next_word = words[index + 1]
+
+        if abs(
+            next_word["y_center"]
+            - word["y_center"]
+        ) > 12:
+            continue
+
+        if (
+            next_word["x0"]
+            - word["x1"]
+        ) > 30:
+            continue
+
+        if not next_word["value"].isdigit():
+            continue
+
+        number = int(next_word["value"])
+
+        point = fitz.Point(
+            (
+                word["x0"]
+                + next_word["x1"]
+            ) / 2,
+            (
+                word["y_center"]
+                + next_word["y_center"]
+            ) / 2,
+        )
+
+        key = (
+            number,
+            round(point.x, 1),
+            round(point.y, 1),
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        x_terminals.append(
+            {
+                "number": number,
+                "point": point,
+            }
+        )
+
+    return x_terminals
+
+
+def get_current_rating_points(
+    words: list[dict],
+) -> list[fitz.Point]:
+    points = []
+
+    for word in words:
+        if CURRENT_RATING_PATTERN.fullmatch(
+            word["value"].upper()
+        ):
+            points.append(word["point"])
+
+    return points
+
+
+def extract_fuse_candidates(
     page,
-) -> bool:
-    if not green_segments:
-        return False
+) -> list[dict]:
+    """
+    Build fuse candidates from a local physical cluster:
+
+        #<fuse number>
+        + X<terminal block number>
+        + optional current rating such as 100mA
+        + nearby fuse-wave vector geometry where available.
+
+    Example local group:
+
+        #7
+        B24
+        X3
+        100mA
+
+    becomes:
+
+        X3.f7
+    """
+    words = get_page_words(page)
+
+    fuse_numbers = extract_fuse_number_words(words)
+    x_terminals = extract_x_terminal_words(words)
+    rating_points = get_current_rating_points(words)
+    wave_segments = get_wave_segments(page)
+
+    candidates = []
+    seen = set()
 
     page_scale = max(
         float(page.rect.width),
         float(page.rect.height),
     )
 
-    maximum_distance = max(
-        18.0,
-        min(page_scale * 0.04, 70.0),
+    maximum_fuse_x_distance = max(
+        35.0,
+        min(page_scale * 0.10, 180.0),
     )
 
-    for terminal in terminal_pair["terminals"]:
-        for segment in green_segments:
-            distance = point_to_segment_distance(
-                terminal["point"],
-                segment["start"],
-                segment["end"],
+    maximum_fuse_y_distance = max(
+        25.0,
+        min(page_scale * 0.05, 80.0),
+    )
+
+    for fuse_number in fuse_numbers:
+        for x_terminal in x_terminals:
+            horizontal_distance = abs(
+                fuse_number["point"].x
+                - x_terminal["point"].x
             )
 
-            if distance <= maximum_distance:
-                return True
-
-    return False
-
-
-# ---------------------------------------------------------------------
-# Fuse extraction
-# ---------------------------------------------------------------------
-
-def normalise_fuse_reference(
-    board: str,
-    fuse: str,
-) -> str:
-    return (
-        f"{board.upper()}."
-        f"{fuse.lower()}"
-    )
-
-
-def extract_fuse_references(
-    page,
-) -> list[dict]:
-    page_text = page.get_text(
-        "text",
-        sort=True,
-    )
-
-    fuse_references = []
-    seen = set()
-
-    for match in FUSE_PATTERN.finditer(page_text):
-        fuse_reference = normalise_fuse_reference(
-            match.group("board"),
-            match.group("fuse"),
-        )
-
-        rectangles = page.search_for(
-            match.group(0),
-            quads=False,
-        )
-
-        if not rectangles:
-            key = (
-                fuse_reference,
-                None,
-                None,
+            vertical_distance = abs(
+                fuse_number["point"].y
+                - x_terminal["point"].y
             )
 
-            if key not in seen:
-                seen.add(key)
+            if horizontal_distance > maximum_fuse_x_distance:
+                continue
 
-                fuse_references.append(
-                    {
-                        "value": fuse_reference,
-                        "point": None,
-                    }
-                )
+            if vertical_distance > maximum_fuse_y_distance:
+                continue
 
-            continue
+            centre = fitz.Point(
+                (
+                    fuse_number["point"].x
+                    + x_terminal["point"].x
+                ) / 2,
+                (
+                    fuse_number["point"].y
+                    + x_terminal["point"].y
+                ) / 2,
+            )
 
-        for rectangle in rectangles:
+            wave_count = count_wave_segments_near_point(
+                centre,
+                wave_segments,
+                maximum_distance=max(
+                    20.0,
+                    min(page_scale * 0.03, 60.0),
+                ),
+            )
+
+            rating_found = False
+
+            for rating_point in rating_points:
+                if point_distance(
+                    centre,
+                    rating_point,
+                ) <= max(
+                    30.0,
+                    min(page_scale * 0.08, 130.0),
+                ):
+                    rating_found = True
+                    break
+
+            fuse_value = (
+                f"X{x_terminal['number']}."
+                f"f{fuse_number['number']}"
+            )
+
             key = (
-                fuse_reference,
-                round(rectangle.x0, 1),
-                round(rectangle.y0, 1),
+                fuse_value,
+                round(centre.x, 1),
+                round(centre.y, 1),
             )
 
             if key in seen:
@@ -914,9 +1167,64 @@ def extract_fuse_references(
 
             seen.add(key)
 
-            fuse_references.append(
+            # The wave and rating are evidence scores. A valid native
+            # PDF may not represent the symbol as a Bezier curve, so
+            # lack of curve evidence is not an automatic rejection.
+            confidence = 0
+
+            if wave_count:
+                confidence += 2
+
+            if rating_found:
+                confidence += 1
+
+            candidates.append(
                 {
-                    "value": fuse_reference,
+                    "value": fuse_value,
+                    "point": centre,
+                    "wave_count": wave_count,
+                    "rating_found": rating_found,
+                    "confidence": confidence,
+                }
+            )
+
+    candidates.sort(
+        key=lambda candidate: (
+            -candidate["confidence"],
+            candidate["point"].y,
+            candidate["point"].x,
+        )
+    )
+
+    return candidates
+
+
+# ---------------------------------------------------------------------
+# Equipment labels and fuse assignment
+# ---------------------------------------------------------------------
+
+def find_equipment_label_points(
+    page,
+) -> list[dict]:
+    page_text = page.get_text(
+        "text",
+        sort=True,
+    )
+
+    labels = []
+
+    ns_matches = list(
+        NS_RACK_PATTERN.finditer(page_text)
+    )
+
+    for match in ns_matches:
+        source_text = match.group(0)
+
+        for rectangle in page.search_for(source_text):
+            labels.append(
+                {
+                    "type": "NS_RACK",
+                    "name": source_text.upper(),
                     "point": fitz.Point(
                         (
                             rectangle.x0
@@ -930,182 +1238,232 @@ def extract_fuse_references(
                 }
             )
 
-    return fuse_references
-
-
-def get_equipment_names(
-    page,
-) -> tuple[str, str]:
-    """
-    Extract equipment names from the current PDF page.
-
-    No default equipment name is invented. If a label is missing,
-    REVIEW REQUIRED is returned so the engineer can confirm it.
-    """
-    page_text = page.get_text(
-        "text",
-        sort=True,
+    ixl_matches = list(
+        IXL_CUBICLE_PATTERN.finditer(page_text)
     )
 
-    normalised_page_text = re.sub(
-        r"\s+",
-        " ",
-        page_text.upper(),
-    )
+    for match in ixl_matches:
+        source_text = match.group(0)
 
-    ns1_match = NS1_RACK_PATTERN.search(
-        normalised_page_text
-    )
+        for rectangle in page.search_for(source_text):
+            name = source_text.upper()
 
-    ixl_match = IXL_CUBICLE_PATTERN.search(
-        normalised_page_text
-    )
+            if not name.startswith("IXL/"):
+                name = f"IXL/{name}"
 
-    ns1_name = (
-        ns1_match.group(0).upper()
-        if ns1_match
-        else "REVIEW REQUIRED - RACK NOT FOUND"
-    )
-
-    ixl_name = (
-        ixl_match.group(0).upper()
-        if ixl_match
-        else "REVIEW REQUIRED - CUBICLE NOT FOUND"
-    )
-
-    if (
-        not ixl_name.startswith("REVIEW REQUIRED")
-        and not ixl_name.startswith("IXL/")
-    ):
-        ixl_name = f"IXL/{ixl_name}"
-
-    return ns1_name, ixl_name
-
-
-def select_fuses_for_item(
-    item_label: dict,
-    fuse_references: list[dict],
-) -> list[str]:
-    """
-    Select up to two fuse references nearest to the Item occurrence.
-
-    In Return Channel drawings there are normally two related fuse
-    references:
-      - NS1 Rack;
-      - IXL/SACEM CoV Cubicle.
-
-    If only one fuse reference is extractable from PDF text, it is
-    used for both locations.
-    """
-    if not fuse_references:
-        return []
-
-    references_with_distance = []
-
-    for fuse_reference in fuse_references:
-        point = fuse_reference["point"]
-
-        if point is None:
-            distance = 999999.0
-        else:
-            distance = point_distance(
-                item_label["point"],
-                point,
+            labels.append(
+                {
+                    "type": "IXL_CUBICLE",
+                    "name": name,
+                    "point": fitz.Point(
+                        (
+                            rectangle.x0
+                            + rectangle.x1
+                        ) / 2,
+                        (
+                            rectangle.y0
+                            + rectangle.y1
+                        ) / 2,
+                    ),
+                }
             )
 
-        references_with_distance.append(
-            (
-                distance,
-                fuse_reference["value"],
-            )
-        )
-
-    references_with_distance.sort()
-
-    selected = []
-    seen = set()
-
-    for _, value in references_with_distance:
-        if value in seen:
-            continue
-
-        seen.add(value)
-        selected.append(value)
-
-        if len(selected) == 2:
-            break
-
-    return selected
+    return labels
 
 
-def build_fuse_checklist_text(
-    ns1_rack_name: str,
-    ixl_cubicle_name: str,
-    fuse_values: list[str],
-) -> str:
-    if not fuse_values:
-        return "REVIEW REQUIRED - FUSE VALUE NOT FOUND"
-
-    if len(fuse_values) == 1:
-        ns1_fuse = fuse_values[0]
-        ixl_fuse = fuse_values[0]
-    else:
-        ns1_fuse = fuse_values[0]
-        ixl_fuse = fuse_values[1]
-
-    return format_lines(
-        [
-            f"{ns1_rack_name}: {ns1_fuse}",
-            f"{ixl_cubicle_name}: {ixl_fuse}",
-        ]
-    )
-
-
-# ---------------------------------------------------------------------
-# Return Channel row creation
-# ---------------------------------------------------------------------
-
-def find_nearest_terminal_pair(
-    item_label: dict,
-    terminal_pairs: list[dict],
+def get_best_equipment_label(
+    equipment_labels: list[dict],
+    equipment_type: str,
 ) -> dict | None:
-    if not terminal_pairs:
+    candidates = [
+        label
+        for label in equipment_labels
+        if label["type"] == equipment_type
+    ]
+
+    if not candidates:
         return None
 
-    scored_pairs = []
-
-    for terminal_pair in terminal_pairs:
-        horizontal_distance = abs(
-            terminal_pair["x_center"]
-            - item_label["x_center"]
-        )
-
-        vertical_distance = abs(
-            terminal_pair["y_center"]
-            - item_label["y_center"]
-        )
-
-        score = (
-            vertical_distance * 4
-            + horizontal_distance
-        )
-
-        scored_pairs.append(
-            (
-                score,
-                terminal_pair,
-            )
-        )
-
-    scored_pairs.sort(
-        key=lambda value: (
-            value[0],
-            value[1]["pair_distance"],
+    candidates.sort(
+        key=lambda label: (
+            label["point"].y,
+            label["point"].x,
         )
     )
 
-    return scored_pairs[0][1]
+    return candidates[0]
 
+
+def select_fuse_for_equipment(
+    fuse_candidates: list[dict],
+    equipment_label: dict | None,
+    excluded_values: set[str],
+) -> dict | None:
+    available = [
+        candidate
+        for candidate in fuse_candidates
+        if candidate["value"] not in excluded_values
+    ]
+
+    if not available:
+        return None
+
+    if equipment_label is None:
+        available.sort(
+            key=lambda candidate: (
+                -candidate["confidence"],
+                candidate["point"].y,
+                candidate["point"].x,
+            )
+        )
+
+        return available[0]
+
+    available.sort(
+        key=lambda candidate: (
+            point_distance(
+                candidate["point"],
+                equipment_label["point"],
+            ),
+            -candidate["confidence"],
+        )
+    )
+
+    return available[0]
+
+
+def build_fuse_text(
+    ns_rack_label: dict | None,
+    ixl_label: dict | None,
+    ns_rack_fuse: dict | None,
+    ixl_fuse: dict | None,
+) -> tuple[str, bool]:
+    values = []
+    review_required = False
+
+    if ns_rack_label is None:
+        values.append(
+            "REVIEW REQUIRED - NS RACK NOT FOUND"
+        )
+        review_required = True
+
+    elif ns_rack_fuse is None:
+        values.append(
+            f"REVIEW REQUIRED - "
+            f"{ns_rack_label['name']} FUSE NOT FOUND"
+        )
+        review_required = True
+
+    else:
+        values.append(
+            f"{ns_rack_label['name']}: "
+            f"{ns_rack_fuse['value']}"
+        )
+
+    if ixl_label is None:
+        values.append(
+            "REVIEW REQUIRED - IXL/SACEM COV "
+            "CUBICLE NOT FOUND"
+        )
+        review_required = True
+
+    elif ixl_fuse is None:
+        values.append(
+            f"REVIEW REQUIRED - "
+            f"{ixl_label['name']} FUSE NOT FOUND"
+        )
+        review_required = True
+
+    else:
+        values.append(
+            f"{ixl_label['name']}: "
+            f"{ixl_fuse['value']}"
+        )
+
+    return format_lines(values), review_required
+
+
+# ---------------------------------------------------------------------
+# Direct green-terminal detection
+# ---------------------------------------------------------------------
+
+def terminal_is_directly_connected_to_green(
+    terminal: dict,
+    green_segments: list[dict],
+    page,
+) -> bool:
+    """
+    True only where green circuitwork directly touches the terminal
+    reference/terminal connection region.
+
+    It does not accept a green path somewhere else on the page.
+    """
+    if not green_segments:
+        return False
+
+    page_scale = max(
+        float(page.rect.width),
+        float(page.rect.height),
+    )
+
+    maximum_touch_distance = max(
+        3.5,
+        min(page_scale * 0.005, 8.0),
+    )
+
+    terminal_point = terminal["point"]
+
+    for segment in green_segments:
+        distance = point_to_segment_distance(
+            terminal_point,
+            segment["start"],
+            segment["end"],
+        )
+
+        if distance <= maximum_touch_distance:
+            return True
+
+        if point_distance(
+            terminal_point,
+            segment["start"],
+        ) <= maximum_touch_distance:
+            return True
+
+        if point_distance(
+            terminal_point,
+            segment["end"],
+        ) <= maximum_touch_distance:
+            return True
+
+    return False
+
+
+def terminal_pair_is_directly_green(
+    terminal_pair: dict,
+    green_segments: list[dict],
+    page,
+) -> bool:
+    """
+    Both terminal references must directly connect to green linework.
+
+    This prevents unrelated green graphics elsewhere on the drawing
+    from creating the additional Cable Rack checklist column.
+    """
+    terminal_results = [
+        terminal_is_directly_connected_to_green(
+            terminal,
+            green_segments,
+            page,
+        )
+        for terminal in terminal_pair["terminals"]
+    ]
+
+    return all(terminal_results)
+
+
+# ---------------------------------------------------------------------
+# Item / terminal association
+# ---------------------------------------------------------------------
 
 def group_item_labels_by_name(
     item_labels: list[dict],
@@ -1120,30 +1478,93 @@ def group_item_labels_by_name(
     return dict(grouped)
 
 
+def find_nearest_terminal_pair(
+    item_occurrences: list[dict],
+    terminal_pairs: list[dict],
+) -> dict | None:
+    if not terminal_pairs:
+        return None
+
+    scored = []
+
+    for terminal_pair in terminal_pairs:
+        best_score = None
+
+        for item in item_occurrences:
+            horizontal_distance = abs(
+                terminal_pair["x_center"]
+                - item["x_center"]
+            )
+
+            vertical_distance = abs(
+                terminal_pair["y_center"]
+                - item["y_center"]
+            )
+
+            score = (
+                vertical_distance * 4
+                + horizontal_distance
+            )
+
+            if (
+                best_score is None
+                or score < best_score
+            ):
+                best_score = score
+
+        scored.append(
+            (
+                best_score,
+                terminal_pair,
+            )
+        )
+
+    scored.sort(
+        key=lambda value: (
+            value[0],
+            value[1]["pair_distance"],
+        )
+    )
+
+    return scored[0][1]
+
+
+# ---------------------------------------------------------------------
+# Row creation
+# ---------------------------------------------------------------------
+
 def create_return_channel_rows(
     page,
     item_labels: list[dict],
     terminal_pairs: list[dict],
-    fuse_references: list[dict],
+    fuse_candidates: list[dict],
     green_segments: list[dict],
     log_callback=None,
 ) -> tuple[list[dict], list[dict]]:
     rows = []
     debug_terminals = []
 
-    ns1_rack_name, ixl_cubicle_name = (
-        get_equipment_names(page)
+    equipment_labels = find_equipment_label_points(
+        page
     )
 
-    grouped_items = group_item_labels_by_name(
+    ns_rack_label = get_best_equipment_label(
+        equipment_labels,
+        "NS_RACK",
+    )
+
+    ixl_label = get_best_equipment_label(
+        equipment_labels,
+        "IXL_CUBICLE",
+    )
+
+    items_by_name = group_item_labels_by_name(
         item_labels
     )
 
     for item_name, item_occurrences in (
-        grouped_items.items()
+        items_by_name.items()
     ):
-        # Use upper-most occurrence for visual ordering and
-        # association where an Item label is repeated.
         item_occurrences = sorted(
             item_occurrences,
             key=lambda item: (
@@ -1152,10 +1573,8 @@ def create_return_channel_rows(
             ),
         )
 
-        item_label = item_occurrences[0]
-
         terminal_pair = find_nearest_terminal_pair(
-            item_label,
+            item_occurrences,
             terminal_pairs,
         )
 
@@ -1168,27 +1587,46 @@ def create_return_channel_rows(
             )
             continue
 
-        fuse_values = select_fuses_for_item(
-            item_label,
-            fuse_references,
+        used_fuse_values = set()
+
+        ns_rack_fuse = select_fuse_for_equipment(
+            fuse_candidates,
+            ns_rack_label,
+            used_fuse_values,
         )
 
-        fuse_text = build_fuse_checklist_text(
-            ns1_rack_name,
-            ixl_cubicle_name,
-            fuse_values,
+        if ns_rack_fuse is not None:
+            used_fuse_values.add(
+                ns_rack_fuse["value"]
+            )
+
+        ixl_fuse = select_fuse_for_equipment(
+            fuse_candidates,
+            ixl_label,
+            used_fuse_values,
         )
 
-        is_green_terminal = terminal_pair_is_green(
-            terminal_pair,
-            green_segments,
-            page,
+        fuse_text, fuse_review_required = (
+            build_fuse_text(
+                ns_rack_label,
+                ixl_label,
+                ns_rack_fuse,
+                ixl_fuse,
+            )
         )
 
-        cable_rack_text = ""
+        terminal_is_green = (
+            terminal_pair_is_directly_green(
+                terminal_pair,
+                green_segments,
+                page,
+            )
+        )
 
-        if is_green_terminal:
-            cable_rack_text = format_lines(
+        terminal_block_text = ""
+
+        if terminal_is_green:
+            terminal_block_text = format_lines(
                 [terminal_pair["text"]]
             )
 
@@ -1196,34 +1634,36 @@ def create_return_channel_rows(
             terminal_pair["terminals"]
         )
 
+        review_status = "Draft"
+
+        if fuse_review_required:
+            review_status = "REVIEW REQUIRED"
+
         rows.append(
             {
                 "Item": item_name,
-                "Item Sort Y": item_label["y_center"],
+
+                "Item Sort Y": min(
+                    item["y_center"]
+                    for item in item_occurrences
+                ),
 
                 "H3 - Fuses opened": fuse_text,
 
                 "H3 - Cable rack terminal blocks": (
-                    cable_rack_text
+                    terminal_block_text
                 ),
 
                 "H3 - Fuses closed": fuse_text,
 
-                "Green Terminal Detected": (
-                    is_green_terminal
-                ),
-
-                "Review Status": (
-                    "Draft"
-                    if fuse_values
-                    else "REVIEW REQUIRED"
-                ),
+                "Review Status": review_status,
 
                 "Engineer Remarks": (
                     "Candidate generated from Return Channel "
-                    "title, fuse-reference text, terminal "
-                    "geometry and green-circuit detection. "
-                    "Verify controlled drawing."
+                    "title, local fuse symbol/text groups, "
+                    "terminal geometry and direct green-line "
+                    "terminal connectivity. Verify against "
+                    "controlled drawing."
                 ),
             }
         )
@@ -1231,9 +1671,12 @@ def create_return_channel_rows(
         write_log(
             log_callback,
             f"Return Channel Item={item_name}; "
-            f"fuses={fuse_values or 'NOT FOUND'}; "
             f"terminal={terminal_pair['text']}; "
-            f"green_terminal={is_green_terminal}.",
+            f"ns_fuse="
+            f"{ns_rack_fuse['value'] if ns_rack_fuse else 'NOT FOUND'}; "
+            f"ixl_fuse="
+            f"{ixl_fuse['value'] if ixl_fuse else 'NOT FOUND'}; "
+            f"green_terminal={terminal_is_green}.",
             "DEBUG",
         )
 
@@ -1241,7 +1684,7 @@ def create_return_channel_rows(
 
 
 # ---------------------------------------------------------------------
-# Page relevance
+# Relevance / debug image
 # ---------------------------------------------------------------------
 
 def page_is_return_channel_relevant(
@@ -1256,16 +1699,11 @@ def page_is_return_channel_relevant(
         page_text
     )
 
-    fuse_matches = FUSE_PATTERN.findall(
-        page_text
-    )
-
     write_log(
         log_callback,
         "Return Channel relevance: "
         f"terminals={len(terminal_matches)}; "
-        f"items={len(item_matches)}; "
-        f"fuses={len(fuse_matches)}.",
+        f"items={len(item_matches)}.",
         "DEBUG",
     )
 
@@ -1274,16 +1712,12 @@ def page_is_return_channel_relevant(
     )
 
 
-# ---------------------------------------------------------------------
-# Debug image
-# ---------------------------------------------------------------------
-
 def create_debug_image(
     page,
     selected_terminals: list[dict],
 ) -> bytes:
-    padding = 2.5
     shape = page.new_shape()
+    padding = 2.5
 
     for terminal in selected_terminals:
         rectangle = fitz.Rect(
@@ -1335,6 +1769,7 @@ def extract_pdf(
     write_log(
         log_callback,
         f"Opening Return Channel PDF: {pdf_path}",
+        "INFO",
     )
 
     with fitz.open(pdf_path) as document:
@@ -1342,7 +1777,7 @@ def extract_pdf(
 
         for page_index, page in enumerate(document):
             page_number = page_index + 1
-            page_start_time = time.perf_counter()
+            page_start = time.perf_counter()
 
             if progress_callback is not None:
                 progress_callback(
@@ -1358,27 +1793,20 @@ def extract_pdf(
                     sort=True,
                 )
 
-                (
-                    has_return_channel,
-                    title_source,
-                ) = page_has_return_channel(
-                    page,
-                    page_text,
+                has_return_channel, title_source = (
+                    page_has_return_channel(
+                        page,
+                        page_text,
+                    )
                 )
 
                 if not has_return_channel:
-                    write_log(
-                        log_callback,
-                        f"Page {page_number}: skipped; "
-                        "Return Channel title not found.",
-                        "DEBUG",
-                    )
                     continue
 
                 write_log(
                     log_callback,
-                    f"Page {page_number}: Return Channel "
-                    f"drawing found; "
+                    f"Page {page_number}: "
+                    "Return Channel drawing found; "
                     f"title_source={title_source}.",
                     "INFO",
                 )
@@ -1422,11 +1850,11 @@ def extract_pdf(
                     terminals,
                 )
 
-                fuse_references = extract_fuse_references(
+                fuse_candidates = extract_fuse_candidates(
                     page
                 )
 
-                green_segments = get_green_vector_segments(
+                green_segments = get_green_segments(
                     page
                 )
 
@@ -1439,7 +1867,7 @@ def extract_pdf(
                     f"items={len(item_labels)}; "
                     f"terminals={len(terminals)}; "
                     f"terminal_pairs={len(terminal_pairs)}; "
-                    f"fuses={len(fuse_references)}; "
+                    f"fuse_candidates={len(fuse_candidates)}; "
                     f"green_segments={len(green_segments)}.",
                     "DEBUG",
                 )
@@ -1458,7 +1886,7 @@ def extract_pdf(
                         page,
                         item_labels,
                         terminal_pairs,
-                        fuse_references,
+                        fuse_candidates,
                         green_segments,
                         log_callback=log_callback,
                     )
@@ -1519,16 +1947,15 @@ def extract_pdf(
                         }
                     )
 
-                page_elapsed = (
-                    time.perf_counter()
-                    - page_start_time
+                elapsed = (
+                    time.perf_counter() - page_start
                 )
 
                 write_log(
                     log_callback,
                     f"Page {page_number}: created "
                     f"{len(rows)} Return Channel row(s) "
-                    f"in {page_elapsed:.2f}s.",
+                    f"in {elapsed:.2f}s.",
                     "INFO",
                 )
 
@@ -1565,9 +1992,6 @@ def extract_pdf(
             errors="coerce",
         ).fillna(999999999)
 
-        # Drawing order first.
-        # Within the same page, Item rows are ordered top-to-bottom
-        # using the actual Item Y coordinate on the PDF.
         dataframe = dataframe.sort_values(
             by=[
                 "_drawing_sort",
@@ -1592,13 +2016,15 @@ def extract_pdf(
             len(dataframe) + 1,
         )
 
-    elapsed = time.perf_counter() - start_time
+    total_elapsed = (
+        time.perf_counter() - start_time
+    )
 
     write_log(
         log_callback,
         "Return Channel extraction complete. "
         f"Rows created: {len(dataframe)}. "
-        f"Total time: {elapsed:.2f}s.",
+        f"Total time: {total_elapsed:.2f}s.",
         "INFO",
     )
 
