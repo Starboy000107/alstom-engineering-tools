@@ -133,7 +133,14 @@ def render_global_theme(theme_mode: str):
             color: {colours["text"]} !important;
         }}
 
-        .stApp,
+        .stApp {{
+            color: {colours["text"]} !important;
+        }}
+
+        .stApp > div {{
+            color: {colours["text"]};
+        }}
+
         .stApp p,
         .stApp span,
         .stApp label,
@@ -559,114 +566,48 @@ def render_global_theme(theme_mode: str):
 
         /* ====================================================
         STREAMLIT ALERTS
-        st.info / st.success / st.warning / st.error
+        Reliable fallback styling for Streamlit alerts.
+
+        This styles st.info(), st.success(), st.warning()
+        and st.error() using the active theme colours.
         ==================================================== */
 
-        [data-testid="stAlert"] {{
+        div[data-testid="stAlert"],
+        div[data-testid="stAlert"] > div,
+        div[data-testid="stAlert"] [role="alert"] {{
+            background: {colours["info_background"]} !important;
+            background-color: {colours["info_background"]} !important;
+
+            border: 1px solid {colours["info_border"]} !important;
+            border-left: 4px solid {colours["info_border"]} !important;
+
             border-radius: 10px !important;
-            border-width: 1px 1px 1px 4px !important;
-            border-style: solid !important;
+            color: {colours["info_text"]} !important;
+
             box-shadow: none !important;
         }}
 
-        /* ----------------------------------------------------
-        st.info()
-        ---------------------------------------------------- */
-
-        [data-testid="stAlert"] [data-baseweb="notification"][kind="info"],
-        [data-testid="stAlert"][kind="info"],
-        [data-testid="stAlert"][data-alert-type="info"] {{
-            background: {colours["info_background"]} !important;
-            border-color: {colours["info_border"]} !important;
+        /* Alert text */
+        div[data-testid="stAlert"] *,
+        div[data-testid="stAlert"] p,
+        div[data-testid="stAlert"] span,
+        div[data-testid="stAlert"] div,
+        div[data-testid="stAlert"] [data-testid="stMarkdownContainer"],
+        div[data-testid="stAlert"] [data-testid="stMarkdownContainer"] p {{
             color: {colours["info_text"]} !important;
         }}
 
-        [data-testid="stAlert"] [data-baseweb="notification"][kind="info"] *,
-        [data-testid="stAlert"][kind="info"] *,
-        [data-testid="stAlert"][data-alert-type="info"] * {{
-            color: {colours["info_text"]} !important;
-        }}
-
-        [data-testid="stAlert"] [data-baseweb="notification"][kind="info"] svg,
-        [data-testid="stAlert"][kind="info"] svg,
-        [data-testid="stAlert"][data-alert-type="info"] svg {{
+        /* Alert icon */
+        div[data-testid="stAlert"] svg {{
             color: {colours["info_icon"]} !important;
             fill: {colours["info_icon"]} !important;
+            stroke: {colours["info_icon"]} !important;
         }}
 
-        /* ----------------------------------------------------
-        st.success()
-        ---------------------------------------------------- */
-
-        [data-testid="stAlert"] [data-baseweb="notification"][kind="success"],
-        [data-testid="stAlert"][kind="success"],
-        [data-testid="stAlert"][data-alert-type="success"] {{
-            background: {colours["success_background"]} !important;
-            border-color: {colours["success_border"]} !important;
-            color: {colours["success_text"]} !important;
-        }}
-
-        [data-testid="stAlert"] [data-baseweb="notification"][kind="success"] *,
-        [data-testid="stAlert"][kind="success"] *,
-        [data-testid="stAlert"][data-alert-type="success"] * {{
-            color: {colours["success_text"]} !important;
-        }}
-
-        [data-testid="stAlert"] [data-baseweb="notification"][kind="success"] svg,
-        [data-testid="stAlert"][kind="success"] svg,
-        [data-testid="stAlert"][data-alert-type="success"] svg {{
-            color: {colours["success_icon"]} !important;
-            fill: {colours["success_icon"]} !important;
-        }}
-
-        /* ----------------------------------------------------
-        st.warning()
-        ---------------------------------------------------- */
-
-        [data-testid="stAlert"] [data-baseweb="notification"][kind="warning"],
-        [data-testid="stAlert"][kind="warning"],
-        [data-testid="stAlert"][data-alert-type="warning"] {{
-            background: {colours["warning_background"]} !important;
-            border-color: {colours["warning_border"]} !important;
-            color: {colours["warning_text"]} !important;
-        }}
-
-        [data-testid="stAlert"] [data-baseweb="notification"][kind="warning"] *,
-        [data-testid="stAlert"][kind="warning"] *,
-        [data-testid="stAlert"][data-alert-type="warning"] * {{
-            color: {colours["warning_text"]} !important;
-        }}
-
-        [data-testid="stAlert"] [data-baseweb="notification"][kind="warning"] svg,
-        [data-testid="stAlert"][kind="warning"] svg,
-        [data-testid="stAlert"][data-alert-type="warning"] svg {{
-            color: {colours["warning_icon"]} !important;
-            fill: {colours["warning_icon"]} !important;
-        }}
-
-        /* ----------------------------------------------------
-        st.error()
-        ---------------------------------------------------- */
-
-        [data-testid="stAlert"] [data-baseweb="notification"][kind="error"],
-        [data-testid="stAlert"][kind="error"],
-        [data-testid="stAlert"][data-alert-type="error"] {{
-            background: {colours["error_background"]} !important;
-            border-color: {colours["error_border"]} !important;
-            color: {colours["error_text"]} !important;
-        }}
-
-        [data-testid="stAlert"] [data-baseweb="notification"][kind="error"] *,
-        [data-testid="stAlert"][kind="error"] *,
-        [data-testid="stAlert"][data-alert-type="error"] * {{
-            color: {colours["error_text"]} !important;
-        }}
-
-        [data-testid="stAlert"] [data-baseweb="notification"][kind="error"] svg,
-        [data-testid="stAlert"][kind="error"] svg,
-        [data-testid="stAlert"][data-alert-type="error"] svg {{
-            color: {colours["error_icon"]} !important;
-            fill: {colours["error_icon"]} !important;
+        div[data-testid="stAlert"] svg path {{
+            color: {colours["info_icon"]} !important;
+            fill: {colours["info_icon"]} !important;
+            stroke: {colours["info_icon"]} !important;
         }}
 
         pre,
