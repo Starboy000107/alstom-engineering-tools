@@ -61,14 +61,21 @@ def get_theme_colours(theme_mode: str) -> dict:
         "muted": "#5F6368",
         "navy": "#202124",
         "border": "#DADCE0",
-        "border_hover": "#1A73E8",
-        "blue": "#1A73E8",
-        "blue_dark": "#1558B0",
-        "teal": "#00897B",
-        "green": "#188038",
-        "button_hover": "#1558B0",
-        "download_hover": "#137333",
-        "focus_shadow": "rgba(26, 115, 232, 0.20)",
+        # Professional engineering / Alstom-style colours
+        "border_hover": "#0064A6",
+
+        # Main action buttons
+        "blue": "#0064A6",
+        "blue_dark": "#004B7A",
+        "button_hover": "#004B7A",
+
+        # Supporting colours
+        "teal": "#007C83",
+        "green": "#2E7D32",
+        "download_hover": "#1B5E20",
+
+        # Focus / hover shadow
+        "focus_shadow": "rgba(0, 100, 166, 0.20)",
 
         "info_background": "#E8F0FE",
         "info_border": "#AECBFA",
@@ -451,51 +458,52 @@ def render_global_theme(theme_mode: str):
         }}
 
         /* ====================================================
-           BUTTONS
-           ==================================================== */
+        BUTTONS
+        Professional engineering tool appearance
+        ==================================================== */
 
+        /* Main Streamlit buttons */
         .stButton > button {{
+            min-height: 42px !important;
+            padding: 0.55rem 1rem !important;
+
             background: {colours["blue"]} !important;
             color: #FFFFFF !important;
+
             border: 1px solid {colours["blue"]} !important;
-            border-radius: 8px !important;
-            transition: background 0.18s ease,
-                        border-color 0.18s ease,
-                        box-shadow 0.18s ease,
-                        transform 0.1s ease !important;
+            border-radius: 7px !important;
+
+            font-size: 14px !important;
+            font-weight: 650 !important;
+            letter-spacing: 0.1px !important;
+
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.10) !important;
+
+            transition:
+                background-color 0.16s ease,
+                border-color 0.16s ease,
+                box-shadow 0.16s ease,
+                transform 0.10s ease !important;
         }}
 
         .stButton > button:hover {{
             background: {colours["button_hover"]} !important;
             border-color: {colours["button_hover"]} !important;
             color: #FFFFFF !important;
-            box-shadow: 0 2px 8px {colours["focus_shadow"]} !important;
+
+            box-shadow: 0 3px 8px {colours["focus_shadow"]} !important;
+        }}
+
+        .stButton > button:focus,
+        .stButton > button:focus-visible {{
+            outline: none !important;
+            border-color: {colours["blue_dark"]} !important;
+            box-shadow: 0 0 0 3px {colours["focus_shadow"]} !important;
         }}
 
         .stButton > button:active {{
-            transform: translateY(1px);
-        }}
-
-        .stDownloadButton > button {{
-            background: {colours["green"]} !important;
-            color: #FFFFFF !important;
-            border: 1px solid {colours["green"]} !important;
-            border-radius: 8px !important;
-            transition: background 0.18s ease,
-                        border-color 0.18s ease,
-                        box-shadow 0.18s ease,
-                        transform 0.1s ease !important;
-        }}
-
-        .stDownloadButton > button:hover {{
-            background: {colours["download_hover"]} !important;
-            border-color: {colours["download_hover"]} !important;
-            color: #FFFFFF !important;
-            box-shadow: 0 2px 8px rgba(24, 128, 56, 0.25) !important;
-        }}
-
-        .stDownloadButton > button:active {{
-            transform: translateY(1px);
+            transform: translateY(1px) !important;
+            box-shadow: none !important;
         }}
 
         /* ====================================================
