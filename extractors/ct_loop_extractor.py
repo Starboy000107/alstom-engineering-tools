@@ -1618,18 +1618,38 @@ def create_ct_loop_rows(
             step_14_pairs,
         ) = choose_step_pairs(item_pairs)
         
+        pair_diagnostics = []
+
+        for pair in item_pairs:
+            pair_diagnostics.append(
+                (
+                    pair["text"],
+                    pair["colour_group_id"],
+                    round(pair["item_distance"], 1),
+                    round(pair["x_center"], 1),
+                    round(pair["y_center"], 1),
+                )
+            )
+
+        step_6_text = [
+            pair["text"]
+            for pair in step_6_pairs
+        ]
+
+        step_7_text = [
+            pair["text"]
+            for pair in step_7_pairs
+        ]
+
         write_log(
             log_callback,
-            f"Item={item_name}: pair candidates="
-            f"{[(pair['text'], pair['colour_group_id'], "
-            f"round(pair['item_distance'], 1), "
-            f"round(pair['x_center'], 1), "
-            f"round(pair['y_center'], 1)) for pair in item_pairs]}; "
-            f"Step6={[pair['text'] for pair in step_6_pairs]}; "
-            f"Step7={[pair['text'] for pair in step_7_pairs]}.",
+            f"Item={item_name}: "
+            f"pair candidates={pair_diagnostics}; "
+            f"Step6={step_6_text}; "
+            f"Step7={step_7_text}.",
             "DEBUG",
         )
-        
+
         if (
             len(step_6_pairs) != 1
             or len(step_7_pairs) != 2
