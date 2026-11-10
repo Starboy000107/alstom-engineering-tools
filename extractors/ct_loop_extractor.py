@@ -78,6 +78,29 @@ def write_log(
 # ---------------------------------------------------------------------
 # Generic helpers
 # ---------------------------------------------------------------------
+def get_item_state_priority(
+    state: str,
+) -> int:
+    """
+    State order for the same base Item:
+
+        REP, REP1, REP2, ...
+        UP
+        DN
+        all other states
+    """
+    state = str(state).upper().strip()
+
+    if state.startswith("REP"):
+        return 0
+
+    if state == "UP":
+        return 1
+
+    if state == "DN":
+        return 2
+
+    return 3
 
 def normalise_text(
     text: str,
@@ -2249,16 +2272,90 @@ def extract_pdf(
             errors="coerce",
         ).fillna(999999999)
 
+        # Split Item into its base name and state.
+        #
+        # Examples:
+        #   BW1(REP)   -> base=BW1, state=REP
+        #   BW1(UP)    -> base=BW1, state=UP
+        #   KP1(DN)    -> base=KP1, state=DN
+        #   HA1(REP2)  -> base=HA1, state=REP2
+        item_parts = (
+            dataframe["Item"]
+            .astype(str)
+            .str.upper()
+            .str.extract(
+                r"^(?P<item_base>[^()]+)"
+                r"\((?P<item_state>[^()]+)\)$"
+            )
+        )
+
+        dataframe["_item_base_sort"] = (
+            item_parts["item_base"]
+            .fillna(dataframe["Item"].astype(str).str.upper())
+        )
+
+        dataframe["_item_state_sort"] = (
+            item_parts["item_state"]
+            .fillna("")
+        )
+
+
+        # Extract base Item and state.
+        #
+        # Examples:
+        # BW1(REP)  -> BW1 / REP
+        # BW1(UP)   -> BW1 / UP
+        # KP1(DN)   -> KP1 / DN
+        item_parts = (
+            dataframe["Item"]
+            .astype(str)
+            .str.upper()
+            .str.extract(
+                r"^(?P<item_base>[^()]+)"
+                r"\((?P<item_state>[^()]+)\)$"
+            )
+        )
+
+        dataframe["_item_base_sort"] = (
+            item_parts["item_base"]
+            .fillna(
+                dataframe["Item"]
+                .astype(str)
+                .str.upper()
+            )
+        )
+
+        dataframe["_item_state_sort"] = (
+            item_parts["item_state"]
+            .fillna("")
+        )
+
+        dataframe["_item_state_priority"] = (
+            dataframe["_item_state_sort"]
+            .apply(get_item_state_priority)
+        )
+
+        # Sort drawing first, then Item base name.
+        # For the same Item, REP is always before UP and DN.
         dataframe = dataframe.sort_values(
             by=[
                 "_drawing_sort",
-                "Item",
+                "PDF Page",
+                "_item_base_sort",
+                "_item_state_priority",
+                "_item_state_sort",
             ],
+            ascending=True,
             kind="stable",
         ).reset_index(drop=True)
 
         dataframe = dataframe.drop(
-            columns=["_drawing_sort"]
+            columns=[
+                "_drawing_sort",
+                "_item_base_sort",
+                "_item_state_sort",
+                "_item_state_priority",
+            ]
         )
 
         dataframe["No."] = range(
