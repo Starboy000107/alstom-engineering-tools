@@ -1542,18 +1542,17 @@ def create_ct_loop_rows(
 # ---------------------------------------------------------------------
 
 def page_is_relevant(
-    page,
     page_text: str,
     log_callback=None,
 ) -> bool:
-    (
-        has_continuous_transmission,
-        transmission_source,
-    ) = page_has_continuous_transmission(
-        page,
-        page_text,
-    )
+    """
+    Fast relevance check.
 
+    Continuous Transmission title has already been checked before this
+    function is called. Vector/circuit analysis is deliberately not
+    done here because it is expensive and is performed only once later
+    in create_ct_loop_rows().
+    """
     terminal_matches = TERMINAL_PATTERN.findall(
         page_text
     )
@@ -1565,34 +1564,17 @@ def page_is_relevant(
         )
     )
 
-    coloured_segments = get_coloured_vector_segments(
-        page
-    )
-
-    colour_bins = get_two_dominant_colour_bins(
-        coloured_segments
-    )
-
     write_log(
         log_callback,
         "Page relevance: "
-        f"continuous_transmission="
-        f"{has_continuous_transmission}; "
-        f"source={transmission_source}; "
         f"terminals={len(terminal_matches)}; "
-        f"items={len(item_matches)}; "
-        f"coloured_segments={len(coloured_segments)}; "
-        f"colour_bins={colour_bins or 'NOT FOUND'}.",
+        f"items={len(item_matches)}.",
         "DEBUG",
     )
 
-    return (
-        has_continuous_transmission
-        and bool(terminal_matches)
-        and bool(item_matches)
-        and colour_bins is not None
+    return bool(terminal_matches) and bool(
+        item_matches
     )
-
 
 # ---------------------------------------------------------------------
 # Debug image
@@ -1749,33 +1731,18 @@ def get_bottom_title_block_text(
 
 
 def is_continuous_transmission_page(
-    page,
-) -> tuple[bool, set[str]]:
+    page_text: str,
+) -> bool:
     """
-    Detect Continuous Transmission drawings by their title text.
+    Fast text-only Continuous Transmission detector.
 
-    Red/cyan circuit colours are returned for information/logging only.
-    They do NOT reject a page because colours can be represented
-    differently in different PDFs, or may be raster content.
+    Do not inspect vector drawings here. Most PDF pages are not CT
+    drawings, and page.get_drawings() is expensive on engineering PDFs.
     """
-    full_page_text = normalise_text(
-        page.get_text(
-            "text",
-            sort=True,
-        )
-    )
-
-    has_continuous_transmission = bool(
+    return bool(
         CONTINUOUS_TRANSMISSION_PATTERN.search(
-            full_page_text
+            normalise_text(page_text)
         )
-    )
-
-    circuit_colours = get_circuit_colours(page)
-
-    return (
-        has_continuous_transmission,
-        circuit_colours,
     )
 
 # ---------------------------------------------------------------------
@@ -1821,11 +1788,12 @@ def extract_pdf(
                     sort=True,
                 )
 
-                # Only continue if this page has:
-                # - CONTINUOUS TRANSMISSION in the title area, and
-                # - red and/or cyan circuit linework.
-                is_ct_page, circuit_colours = (
-                    is_continuous_transmission_page(page)
+                # Fast initial filter: check text only.
+                # Do not call page.get_drawings() on every PDF page.
+                # Fast initial filter: check text only.
+                # Do not call page.get_drawings() on every PDF page.
+                is_ct_page = is_continuous_transmission_page(
+                    page_text
                 )
 
                 if not is_ct_page:
@@ -1836,6 +1804,10 @@ def extract_pdf(
                         "DEBUG",
                     )
                     continue
+
+                # Only inspect PDF vector drawings after the page has passed
+                # the inexpensive Continuous Transmission title check.
+                circuit_colours = get_circuit_colours(page)
 
                 write_log(
                     log_callback,
@@ -1867,7 +1839,6 @@ def extract_pdf(
                 # Check Continuous Transmission title, terminal/item text,
                 # and coloured circuit-vector groups.
                 if not page_is_relevant(
-                    page,
                     page_text,
                     log_callback=log_callback,
                 ):
@@ -1920,13 +1891,15 @@ def extract_pdf(
                     log_callback=log_callback,
                 )
 
-                debug_images[page_number] = (
-                    create_debug_image(
-                        page,
-                        debug_terminals,
+                # PNG rendering is expensive. Create a debug image only if
+                # this page produced one or more output rows.
+                if rows:
+                    debug_images[page_number] = (
+                        create_debug_image(
+                            page,
+                            debug_terminals,
+                        )
                     )
-                )
-
                 for row in rows:
                     records.append(
                         {
