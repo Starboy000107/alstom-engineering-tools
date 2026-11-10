@@ -27,6 +27,27 @@ def get_theme_colours(theme_mode: str) -> dict:
             "button_hover": "#669DF6",
             "download_hover": "#5BB974",
             "focus_shadow": "rgba(138, 180, 248, 0.28)",
+
+            # Streamlit alert colours
+            "info_background": "#1F3A5F",
+            "info_border": "#8AB4F8",
+            "info_text": "#E8F0FE",
+            "info_icon": "#8AB4F8",
+
+            "success_background": "#1E3A2A",
+            "success_border": "#81C995",
+            "success_text": "#E6F4EA",
+            "success_icon": "#81C995",
+
+            "warning_background": "#4A3B16",
+            "warning_border": "#FDD663",
+            "warning_text": "#FFF4CE",
+            "warning_icon": "#FDD663",
+
+            "error_background": "#4A1F24",
+            "error_border": "#F28B82",
+            "error_text": "#FCE8E6",
+            "error_icon": "#F28B82",
         }
 
     return {
@@ -49,6 +70,27 @@ def get_theme_colours(theme_mode: str) -> dict:
         "button_hover": "#1558B0",
         "download_hover": "#137333",
         "focus_shadow": "rgba(26, 115, 232, 0.20)",
+
+        # Streamlit alert colours
+        "info_background": "#E8F0FE",
+        "info_border": "#1A73E8",
+        "info_text": "#174EA6",
+        "info_icon": "#1A73E8",
+
+        "success_background": "#E6F4EA",
+        "success_border": "#188038",
+        "success_text": "#137333",
+        "success_icon": "#188038",
+
+        "warning_background": "#FEF7E0",
+        "warning_border": "#F9AB00",
+        "warning_text": "#7A4F01",
+        "warning_icon": "#E37400",
+
+        "error_background": "#FCE8E6",
+        "error_border": "#D93025",
+        "error_text": "#A50E0E",
+        "error_icon": "#D93025",
     }
 
 
@@ -515,8 +557,116 @@ def render_global_theme(theme_mode: str):
             color: {colours["navy"]} !important;
         }}
 
+        /* ====================================================
+        STREAMLIT ALERTS
+        st.info / st.success / st.warning / st.error
+        ==================================================== */
+
         [data-testid="stAlert"] {{
-            border-radius: 8px !important;
+            border-radius: 10px !important;
+            border-width: 1px 1px 1px 4px !important;
+            border-style: solid !important;
+            box-shadow: none !important;
+        }}
+
+        /* ----------------------------------------------------
+        st.info()
+        ---------------------------------------------------- */
+
+        [data-testid="stAlert"] [data-baseweb="notification"][kind="info"],
+        [data-testid="stAlert"][kind="info"],
+        [data-testid="stAlert"][data-alert-type="info"] {{
+            background: {colours["info_background"]} !important;
+            border-color: {colours["info_border"]} !important;
+            color: {colours["info_text"]} !important;
+        }}
+
+        [data-testid="stAlert"] [data-baseweb="notification"][kind="info"] *,
+        [data-testid="stAlert"][kind="info"] *,
+        [data-testid="stAlert"][data-alert-type="info"] * {{
+            color: {colours["info_text"]} !important;
+        }}
+
+        [data-testid="stAlert"] [data-baseweb="notification"][kind="info"] svg,
+        [data-testid="stAlert"][kind="info"] svg,
+        [data-testid="stAlert"][data-alert-type="info"] svg {{
+            color: {colours["info_icon"]} !important;
+            fill: {colours["info_icon"]} !important;
+        }}
+
+        /* ----------------------------------------------------
+        st.success()
+        ---------------------------------------------------- */
+
+        [data-testid="stAlert"] [data-baseweb="notification"][kind="success"],
+        [data-testid="stAlert"][kind="success"],
+        [data-testid="stAlert"][data-alert-type="success"] {{
+            background: {colours["success_background"]} !important;
+            border-color: {colours["success_border"]} !important;
+            color: {colours["success_text"]} !important;
+        }}
+
+        [data-testid="stAlert"] [data-baseweb="notification"][kind="success"] *,
+        [data-testid="stAlert"][kind="success"] *,
+        [data-testid="stAlert"][data-alert-type="success"] * {{
+            color: {colours["success_text"]} !important;
+        }}
+
+        [data-testid="stAlert"] [data-baseweb="notification"][kind="success"] svg,
+        [data-testid="stAlert"][kind="success"] svg,
+        [data-testid="stAlert"][data-alert-type="success"] svg {{
+            color: {colours["success_icon"]} !important;
+            fill: {colours["success_icon"]} !important;
+        }}
+
+        /* ----------------------------------------------------
+        st.warning()
+        ---------------------------------------------------- */
+
+        [data-testid="stAlert"] [data-baseweb="notification"][kind="warning"],
+        [data-testid="stAlert"][kind="warning"],
+        [data-testid="stAlert"][data-alert-type="warning"] {{
+            background: {colours["warning_background"]} !important;
+            border-color: {colours["warning_border"]} !important;
+            color: {colours["warning_text"]} !important;
+        }}
+
+        [data-testid="stAlert"] [data-baseweb="notification"][kind="warning"] *,
+        [data-testid="stAlert"][kind="warning"] *,
+        [data-testid="stAlert"][data-alert-type="warning"] * {{
+            color: {colours["warning_text"]} !important;
+        }}
+
+        [data-testid="stAlert"] [data-baseweb="notification"][kind="warning"] svg,
+        [data-testid="stAlert"][kind="warning"] svg,
+        [data-testid="stAlert"][data-alert-type="warning"] svg {{
+            color: {colours["warning_icon"]} !important;
+            fill: {colours["warning_icon"]} !important;
+        }}
+
+        /* ----------------------------------------------------
+        st.error()
+        ---------------------------------------------------- */
+
+        [data-testid="stAlert"] [data-baseweb="notification"][kind="error"],
+        [data-testid="stAlert"][kind="error"],
+        [data-testid="stAlert"][data-alert-type="error"] {{
+            background: {colours["error_background"]} !important;
+            border-color: {colours["error_border"]} !important;
+            color: {colours["error_text"]} !important;
+        }}
+
+        [data-testid="stAlert"] [data-baseweb="notification"][kind="error"] *,
+        [data-testid="stAlert"][kind="error"] *,
+        [data-testid="stAlert"][data-alert-type="error"] * {{
+            color: {colours["error_text"]} !important;
+        }}
+
+        [data-testid="stAlert"] [data-baseweb="notification"][kind="error"] svg,
+        [data-testid="stAlert"][kind="error"] svg,
+        [data-testid="stAlert"][data-alert-type="error"] svg {{
+            color: {colours["error_icon"]} !important;
+            fill: {colours["error_icon"]} !important;
         }}
 
         pre,
