@@ -4,90 +4,124 @@ from io import BytesIO
 
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.styles import (
-    Alignment,
-    Border,
-    Font,
-    PatternFill,
-    Side,
-)
+from openpyxl.styles import Alignment
+from openpyxl.styles import Border
+from openpyxl.styles import Font
+from openpyxl.styles import PatternFill
+from openpyxl.styles import Side
 from openpyxl.utils import get_column_letter
 
 
-# ---------------------------------------------------------------------
-# Colours
-# ---------------------------------------------------------------------
-
-HEADER_FILL = "FFFFFF"
-GROUP_BEFORE_FILL = "92D050"
-GROUP_AFTER_FILL = "5BC0DE"
-SUBHEADER_FILL = "FFFFFF"
-SECTION_FILL = "D9D9D9"
-
-THIN_BLACK = Side(
-    style="thin",
-    color="000000",
+FUSE_OPEN_COLUMN = (
+    "H3 - Check list Before Cut-in - "
+    "Fuses are opened"
 )
 
-BORDER = Border(
-    left=THIN_BLACK,
-    right=THIN_BLACK,
-    top=THIN_BLACK,
-    bottom=THIN_BLACK,
+CABLE_RACK_COLUMN = (
+    "H3 - Check list Before Cut-in - "
+    "CABLE RACK terminal blocks are opened "
+    "and secure with cable tie"
+)
+
+FUSE_CLOSED_COLUMN = (
+    "H3 - Check list After Cut-in - "
+    "Fuses are closed"
 )
 
 
-# ---------------------------------------------------------------------
-# Export
-# ---------------------------------------------------------------------
+def set_fill(
+    cell,
+    colour: str,
+):
+    cell.fill = PatternFill(
+        fill_type="solid",
+        fgColor=colour,
+    )
+
+
+def set_border(
+    cell,
+    border_side,
+):
+    cell.border = Border(
+        left=border_side,
+        right=border_side,
+        top=border_side,
+        bottom=border_side,
+    )
+
 
 def build_excel(
     dataframe: pd.DataFrame,
 ) -> bytes:
     """
-    Build Return Channel H3 checklist Excel output.
+    Build Return Channel H3 Excel checklist.
 
-    The optional Cable Rack terminal column is included only when
-    at least one extracted row has a non-empty value in:
-
-        H3 - Check list Before Cut-in -
-        CABLE RACK terminal blocks are opened and secure with cable tie
+    The Cable Rack terminal block column appears only when at least
+    one selected record contains an extracted green-terminal value.
     """
     workbook = Workbook()
     worksheet = workbook.active
-    worksheet.title = "Return Channel"
 
-    terminal_column = (
-        "H3 - Check list Before Cut-in - "
-        "CABLE RACK terminal blocks are opened and secure "
-        "with cable tie"
+    worksheet.title = "Return Channel Checklist"
+    worksheet.sheet_view.showGridLines = False
+
+    export_dataframe = dataframe.copy()
+
+    if "Include" in export_dataframe.columns:
+        export_dataframe = export_dataframe[
+            export_dataframe["Include"] == True
+        ].copy()
+
+    required_columns = [
+        "No.",
+        "Location",
+        "Item",
+        "Drawing No. Check list",
+        "Drawing Rev.",
+        "A11 CoV Work Procedure Appendix",
+        FUSE_OPEN_COLUMN,
+        CABLE_RACK_COLUMN,
+        FUSE_CLOSED_COLUMN,
+        "PDF Page",
+        "Review Status",
+        "Engineer Remarks",
+    ]
+
+    for column in required_columns:
+        if column not in export_dataframe.columns:
+            export_dataframe[column] = ""
+
+    cable_rack_values = (
+        export_dataframe[CABLE_RACK_COLUMN]
+        .fillna("")
+        .astype(str)
+        .str.strip()
     )
 
-    fuse_open_column = (
-        "H3 - Check list Before Cut-in - "
-        "Fuses are opened"
+    include_cable_rack_column = bool(
+        (cable_rack_values != "").any()
     )
 
-    fuse_closed_column = (
-        "H3 - Check list After Cut-in - "
-        "Fuses are closed"
+    export_dataframe["No."] = range(
+        1,
+        len(export_dataframe) + 1,
     )
 
-    include_terminal_column = False
+    black = "000000"
+    white = "FFFFFF"
+    before_cut_in_green = "92D050"
+    after_cut_in_blue = "00B0F0"
+    description_gray = "E7E6E6"
+    section_gray = "D9D9D9"
+    data_row_green = "C6EFCE"
 
-    if terminal_column in dataframe.columns:
-        terminal_values = (
-            dataframe[terminal_column]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-        )
+    thin_black = Side(
+        style="thin",
+        color=black,
+    )
 
-        include_terminal_column = bool(
-            (terminal_values != "").any()
-        )
-
-    base_columns = [
+    fixed_columns = [
         "No.",
         "Location",
         "Item",
@@ -96,131 +130,38 @@ def build_excel(
         "A11 CoV Work Procedure Appendix",
     ]
 
-    output_columns = [
-        fuse_open_column,
-    ]
-
-    if include_terminal_column:
-        output_columns.append(
-            terminal_column
+    for column_index in range(1, 7):
+        worksheet.merge_cells(
+            start_row=1,
+            start_column=column_index,
+            end_row=3,
+            end_column=column_index,
         )
 
-    output_columns.append(
-        fuse_closed_column
-    )
-
-    all_columns = base_columns + output_columns
-
-    for column in all_columns:
-        if column not in dataframe.columns:
-            dataframe[column] = ""
-
-    # --------------------------------------------------------------
-    # Header rows
-    # --------------------------------------------------------------
-
-    # Row 1: Group headings.
-    worksheet.merge_cells(
-        start_row=1,
-        start_column=1,
-        end_row=2,
-        end_column=1,
-    )
-
-    worksheet.merge_cells(
-        start_row=1,
-        start_column=2,
-        end_row=2,
-        end_column=2,
-    )
-
-    worksheet.merge_cells(
-        start_row=1,
-        start_column=3,
-        end_row=2,
-        end_column=3,
-    )
-
-    worksheet.merge_cells(
-        start_row=1,
-        start_column=4,
-        end_row=2,
-        end_column=4,
-    )
-
-    worksheet.merge_cells(
-        start_row=1,
-        start_column=5,
-        end_row=2,
-        end_column=5,
-    )
-
-    worksheet.merge_cells(
-        start_row=1,
-        start_column=6,
-        end_row=2,
-        end_column=6,
-    )
-
-    worksheet.cell(
-        row=1,
-        column=1,
-        value="No.",
-    )
-
-    worksheet.cell(
-        row=1,
-        column=2,
-        value="Location",
-    )
-
-    worksheet.cell(
-        row=1,
-        column=3,
-        value="Item",
-    )
-
-    worksheet.cell(
-        row=1,
-        column=4,
-        value="Drawing No. Check list",
-    )
-
-    worksheet.cell(
-        row=1,
-        column=5,
-        value="Drawing Rev.",
-    )
-
-    worksheet.cell(
-        row=1,
-        column=6,
-        value=(
-            "A11 COV Work Procedure\n"
-            "Appendix"
-        ),
-    )
-
     before_start_column = 7
+    before_columns_count = (
+        2
+        if include_cable_rack_column
+        else 1
+    )
+
     before_end_column = (
         before_start_column
-        + len(output_columns)
-        - 2
+        + before_columns_count
+        - 1
     )
 
     after_column = before_end_column + 1
+    pdf_page_column = after_column + 1
+    review_status_column = after_column + 2
+    remarks_column = after_column + 3
+    final_column = remarks_column
 
     worksheet.merge_cells(
         start_row=1,
         start_column=before_start_column,
         end_row=1,
         end_column=before_end_column,
-    )
-
-    worksheet.cell(
-        row=1,
-        column=before_start_column,
-        value="Check list Before Cut-in",
     )
 
     worksheet.merge_cells(
@@ -230,32 +171,89 @@ def build_excel(
         end_column=after_column,
     )
 
+    for column_index in [
+        pdf_page_column,
+        review_status_column,
+        remarks_column,
+    ]:
+        worksheet.merge_cells(
+            start_row=1,
+            start_column=column_index,
+            end_row=3,
+            end_column=column_index,
+        )
+
+    headers = {
+        "A1": "No.",
+        "B1": "Location",
+        "C1": "Item",
+        "D1": "Drawing No. Check list",
+        "E1": "Drawing\nRev.",
+        "F1": (
+            "A11 CoV Work Procedure\n"
+            "Appendix"
+        ),
+    }
+
+    for cell_reference, value in headers.items():
+        cell = worksheet[cell_reference]
+        cell.value = value
+        cell.font = Font(
+            bold=True,
+            color=black,
+        )
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True,
+        )
+        set_fill(cell, white)
+
+    worksheet.cell(
+        row=1,
+        column=before_start_column,
+        value="Check list Before Cut-in",
+    )
+
     worksheet.cell(
         row=1,
         column=after_column,
         value="Check list After Cut-in",
     )
 
-    # Row 2: Actual checklist columns.
+    worksheet.cell(
+        row=1,
+        column=pdf_page_column,
+        value="PDF Page",
+    )
+
+    worksheet.cell(
+        row=1,
+        column=review_status_column,
+        value="Review Status",
+    )
+
+    worksheet.cell(
+        row=1,
+        column=remarks_column,
+        value="Engineer Remarks",
+    )
+
     worksheet.cell(
         row=2,
         column=before_start_column,
         value="Fuses are opened",
     )
 
-    current_column = before_start_column + 1
-
-    if include_terminal_column:
+    if include_cable_rack_column:
         worksheet.cell(
             row=2,
-            column=current_column,
+            column=before_start_column + 1,
             value=(
-                "CABLE RACK terminal blocks are opened "
-                "and secure with cable tie"
+                "CABLE RACK terminal blocks are "
+                "opened and secure with cable tie"
             ),
         )
-
-        current_column += 1
 
     worksheet.cell(
         row=2,
@@ -263,108 +261,104 @@ def build_excel(
         value="Fuses are closed",
     )
 
-    # --------------------------------------------------------------
-    # Header formatting
-    # --------------------------------------------------------------
-
-    for row in range(1, 3):
-        for column in range(
-            1,
-            after_column + 1,
-        ):
+    for row in range(1, 4):
+        for column in range(1, final_column + 1):
             cell = worksheet.cell(
                 row=row,
                 column=column,
             )
 
-            cell.border = BORDER
+            cell.font = Font(
+                bold=(row <= 2),
+                color=black,
+                size=10,
+            )
+
             cell.alignment = Alignment(
                 horizontal="center",
                 vertical="center",
                 wrap_text=True,
             )
 
-            cell.font = Font(
-                bold=True,
-                size=10,
+            set_border(
+                cell,
+                thin_black,
             )
 
             if row == 1:
-                cell.fill = PatternFill(
-                    fill_type="solid",
-                    fgColor=HEADER_FILL,
-                )
-
-            else:
-                cell.fill = PatternFill(
-                    fill_type="solid",
-                    fgColor=SUBHEADER_FILL,
-                )
+                set_fill(cell, white)
 
     for column in range(
         before_start_column,
         before_end_column + 1,
     ):
-        worksheet.cell(
-            row=1,
-            column=column,
-        ).fill = PatternFill(
-            fill_type="solid",
-            fgColor=GROUP_BEFORE_FILL,
+        set_fill(
+            worksheet.cell(
+                row=1,
+                column=column,
+            ),
+            before_cut_in_green,
         )
 
-    worksheet.cell(
-        row=1,
-        column=after_column,
-    ).fill = PatternFill(
-        fill_type="solid",
-        fgColor=GROUP_AFTER_FILL,
+        set_fill(
+            worksheet.cell(
+                row=2,
+                column=column,
+            ),
+            before_cut_in_green,
+        )
+
+    set_fill(
+        worksheet.cell(
+            row=1,
+            column=after_column,
+        ),
+        after_cut_in_blue,
+    )
+
+    set_fill(
+        worksheet.cell(
+            row=2,
+            column=after_column,
+        ),
+        after_cut_in_blue,
     )
 
     worksheet.row_dimensions[1].height = 28
-    worksheet.row_dimensions[2].height = 46
+    worksheet.row_dimensions[2].height = 44
+    worksheet.row_dimensions[3].height = 12
 
-    # --------------------------------------------------------------
-    # Optional location section headings
-    # --------------------------------------------------------------
-
-    sorted_dataframe = dataframe.copy()
-
-    drawing_number_sort = (
-        sorted_dataframe[
-            "Drawing No. Check list"
-        ]
+    # Sort drawing numbers numerically.
+    export_dataframe["_drawing_sort"] = (
+        export_dataframe["Drawing No. Check list"]
         .astype(str)
-        .str.extract(
-            r"/R\d+/(\d+)"
-        )[0]
+        .str.extract(r"/R\d+/(\d+)")[0]
     )
 
-    sorted_dataframe["_drawing_number_sort"] = (
-        pd.to_numeric(
-            drawing_number_sort,
-            errors="coerce",
-        )
-        .fillna(999999999)
-    )
+    export_dataframe["_drawing_sort"] = pd.to_numeric(
+        export_dataframe["_drawing_sort"],
+        errors="coerce",
+    ).fillna(999999999)
 
-    sorted_dataframe = sorted_dataframe.sort_values(
+    export_dataframe = export_dataframe.sort_values(
         by=[
             "Location",
-            "_drawing_number_sort",
+            "_drawing_sort",
+            "PDF Page",
             "No.",
         ],
         kind="stable",
+    ).reset_index(drop=True)
+
+    export_dataframe = export_dataframe.drop(
+        columns=["_drawing_sort"]
     )
 
-    sorted_dataframe = sorted_dataframe.drop(
-        columns=["_drawing_number_sort"]
-    )
-
-    current_row = 3
+    current_row = 4
     current_location = None
+    output_number = 1
 
-    for _, record in sorted_dataframe.iterrows():
+    for _, record in export_dataframe.iterrows():
         location = str(
             record.get("Location", "")
         ).strip()
@@ -372,29 +366,28 @@ def build_excel(
         if location != current_location:
             current_location = location
 
-            for column in range(
-                1,
-                after_column + 1,
-            ):
+            for column in range(1, final_column + 1):
                 cell = worksheet.cell(
                     row=current_row,
                     column=column,
                 )
 
-                cell.border = BORDER
-                cell.fill = PatternFill(
-                    fill_type="solid",
-                    fgColor=SECTION_FILL,
-                )
-
-                cell.alignment = Alignment(
-                    vertical="center",
-                    wrap_text=True,
+                set_fill(cell, section_gray)
+                set_border(
+                    cell,
+                    thin_black,
                 )
 
                 cell.font = Font(
                     bold=True,
+                    color=black,
                     size=10,
+                )
+
+                cell.alignment = Alignment(
+                    horizontal="left",
+                    vertical="center",
+                    wrap_text=True,
                 )
 
             worksheet.cell(
@@ -415,10 +408,14 @@ def build_excel(
                 value="ATC - Return Channel",
             )
 
+            worksheet.row_dimensions[
+                current_row
+            ].height = 30
+
             current_row += 1
 
         values = [
-            record.get("No.", ""),
+            output_number,
             record.get("Location", ""),
             record.get("Item", ""),
             record.get(
@@ -430,81 +427,108 @@ def build_excel(
                 "A11 CoV Work Procedure Appendix",
                 "",
             ),
-            record.get(fuse_open_column, ""),
+            record.get(FUSE_OPEN_COLUMN, ""),
         ]
 
-        if include_terminal_column:
+        if include_cable_rack_column:
             values.append(
-                record.get(
-                    terminal_column,
-                    "",
-                )
+                record.get(CABLE_RACK_COLUMN, "")
             )
 
-        values.append(
-            record.get(
-                fuse_closed_column,
-                "",
-            )
+        values.extend(
+            [
+                record.get(FUSE_CLOSED_COLUMN, ""),
+                record.get("PDF Page", ""),
+                record.get("Review Status", ""),
+                record.get("Engineer Remarks", ""),
+            ]
         )
 
         for column, value in enumerate(
             values,
             start=1,
         ):
+            if pd.isna(value):
+                value = ""
+
             cell = worksheet.cell(
                 row=current_row,
                 column=column,
                 value=value,
             )
 
-            cell.border = BORDER
-            cell.alignment = Alignment(
-                vertical="top",
-                horizontal=(
-                    "center"
-                    if column <= 6
-                    else "left"
-                ),
-                wrap_text=True,
+            set_fill(cell, data_row_green)
+            set_border(
+                cell,
+                thin_black,
             )
 
             cell.font = Font(
                 size=10,
+                color=black,
+            )
+
+            if column in [
+                1,
+                2,
+                5,
+                6,
+                pdf_page_column,
+                review_status_column,
+            ]:
+                horizontal = "center"
+            else:
+                horizontal = "left"
+
+            cell.alignment = Alignment(
+                horizontal=horizontal,
+                vertical="top",
+                wrap_text=True,
             )
 
         worksheet.row_dimensions[
             current_row
-        ].height = 48
+        ].height = 54
 
         current_row += 1
-
-    # --------------------------------------------------------------
-    # Column widths
-    # --------------------------------------------------------------
+        output_number += 1
 
     widths = {
         1: 8,
-        2: 13,
-        3: 20,
-        4: 30,
+        2: 12,
+        3: 18,
+        4: 31,
         5: 12,
-        6: 20,
-        7: 34,
+        6: 25,
+        7: 33,
         8: 34,
-        9: 34,
+        9: 33,
+        10: 12,
+        11: 20,
+        12: 45,
     }
 
-    for column_index, width in widths.items():
-        if column_index <= after_column:
+    for column, width in widths.items():
+        if column <= final_column:
             worksheet.column_dimensions[
-                get_column_letter(column_index)
+                get_column_letter(column)
             ].width = width
 
-    worksheet.freeze_panes = "A3"
+    worksheet.freeze_panes = "A4"
+
+    worksheet.auto_filter.ref = (
+        f"A3:{get_column_letter(final_column)}"
+        f"{max(worksheet.max_row, 4)}"
+    )
+
+    worksheet.page_setup.orientation = "landscape"
+    worksheet.page_setup.fitToWidth = 1
+    worksheet.page_setup.fitToHeight = 0
+    worksheet.sheet_properties.pageSetUpPr.fitToPage = True
 
     output = BytesIO()
 
     workbook.save(output)
+    output.seek(0)
 
     return output.getvalue()
