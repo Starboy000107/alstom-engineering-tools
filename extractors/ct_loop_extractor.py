@@ -1712,6 +1712,12 @@ def create_ct_loop_rows(
         rows.append(
             {
                 "Item": item_name,
+                # Used only to order multiple Items on the same PDF page.
+                # Lower Y coordinate means physically higher on the drawing.
+                "Item Sort Y": min(
+                    item_occurrence["y_center"]
+                    for item_occurrence in item_occurrences
+                ),
                 "G1 - Step 6": format_pairs(
                     step_6_pairs
                 ),
@@ -2208,6 +2214,13 @@ def extract_pdf(
                             "No.": 0,
                             "Location": location,
                             "Item": row["Item"],
+                            "Item": row["Item"],
+                            # Internal sort key. Removed before export.
+                            "_item_y_sort": row["Item Sort Y"],
+
+                            "Drawing No. Check list": (
+                                drawing_number
+                            ),
                             "Drawing No. Check list": (
                                 drawing_number
                             ),
@@ -2335,15 +2348,17 @@ def extract_pdf(
             .apply(get_item_state_priority)
         )
 
-        # Sort drawing first, then Item base name.
-        # For the same Item, REP is always before UP and DN.
+        # Sort by controlled drawing number first.
+        # If a drawing/page has more than one Item, order Items according to
+        # their actual vertical position on the PDF sheet:
+        #
+        # smaller Y = higher on drawing = listed first.
         dataframe = dataframe.sort_values(
             by=[
                 "_drawing_sort",
                 "PDF Page",
-                "_item_base_sort",
-                "_item_state_priority",
-                "_item_state_sort",
+                "_item_y_sort",
+                "Item",
             ],
             ascending=True,
             kind="stable",
@@ -2352,10 +2367,9 @@ def extract_pdf(
         dataframe = dataframe.drop(
             columns=[
                 "_drawing_sort",
-                "_item_base_sort",
-                "_item_state_sort",
-                "_item_state_priority",
-            ]
+                "_item_y_sort",
+            ],
+            errors="ignore",
         )
 
         dataframe["No."] = range(
