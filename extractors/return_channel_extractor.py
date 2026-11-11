@@ -7,7 +7,9 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+import cv2
 import fitz
+import numpy as np
 import pandas as pd
 
 
@@ -771,8 +773,208 @@ def get_green_segments(
 # Fuse extraction
 # ---------------------------------------------------------------------
 # ---------------------------------------------------------------------
-# Fuse symbol detection: shape first, text second
+# Raster / image fuse-shape detection
 # ---------------------------------------------------------------------
+
+def render_page_for_fuse_detection(
+    page,
+    zoom: float = 3.0,
+) -> tuple[np.ndarray, float]:
+    """
+    Render a PDF page for image-based fuse-shape detection.
+
+    Returns:
+        image: BGR OpenCV image
+        scale: PDF points -> raster pixels scale factor
+    """
+    matrix = fitz.Matrix(
+        zoom,
+        zoom,
+    )
+
+    pixmap = page.get_pixmap(
+        matrix=matrix,
+        alpha=False,
+        colorspace=fitz.csRGB,
+    )
+
+    image = np.frombuffer(
+        pixmap.samples,
+        dtype=np.uint8,
+    )
+
+    image = image.reshape(
+        pixmap.height,
+        pixmap.width,
+        3,
+    )
+
+    # PyMuPDF pixmap is RGB. OpenCV expects BGR.
+    image = cv2.cvtColor(
+        image,
+        cv2.COLOR_RGB2BGR,
+    )
+
+    return image, zoom
+
+
+def get_fuse_wave_image_candidates(
+    page,
+) -> list[dict]:
+    """
+    Find likely fuse-wave shapes using rendered-image geometry.
+
+    This detects small horizontal wave-like components from the
+    engineering drawing image. It does not use Item names, drawing
+    number, location, X board number, fuse number or terminal name.
+
+    A candidate is a small, wide, shallow dark contour. Later logic
+    validates it by requiring nearby:
+        - #number / Fnumber;
+        - Xnumber;
+        - optionally a current value such as 100mA.
+    """
+    image, scale = render_page_for_fuse_detection(
+        page
+    )
+
+    grayscale = cv2.cvtColor(
+        image,
+        cv2.COLOR_BGR2GRAY,
+    )
+
+    # Preserve dark linework / symbols.
+    binary = cv2.threshold(
+        grayscale,
+        180,
+        255,
+        cv2.THRESH_BINARY_INV,
+    )[1]
+
+    # Remove most long horizontal conductors so local wave shapes
+    # are retained more clearly.
+    horizontal_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (max(35, int(scale * 22)), 1),
+    )
+
+    long_horizontal = cv2.morphologyEx(
+        binary,
+        cv2.MORPH_OPEN,
+        horizontal_kernel,
+    )
+
+    local_shapes = cv2.subtract(
+        binary,
+        long_horizontal,
+    )
+
+    contours, _ = cv2.findContours(
+        local_shapes,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+
+    page_width = float(page.rect.width)
+    page_height = float(page.rect.height)
+
+    candidates = []
+    seen = set()
+
+    for contour in contours:
+        x, y, width, height = cv2.boundingRect(
+            contour
+        )
+
+        area = cv2.contourArea(contour)
+
+        pdf_x0 = x / scale
+        pdf_y0 = y / scale
+        pdf_x1 = (x + width) / scale
+        pdf_y1 = (y + height) / scale
+
+        pdf_width = pdf_x1 - pdf_x0
+        pdf_height = pdf_y1 - pdf_y0
+
+        if pdf_width <= 0 or pdf_height <= 0:
+            continue
+
+        aspect_ratio = pdf_width / max(
+            pdf_height,
+            0.1,
+        )
+
+        # Generic image geometry for a fuse wave:
+        # small, wide, shallow, but not a full conductor.
+        #
+        # These values use proportions/ranges, not drawing-specific
+        # locations or fuse values.
+        if pdf_width < max(5.0, page_width * 0.004):
+            continue
+
+        if pdf_width > page_width * 0.09:
+            continue
+
+        if pdf_height < max(1.0, page_height * 0.001):
+            continue
+
+        if pdf_height > page_height * 0.045:
+            continue
+
+        if aspect_ratio < 1.25:
+            continue
+
+        if area < 3:
+            continue
+
+        rectangle = fitz.Rect(
+            pdf_x0,
+            pdf_y0,
+            pdf_x1,
+            pdf_y1,
+        )
+
+        key = (
+            round(rectangle.x0, 1),
+            round(rectangle.y0, 1),
+            round(rectangle.x1, 1),
+            round(rectangle.y1, 1),
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        candidates.append(
+            {
+                "rect": rectangle,
+                "point": fitz.Point(
+                    (
+                        rectangle.x0
+                        + rectangle.x1
+                    ) / 2,
+                    (
+                        rectangle.y0
+                        + rectangle.y1
+                    ) / 2,
+                ),
+                "image_area": float(area),
+                "image_aspect_ratio": round(
+                    aspect_ratio,
+                    2,
+                ),
+            }
+        )
+
+    candidates.sort(
+        key=lambda candidate: (
+            candidate["point"].y,
+            candidate["point"].x,
+        )
+    )
+
+    return candidates
 
 def get_drawing_curve_bounds(
     drawing: dict,
@@ -1042,10 +1244,15 @@ def detect_fuse_wave_symbols(
     page,
 ) -> list[dict]:
     """
-    Detect physical fuse-wave symbols from PDF vector geometry first.
+    Detect physical fuse-wave symbols.
 
-    The result contains only symbol locations. No # number, X board,
-    Item, drawing number or location is used in this stage.
+    First attempt native PDF vector curve detection.
+    If no suitable fuse waves are found, use raster/image recognition.
+
+    This prevents dependence on a specific PDF representation:
+      - native Bezier curves;
+      - line/path fragments;
+      - image-rendered symbols.
     """
     curve_rectangles = []
 
@@ -1055,7 +1262,6 @@ def detect_fuse_wave_symbols(
         if drawing_rect is None:
             continue
 
-        # Ignore very large vector objects early.
         if (
             drawing_rect.width
             > page.rect.width * 0.70
@@ -1068,10 +1274,27 @@ def detect_fuse_wave_symbols(
             get_drawing_curve_bounds(drawing)
         )
 
-    return cluster_fuse_wave_rectangles(
+    vector_symbols = cluster_fuse_wave_rectangles(
         curve_rectangles,
         page,
     )
+
+    # Native vector symbols are preferred when available.
+    if vector_symbols:
+        for symbol in vector_symbols:
+            symbol["detection_source"] = "VECTOR"
+
+        return vector_symbols
+
+    image_symbols = get_fuse_wave_image_candidates(
+        page
+    )
+
+    for symbol in image_symbols:
+        symbol["curve_count"] = 0
+        symbol["detection_source"] = "IMAGE"
+
+    return image_symbols
 
 
 def words_near_fuse_symbol(
@@ -1574,44 +1797,52 @@ def get_best_equipment_label(
 def select_fuse_for_equipment(
     fuse_candidates: list[dict],
     equipment_label: dict | None,
-    excluded_values: set[str],
-) -> dict | None:
+    excluded_candidate_ids: set[int],
+) -> tuple[int, dict] | tuple[None, None]:
     """
-    Select the fuse physically nearest the relevant equipment label.
+    Select a physical fuse candidate nearest an equipment area.
 
-    Fuse-wave shape and local text determine a candidate.
-    Equipment geometry determines whether it belongs to the NS Rack
-    or IXL/SACEM CoV Cubicle side.
+    Candidates are excluded by their physical list index, not fuse
+    value. This permits two physically separate fuse symbols to have
+    the same fuse reference where the controlled drawing shows that.
     """
     available = [
-        candidate
-        for candidate in fuse_candidates
-        if candidate["value"] not in excluded_values
+        (index, candidate)
+        for index, candidate in enumerate(
+            fuse_candidates
+        )
+        if index not in excluded_candidate_ids
     ]
 
     if not available:
-        return None
+        return None, None
 
     if equipment_label is None:
         available.sort(
-            key=lambda candidate: (
-                -candidate.get("confidence", 0),
-                candidate["point"].y,
-                candidate["point"].x,
+            key=lambda pair: (
+                -pair[1].get(
+                    "confidence",
+                    0,
+                ),
+                pair[1]["point"].y,
+                pair[1]["point"].x,
             )
         )
 
         return available[0]
 
     available.sort(
-        key=lambda candidate: (
+        key=lambda pair: (
             point_distance(
-                candidate["point"],
+                pair[1]["point"],
                 equipment_label["point"],
             ),
-            -candidate.get("confidence", 0),
-            candidate["point"].y,
-            candidate["point"].x,
+            -pair[1].get(
+                "confidence",
+                0,
+            ),
+            pair[1]["point"].y,
+            pair[1]["point"].x,
         )
     )
 
@@ -1873,23 +2104,27 @@ def create_return_channel_rows(
             )
             continue
 
-        used_fuse_values = set()
+        used_fuse_candidate_ids = set()
 
-        ns_rack_fuse = select_fuse_for_equipment(
-            fuse_candidates,
-            ns_rack_label,
-            used_fuse_values,
+        ns_fuse_index, ns_rack_fuse = (
+            select_fuse_for_equipment(
+                fuse_candidates,
+                ns_rack_label,
+                used_fuse_candidate_ids,
+            )
         )
 
-        if ns_rack_fuse is not None:
-            used_fuse_values.add(
-                ns_rack_fuse["value"]
+        if ns_fuse_index is not None:
+            used_fuse_candidate_ids.add(
+                ns_fuse_index
             )
 
-        ixl_fuse = select_fuse_for_equipment(
-            fuse_candidates,
-            ixl_label,
-            used_fuse_values,
+        ixl_fuse_index, ixl_fuse = (
+            select_fuse_for_equipment(
+                fuse_candidates,
+                ixl_label,
+                used_fuse_candidate_ids,
+            )
         )
 
         fuse_text, fuse_review_required = (
@@ -2001,34 +2236,101 @@ def page_is_return_channel_relevant(
 def create_debug_image(
     page,
     selected_terminals: list[dict],
+    selected_fuses: list[dict] | None = None,
 ) -> bytes:
-    shape = page.new_shape()
-    padding = 2.5
+    """
+    Debug overlay.
 
+    Red boxes:
+        selected terminal references.
+
+    Orange boxes:
+        detected fuse-wave symbol regions.
+    """
+    selected_fuses = selected_fuses or []
+
+    terminal_padding = 2.5
+    fuse_padding = 4.0
+
+    terminal_shape = page.new_shape()
+    fuse_shape = page.new_shape()
+
+    # Terminal boxes: red.
     for terminal in selected_terminals:
         rectangle = fitz.Rect(
-            max(0, terminal["x0"] - padding),
-            max(0, terminal["y0"] - padding),
+            max(
+                0,
+                terminal["x0"]
+                - terminal_padding,
+            ),
+            max(
+                0,
+                terminal["y0"]
+                - terminal_padding,
+            ),
             min(
                 page.rect.width,
-                terminal["x1"] + padding,
+                terminal["x1"]
+                + terminal_padding,
             ),
             min(
                 page.rect.height,
-                terminal["y1"] + padding,
+                terminal["y1"]
+                + terminal_padding,
             ),
         )
 
-        shape.draw_rect(rectangle)
+        terminal_shape.draw_rect(rectangle)
 
     if selected_terminals:
-        shape.finish(
+        terminal_shape.finish(
             color=(1.0, 0.0, 0.0),
             width=1.25,
             stroke_opacity=1.0,
         )
 
-        shape.commit()
+        terminal_shape.commit()
+
+    # Fuse boxes: orange/red-orange.
+    for fuse in selected_fuses:
+        fuse_rect = fuse.get("rect")
+
+        if fuse_rect is None:
+            continue
+
+        rectangle = fitz.Rect(
+            max(
+                0,
+                fuse_rect.x0
+                - fuse_padding,
+            ),
+            max(
+                0,
+                fuse_rect.y0
+                - fuse_padding,
+            ),
+            min(
+                page.rect.width,
+                fuse_rect.x1
+                + fuse_padding,
+            ),
+            min(
+                page.rect.height,
+                fuse_rect.y1
+                + fuse_padding,
+            ),
+        )
+
+        fuse_shape.draw_rect(rectangle)
+
+    if selected_fuses:
+        fuse_shape.finish(
+            color=(1.0, 0.45, 0.0),
+            width=1.6,
+            stroke_opacity=1.0,
+        )
+
+        fuse_shape.commit()
 
     pixmap = page.get_pixmap(
         matrix=fitz.Matrix(1.5, 1.5),
@@ -2146,6 +2448,21 @@ def extract_pdf(
                     log_callback=log_callback,
                 )
 
+                # A valid Return Channel checklist requires two physical fuse
+                # symbol groups: one associated with each required equipment side.
+                #
+                # Do not create a candidate row merely because a page title says
+                # RETURN CHANNEL and it contains terminals.
+                if len(fuse_candidates) < 2:
+                    write_log(
+                        log_callback,
+                        f"Page {page_number}: skipped; "
+                        f"only {len(fuse_candidates)} valid fuse "
+                        "symbol candidate(s) found; two are required.",
+                        "WARNING",
+                    )
+                    continue
+
                 green_segments = get_green_segments(
                     page
                 )
@@ -2189,6 +2506,7 @@ def extract_pdf(
                         create_debug_image(
                             page,
                             debug_terminals,
+                            fuse_candidates,
                         )
                     )
 
