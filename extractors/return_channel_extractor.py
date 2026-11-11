@@ -953,25 +953,33 @@ def rectangles_overlap(
 
 def get_fuse_wave_image_candidates(
     page,
+    log_callback=None,
 ) -> list[dict]:
     """
-    Detect cyan wave-fuse symbols using the supplied fuse template.
+    Detect cyan wave-fuse symbols using the supplied image template.
 
-    Detection uses cyan-mask template matching. Therefore it rejects:
+    Detection order:
+        1. Render PDF page.
+        2. Extract cyan-only raster mask.
+        3. Match actual supplied fuse-wave template.
+        4. Retain local maxima only.
+        5. Later code validates each match with nearby:
+             - # / F fuse number;
+             - X board reference;
+             - current rating such as 100mA.
 
-    - black straight fuses;
-    - black cable lines;
-    - red revision boundaries;
-    - black terminal blocks;
-    - ordinary text;
-    - non-cyan curved symbols.
-
-    The detected physical fuse-wave shape is then used later to read
-    nearby #number, X board and 100mA text.
+    The template matching is intentionally shape-based. It does not
+    select fuses from text alone.
     """
     template_mask = load_fuse_wave_template()
 
     if template_mask is None:
+        write_log(
+            log_callback,
+            "Fuse template could not be loaded or does not contain "
+            "cyan pixels.",
+            "ERROR",
+        )
         return []
 
     page_image, scale = render_page_for_fuse_detection(
@@ -979,18 +987,31 @@ def get_fuse_wave_image_candidates(
         zoom=4.0,
     )
 
-    page_cyan_mask = get_cyan_mask(
-        page_image
-    )
+    page_cyan_mask = get_cyan_mask(page_image)
 
-    # Clean small raster/render noise but preserve the fuse wave.
-    page_cyan_mask = cv2.morphologyEx(
+    # DO NOT apply MORPH_OPEN here.
+    #
+    # Engineering PDF cyan linework is thin. Morphological opening can
+    # erase the narrow fuse-wave line and leave no matching pixels.
+    #
+    # A very small dilation connects anti-aliased cyan pixels without
+    # destroying the wave geometry.
+    page_cyan_mask = cv2.dilate(
         page_cyan_mask,
-        cv2.MORPH_OPEN,
         cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE,
-            (3, 3),
+            (2, 2),
         ),
+        iterations=1,
+    )
+
+    template_mask = cv2.dilate(
+        template_mask,
+        cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (2, 2),
+        ),
+        iterations=1,
     )
 
     template_height, template_width = (
@@ -998,13 +1019,27 @@ def get_fuse_wave_image_candidates(
     )
 
     if template_width < 10 or template_height < 4:
+        write_log(
+            log_callback,
+            "Fuse template is too small after cyan-mask extraction: "
+            f"{template_width}x{template_height}.",
+            "ERROR",
+        )
         return []
 
-    raw_candidates = []
+    cyan_pixel_count = int(
+        cv2.countNonZero(page_cyan_mask)
+    )
 
-    # Different PDF exports / sheet scales can alter the rendered
-    # visual size of the same fuse symbol.
+    raw_candidates = []
+    best_match_score = 0.0
+    best_match_scale = None
+
+    # The template may originate from a screenshot while the PDF is
+    # rendered at another DPI. Test a broad visual scale range.
     for template_scale in [
+        0.35,
+        0.45,
         0.55,
         0.65,
         0.75,
@@ -1016,6 +1051,8 @@ def get_fuse_wave_image_candidates(
         1.35,
         1.50,
         1.70,
+        1.90,
+        2.10,
     ]:
         resized_width = max(
             10,
@@ -1048,17 +1085,32 @@ def get_fuse_wave_image_candidates(
         ):
             continue
 
-        # CCORR_NORMED is suitable for binary cyan masks.
         match_result = cv2.matchTemplate(
             page_cyan_mask,
             resized_template,
             cv2.TM_CCORR_NORMED,
         )
 
-        # Strict enough to reject plain cyan straight wiring.
-        # Lower to 0.76 only if real fuse waves are missed.
+        current_max_score = float(
+            match_result.max()
+        )
+
+        if current_max_score > best_match_score:
+            best_match_score = current_max_score
+            best_match_scale = template_scale
+
+        # Use a lower initial threshold. The later local-text checks
+        # (#number + Xnumber + 100mA) reject ordinary cyan wiring.
+        #
+        # This threshold is deliberately not the final validation.
+        local_maxima = cv2.dilate(
+            match_result,
+            np.ones((9, 9), dtype=np.uint8),
+        )
+
         y_positions, x_positions = np.where(
-            match_result >= 0.82
+            (match_result >= 0.62)
+            & (match_result == local_maxima)
         )
 
         for y_pixel, x_pixel in zip(
@@ -1096,6 +1148,7 @@ def get_fuse_wave_image_candidates(
                         ) / 2,
                     ),
                     "template_score": score,
+                    "template_scale": template_scale,
                     "curve_count": 0,
                     "detection_source": (
                         "CYAN_FUSE_WAVE_TEMPLATE"
@@ -1103,8 +1156,20 @@ def get_fuse_wave_image_candidates(
                 }
             )
 
-    # Non-maximum suppression:
-    # one physical fuse can match multiple template scales.
+    write_log(
+        log_callback,
+        "Fuse template image scan: "
+        f"cyan_pixels={cyan_pixel_count}; "
+        f"template_size={template_width}x"
+        f"{template_height}; "
+        f"best_score={best_match_score:.3f}; "
+        f"best_scale={best_match_scale}; "
+        f"raw_matches={len(raw_candidates)}.",
+        "DEBUG",
+    )
+
+    # Non-maximum suppression: keep the highest score for one
+    # physical fuse, despite matches at several scales.
     raw_candidates.sort(
         key=lambda candidate: (
             -candidate["template_score"],
@@ -1123,11 +1188,12 @@ def get_fuse_wave_image_candidates(
                 existing["rect"]
             )
 
-            # Merge visually overlapping detections.
-            existing_rect.x0 -= 10
-            existing_rect.y0 -= 10
-            existing_rect.x1 += 10
-            existing_rect.y1 += 10
+            # This is only suppression spacing. It is not an Item,
+            # drawing, location, fuse-number or rack rule.
+            existing_rect.x0 -= 12
+            existing_rect.y0 -= 12
+            existing_rect.x1 += 12
+            existing_rect.y1 += 12
 
             if rectangles_overlap(
                 candidate["rect"],
@@ -1153,22 +1219,15 @@ def get_fuse_wave_image_candidates(
 
 def detect_fuse_wave_symbols(
     page,
+    log_callback=None,
 ) -> list[dict]:
     """
-    Detect only the real visual wave-fuse symbol.
-
-    This intentionally uses image-template matching, not generic
-    curve/line/contour matching.
-
-    Therefore it rejects:
-      - straight fuse links;
-      - terminal blocks;
-      - dashed revision boxes;
-      - ordinary circuit lines;
-      - random Bezier curves;
-      - cable markers.
+    Detect physical cyan wave fuses using image-template matching.
     """
-    return get_fuse_wave_image_candidates(page)
+    return get_fuse_wave_image_candidates(
+        page,
+        log_callback=log_callback,
+    )
 
 
 def words_near_fuse_symbol(
@@ -1473,12 +1532,6 @@ def extract_fuse_candidates(
             nearby_words
         )
 
-        # A valid fuse candidate must be the actual wave symbol and have
-        # local fuse number, local X board reference, and local current
-        # rating. This prevents detection of straight/ordinary links.
-        if not rating_found:
-            continue
-
         fuse_value = (
             f"X{local_x_terminal['number']}."
             f"f{local_fuse_number['number']}"
@@ -1495,9 +1548,14 @@ def extract_fuse_candidates(
 
         seen.add(key)
 
-        # All accepted candidates have:
-        # S-wave geometry + current rating + #/F number + X board.
-        confidence = 4
+        # The wave shape + #/F text + X board are mandatory.
+        # Current rating is strong confidence evidence, but PDF text may split
+        # "100mA" into multiple elements. Do not discard a valid physical
+        # fuse solely because the rating was not extracted as one word.
+        if not rating_found:
+            confidence = 3
+        else:
+            confidence = 4
 
         candidates.append(
             {
@@ -1544,7 +1602,10 @@ def log_fuse_detection_diagnostics(
     Logs only visual template-matched wave-fuse symbols and resulting
     local-text fuse candidates.
     """
-    wave_symbols = detect_fuse_wave_symbols(page)
+    wave_symbols = detect_fuse_wave_symbols(
+        page,
+        log_callback=log_callback,
+    )
 
     wave_diagnostics = []
 
@@ -2368,6 +2429,14 @@ def extract_pdf(
                 # Do not create a candidate row merely because a page title says
                 # RETURN CHANNEL and it contains terminals.
                 if len(fuse_candidates) < 2:
+                    # Generate a debug image even for skipped pages. This lets you
+                    # inspect red boxes around whatever fuse candidates were found.
+                    debug_images[page_number] = create_debug_image(
+                        page,
+                        [],
+                        fuse_candidates,
+                    )
+
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
