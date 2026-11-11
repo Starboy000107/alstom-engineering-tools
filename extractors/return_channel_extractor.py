@@ -78,6 +78,11 @@ IXL_CUBICLE_PATTERN = re.compile(
     r"\b",
     re.IGNORECASE,
 )
+FUSE_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "img"
+    / "fuse_wave_template.png"
+)
 
 
 # ---------------------------------------------------------------------
@@ -817,559 +822,353 @@ def render_page_for_fuse_detection(
 
     return image, zoom
 
+def get_cyan_mask(
+    image_bgr: np.ndarray,
+) -> np.ndarray:
+    """
+    Return a binary mask for cyan/turquoise engineering circuitwork.
+
+    The template and Return Channel fuse symbols are cyan. This avoids
+    matching black straight lines, red revision boxes, text, and other
+    non-cyan drawing features.
+    """
+    hsv_image = cv2.cvtColor(
+        image_bgr,
+        cv2.COLOR_BGR2HSV,
+    )
+
+    # OpenCV Hue range is 0-179.
+    #
+    # Cyan / turquoise commonly falls around 75-105 in OpenCV HSV.
+    # Saturation/value conditions reject black, grey, white and red.
+    lower_cyan = np.array(
+        [70, 80, 80],
+        dtype=np.uint8,
+    )
+
+    upper_cyan = np.array(
+        [105, 255, 255],
+        dtype=np.uint8,
+    )
+
+    return cv2.inRange(
+        hsv_image,
+        lower_cyan,
+        upper_cyan,
+    )
+
+
+def load_fuse_wave_template() -> np.ndarray | None:
+    """
+    Load and prepare the cyan wave-fuse image template.
+
+    Expected file:
+
+        img/fuse_wave_template.png
+
+    The template should contain only:
+
+        cyan terminal dot + cyan wave + cyan terminal dot
+
+    Do not include red crop borders, #number, X board, B24, 100mA,
+    or surrounding circuit text.
+    """
+    if not FUSE_TEMPLATE_PATH.exists():
+        return None
+
+    template_bgr = cv2.imread(
+        str(FUSE_TEMPLATE_PATH),
+        cv2.IMREAD_COLOR,
+    )
+
+    if template_bgr is None:
+        return None
+
+    cyan_mask = get_cyan_mask(template_bgr)
+
+    # Remove tiny isolated cyan noise.
+    cyan_mask = cv2.morphologyEx(
+        cyan_mask,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (3, 3),
+        ),
+    )
+
+    non_zero = cv2.findNonZero(cyan_mask)
+
+    if non_zero is None:
+        return None
+
+    x, y, width, height = cv2.boundingRect(
+        non_zero
+    )
+
+    # Tight crop around detected cyan fuse symbol.
+    cyan_mask = cyan_mask[
+        y:y + height,
+        x:x + width,
+    ]
+
+    if cyan_mask.shape[0] < 4:
+        return None
+
+    if cyan_mask.shape[1] < 10:
+        return None
+
+    return cyan_mask
+
+def log_fuse_template_status(
+    log_callback=None,
+):
+    if FUSE_TEMPLATE_PATH.exists():
+        write_log(
+            log_callback,
+            "Fuse-wave template loaded: "
+            f"{FUSE_TEMPLATE_PATH}",
+            "DEBUG",
+        )
+    else:
+        write_log(
+            log_callback,
+            "Fuse-wave template NOT FOUND: "
+            f"{FUSE_TEMPLATE_PATH}",
+            "ERROR",
+        )
+
+def rectangles_overlap(
+    first: fitz.Rect,
+    second: fitz.Rect,
+) -> bool:
+    """
+    True when two PDF rectangles overlap.
+    """
+    return not (
+        first.x1 < second.x0
+        or second.x1 < first.x0
+        or first.y1 < second.y0
+        or second.y1 < first.y0
+    )
 
 def get_fuse_wave_image_candidates(
     page,
 ) -> list[dict]:
     """
-    Find likely fuse-wave shapes using rendered-image geometry.
+    Detect cyan wave-fuse symbols using the supplied fuse template.
 
-    This detects small horizontal wave-like components from the
-    engineering drawing image. It does not use Item names, drawing
-    number, location, X board number, fuse number or terminal name.
+    Detection uses cyan-mask template matching. Therefore it rejects:
 
-    A candidate is a small, wide, shallow dark contour. Later logic
-    validates it by requiring nearby:
-        - #number / Fnumber;
-        - Xnumber;
-        - optionally a current value such as 100mA.
+    - black straight fuses;
+    - black cable lines;
+    - red revision boundaries;
+    - black terminal blocks;
+    - ordinary text;
+    - non-cyan curved symbols.
+
+    The detected physical fuse-wave shape is then used later to read
+    nearby #number, X board and 100mA text.
     """
-    image, scale = render_page_for_fuse_detection(
-        page
+    template_mask = load_fuse_wave_template()
+
+    if template_mask is None:
+        return []
+
+    page_image, scale = render_page_for_fuse_detection(
+        page,
+        zoom=4.0,
     )
 
-    grayscale = cv2.cvtColor(
-        image,
-        cv2.COLOR_BGR2GRAY,
+    page_cyan_mask = get_cyan_mask(
+        page_image
     )
 
-    # Preserve dark linework / symbols.
-    binary = cv2.threshold(
-        grayscale,
-        180,
-        255,
-        cv2.THRESH_BINARY_INV,
-    )[1]
-
-    # Remove most long horizontal conductors so local wave shapes
-    # are retained more clearly.
-    horizontal_kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT,
-        (max(35, int(scale * 22)), 1),
-    )
-
-    long_horizontal = cv2.morphologyEx(
-        binary,
+    # Clean small raster/render noise but preserve the fuse wave.
+    page_cyan_mask = cv2.morphologyEx(
+        page_cyan_mask,
         cv2.MORPH_OPEN,
-        horizontal_kernel,
+        cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (3, 3),
+        ),
     )
 
-    local_shapes = cv2.subtract(
-        binary,
-        long_horizontal,
+    template_height, template_width = (
+        template_mask.shape[:2]
     )
 
-    contours, _ = cv2.findContours(
-        local_shapes,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE,
+    if template_width < 10 or template_height < 4:
+        return []
+
+    raw_candidates = []
+
+    # Different PDF exports / sheet scales can alter the rendered
+    # visual size of the same fuse symbol.
+    for template_scale in [
+        0.55,
+        0.65,
+        0.75,
+        0.85,
+        0.95,
+        1.00,
+        1.10,
+        1.20,
+        1.35,
+        1.50,
+        1.70,
+    ]:
+        resized_width = max(
+            10,
+            int(template_width * template_scale),
+        )
+
+        resized_height = max(
+            4,
+            int(template_height * template_scale),
+        )
+
+        resized_template = cv2.resize(
+            template_mask,
+            (
+                resized_width,
+                resized_height,
+            ),
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+        if (
+            resized_template.shape[0]
+            >= page_cyan_mask.shape[0]
+        ):
+            continue
+
+        if (
+            resized_template.shape[1]
+            >= page_cyan_mask.shape[1]
+        ):
+            continue
+
+        # CCORR_NORMED is suitable for binary cyan masks.
+        match_result = cv2.matchTemplate(
+            page_cyan_mask,
+            resized_template,
+            cv2.TM_CCORR_NORMED,
+        )
+
+        # Strict enough to reject plain cyan straight wiring.
+        # Lower to 0.76 only if real fuse waves are missed.
+        y_positions, x_positions = np.where(
+            match_result >= 0.82
+        )
+
+        for y_pixel, x_pixel in zip(
+            y_positions,
+            x_positions,
+        ):
+            score = float(
+                match_result[y_pixel, x_pixel]
+            )
+
+            rectangle = fitz.Rect(
+                x_pixel / scale,
+                y_pixel / scale,
+                (
+                    x_pixel
+                    + resized_template.shape[1]
+                ) / scale,
+                (
+                    y_pixel
+                    + resized_template.shape[0]
+                ) / scale,
+            )
+
+            raw_candidates.append(
+                {
+                    "rect": rectangle,
+                    "point": fitz.Point(
+                        (
+                            rectangle.x0
+                            + rectangle.x1
+                        ) / 2,
+                        (
+                            rectangle.y0
+                            + rectangle.y1
+                        ) / 2,
+                    ),
+                    "template_score": score,
+                    "curve_count": 0,
+                    "detection_source": (
+                        "CYAN_FUSE_WAVE_TEMPLATE"
+                    ),
+                }
+            )
+
+    # Non-maximum suppression:
+    # one physical fuse can match multiple template scales.
+    raw_candidates.sort(
+        key=lambda candidate: (
+            -candidate["template_score"],
+            candidate["point"].y,
+            candidate["point"].x,
+        )
     )
 
-    page_width = float(page.rect.width)
-    page_height = float(page.rect.height)
+    selected = []
 
-    candidates = []
-    seen = set()
+    for candidate in raw_candidates:
+        duplicate_found = False
 
-    for contour in contours:
-        x, y, width, height = cv2.boundingRect(
-            contour
-        )
+        for existing in selected:
+            existing_rect = fitz.Rect(
+                existing["rect"]
+            )
 
-        area = cv2.contourArea(contour)
+            # Merge visually overlapping detections.
+            existing_rect.x0 -= 10
+            existing_rect.y0 -= 10
+            existing_rect.x1 += 10
+            existing_rect.y1 += 10
 
-        pdf_x0 = x / scale
-        pdf_y0 = y / scale
-        pdf_x1 = (x + width) / scale
-        pdf_y1 = (y + height) / scale
+            if rectangles_overlap(
+                candidate["rect"],
+                existing_rect,
+            ):
+                duplicate_found = True
+                break
 
-        pdf_width = pdf_x1 - pdf_x0
-        pdf_height = pdf_y1 - pdf_y0
+        if not duplicate_found:
+            selected.append(candidate)
 
-        if pdf_width <= 0 or pdf_height <= 0:
-            continue
-
-        aspect_ratio = pdf_width / max(
-            pdf_height,
-            0.1,
-        )
-
-        # Generic image geometry for a fuse wave:
-        # small, wide, shallow, but not a full conductor.
-        #
-        # These values use proportions/ranges, not drawing-specific
-        # locations or fuse values.
-        if pdf_width < max(5.0, page_width * 0.004):
-            continue
-
-        if pdf_width > page_width * 0.09:
-            continue
-
-        if pdf_height < max(1.0, page_height * 0.001):
-            continue
-
-        if pdf_height > page_height * 0.045:
-            continue
-
-        if aspect_ratio < 1.25:
-            continue
-
-        if area < 3:
-            continue
-
-        rectangle = fitz.Rect(
-            pdf_x0,
-            pdf_y0,
-            pdf_x1,
-            pdf_y1,
-        )
-
-        key = (
-            round(rectangle.x0, 1),
-            round(rectangle.y0, 1),
-            round(rectangle.x1, 1),
-            round(rectangle.y1, 1),
-        )
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-
-        candidates.append(
-            {
-                "rect": rectangle,
-                "point": fitz.Point(
-                    (
-                        rectangle.x0
-                        + rectangle.x1
-                    ) / 2,
-                    (
-                        rectangle.y0
-                        + rectangle.y1
-                    ) / 2,
-                ),
-                "image_area": float(area),
-                "image_aspect_ratio": round(
-                    aspect_ratio,
-                    2,
-                ),
-            }
-        )
-
-    candidates.sort(
+    selected.sort(
         key=lambda candidate: (
             candidate["point"].y,
             candidate["point"].x,
         )
     )
 
-    return candidates
+    return selected
 
-def get_drawing_curve_bounds(
-    drawing: dict,
-    page,
-) -> list[dict]:
-    """
-    Extract only small S/wave-like Bezier curve candidates.
 
-    A Return Channel fuse wave is not a straight line, rectangle,
-    terminal block, or dashed box. It is represented by a short
-    Bezier curve whose control points create visible curvature.
-
-    No Item name, drawing number, location, fuse number, X board
-    identifier, or rack is used here.
-    """
-    candidates = []
-
-    page_scale = max(
-        float(page.rect.width),
-        float(page.rect.height),
-    )
-
-    minimum_width = max(
-        6.0,
-        page_scale * 0.004,
-    )
-
-    maximum_width = min(
-        60.0,
-        page_scale * 0.06,
-    )
-
-    minimum_height = max(
-        2.0,
-        page_scale * 0.0015,
-    )
-
-    maximum_height = min(
-        25.0,
-        page_scale * 0.025,
-    )
-
-    for item in drawing.get("items", []):
-        if not item:
-            continue
-
-        # PyMuPDF "c" is a cubic Bezier curve:
-        #
-        # item[1] = start
-        # item[2] = first control point
-        # item[3] = second control point
-        # item[4] = end
-        if item[0] != "c" or len(item) < 5:
-            continue
-
-        start = fitz.Point(item[1])
-        control_1 = fitz.Point(item[2])
-        control_2 = fitz.Point(item[3])
-        end = fitz.Point(item[4])
-
-        x_values = [
-            start.x,
-            control_1.x,
-            control_2.x,
-            end.x,
-        ]
-
-        y_values = [
-            start.y,
-            control_1.y,
-            control_2.y,
-            end.y,
-        ]
-
-        rectangle = fitz.Rect(
-            min(x_values),
-            min(y_values),
-            max(x_values),
-            max(y_values),
-        )
-
-        width = rectangle.width
-        height = rectangle.height
-
-        if width < minimum_width:
-            continue
-
-        if width > maximum_width:
-            continue
-
-        if height < minimum_height:
-            continue
-
-        if height > maximum_height:
-            continue
-
-        # Fuse-wave curve is normally broadly horizontal.
-        endpoint_vertical_change = abs(
-            end.y - start.y
-        )
-
-        if endpoint_vertical_change > max(
-            5.0,
-            height * 0.75,
-        ):
-            continue
-
-        # Use a baseline between start/end to calculate the signed
-        # curve deflection of each Bezier control point.
-        baseline_y = (
-            start.y + end.y
-        ) / 2
-
-        control_1_offset = (
-            control_1.y - baseline_y
-        )
-
-        control_2_offset = (
-            control_2.y - baseline_y
-        )
-
-        # A real S/wave has significant curve deflection.
-        if (
-            abs(control_1_offset)
-            < minimum_height * 0.30
-        ):
-            continue
-
-        if (
-            abs(control_2_offset)
-            < minimum_height * 0.30
-        ):
-            continue
-
-        # Important:
-        # Fuse wave changes direction around the circuit baseline.
-        # Straight / simple bow curves generally do not satisfy this.
-        has_curvature_change = (
-            control_1_offset
-            * control_2_offset
-            < 0
-        )
-
-        if not has_curvature_change:
-            continue
-
-        aspect_ratio = width / max(height, 0.1)
-
-        if aspect_ratio < 1.1:
-            continue
-
-        candidates.append(
-            {
-                "rect": rectangle,
-                "point": fitz.Point(
-                    (
-                        rectangle.x0
-                        + rectangle.x1
-                    ) / 2,
-                    (
-                        rectangle.y0
-                        + rectangle.y1
-                    ) / 2,
-                ),
-                "curve_count": 1,
-                "curve_width": width,
-                "curve_height": height,
-                "detection_source": "VECTOR_S_WAVE",
-            }
-        )
-
-    return candidates
-
-
-def rect_distance(
-    first: fitz.Rect,
-    second: fitz.Rect,
-) -> float:
-    """
-    Minimum distance between two rectangles.
-
-    Returns zero where the rectangles overlap or touch.
-    """
-    horizontal_distance = max(
-        first.x0 - second.x1,
-        second.x0 - first.x1,
-        0,
-    )
-
-    vertical_distance = max(
-        first.y0 - second.y1,
-        second.y0 - first.y1,
-        0,
-    )
-
-    return math.hypot(
-        horizontal_distance,
-        vertical_distance,
-    )
-
-
-def expand_rect(
-    rectangle: fitz.Rect,
-    padding: float,
-) -> fitz.Rect:
-    return fitz.Rect(
-        rectangle.x0 - padding,
-        rectangle.y0 - padding,
-        rectangle.x1 + padding,
-        rectangle.y1 + padding,
-    )
-
-
-def rect_center(
-    rectangle: fitz.Rect,
-) -> fitz.Point:
-    return fitz.Point(
-        (
-            rectangle.x0
-            + rectangle.x1
-        ) / 2,
-        (
-            rectangle.y0
-            + rectangle.y1
-        ) / 2,
-    )
-
-
-def is_possible_fuse_wave(
-    rectangle: fitz.Rect,
-    page,
-) -> bool:
-    """
-    Identify a small local curved wave shape.
-
-    This is shape-only detection. It does not inspect nearby text.
-
-    A fuse wave is normally:
-      - a small curved vector;
-      - wider than it is tall;
-      - not a large curved drawing boundary;
-      - not a full-page revision cloud.
-
-    Values scale from PDF page dimensions, rather than using any
-    drawing number, Item name, rack ID, location, X board, or fuse
-    number.
-    """
-    page_scale = max(
-        float(page.rect.width),
-        float(page.rect.height),
-    )
-
-    minimum_width = max(
-        3.0,
-        page_scale * 0.002,
-    )
-
-    maximum_width = max(
-        90.0,
-        page_scale * 0.12,
-    )
-
-    minimum_height = max(
-        1.0,
-        page_scale * 0.0008,
-    )
-
-    maximum_height = max(
-        30.0,
-        page_scale * 0.04,
-    )
-
-    if rectangle.width < minimum_width:
-        return False
-
-    if rectangle.width > maximum_width:
-        return False
-
-    if rectangle.height < minimum_height:
-        return False
-
-    if rectangle.height > maximum_height:
-        return False
-
-    aspect_ratio = (
-        rectangle.width
-        / max(rectangle.height, 0.1)
-    )
-
-    # The common fuse wave is wide and shallow.
-    if aspect_ratio < 1.2:
-        return False
-
-    return True
-
-
-
-def fuse_symbol_is_near_current_rating(
-    symbol: dict,
-    words: list[dict],
-    page,
-) -> bool:
-    """
-    A valid fuse-wave should normally have a nearby current rating,
-    such as 100mA.
-
-    This is an additional physical/local validation. It rejects
-    unrelated S-like curves elsewhere in the drawing.
-    """
-    page_scale = max(
-        float(page.rect.width),
-        float(page.rect.height),
-    )
-
-    maximum_distance = max(
-        35.0,
-        min(page_scale * 0.08, 130.0),
-    )
-
-    for word in words:
-        if not CURRENT_RATING_PATTERN.fullmatch(
-            word["value"].upper()
-        ):
-            continue
-
-        if point_distance(
-            symbol["point"],
-            word["point"],
-        ) <= maximum_distance:
-            return True
-
-    return False
 
 
 def detect_fuse_wave_symbols(
     page,
 ) -> list[dict]:
     """
-    Detect only physical wave-shaped fuse symbols.
+    Detect only the real visual wave-fuse symbol.
 
-    Detection requirements:
-      1. Small horizontal cubic Bezier with S-curve direction change.
-      2. Nearby current rating text, for example 100mA.
+    This intentionally uses image-template matching, not generic
+    curve/line/contour matching.
 
-    This intentionally rejects:
-      - straight fuses;
-      - cable/terminal blocks;
-      - rectangles;
-      - dashed revision boundaries;
-      - large merged circuit paths;
-      - ordinary non-fuse curved symbols.
+    Therefore it rejects:
+      - straight fuse links;
+      - terminal blocks;
+      - dashed revision boxes;
+      - ordinary circuit lines;
+      - random Bezier curves;
+      - cable markers.
     """
-    words = get_page_words(page)
-
-    symbols = []
-
-    for drawing in page.get_drawings():
-        for candidate in get_drawing_curve_bounds(
-            drawing,
-            page,
-        ):
-            if not fuse_symbol_is_near_current_rating(
-                candidate,
-                words,
-                page,
-            ):
-                continue
-
-            symbols.append(candidate)
-
-    # Remove physically duplicated curve candidates.
-    symbols.sort(
-        key=lambda symbol: (
-            symbol["point"].y,
-            symbol["point"].x,
-        )
-    )
-
-    unique_symbols = []
-
-    for symbol in symbols:
-        duplicate_found = False
-
-        for existing in unique_symbols:
-            if point_distance(
-                symbol["point"],
-                existing["point"],
-            ) <= 10.0:
-                duplicate_found = True
-                break
-
-        if not duplicate_found:
-            unique_symbols.append(symbol)
-
-    return unique_symbols
+    return get_fuse_wave_image_candidates(page)
 
 
 def words_near_fuse_symbol(
@@ -1710,6 +1509,14 @@ def extract_fuse_candidates(
                 ],
                 "rating_found": rating_found,
                 "confidence": confidence,
+                "template_score": fuse_symbol.get(
+                    "template_score",
+                    0.0,
+                ),
+                "detection_source": fuse_symbol.get(
+                    "detection_source",
+                    "UNKNOWN",
+                ),
                 "fuse_label": local_fuse_number[
                     "source_text"
                 ],
@@ -1734,42 +1541,69 @@ def log_fuse_detection_diagnostics(
     log_callback=None,
 ):
     """
-    Log shape-first fuse detection results.
+    Logs only visual template-matched wave-fuse symbols and resulting
+    local-text fuse candidates.
     """
-    symbols = detect_fuse_wave_symbols(page)
+    wave_symbols = detect_fuse_wave_symbols(page)
 
-    symbol_diagnostics = []
+    wave_diagnostics = []
 
-    for symbol in symbols:
-        symbol_diagnostics.append(
-            (
-                round(symbol["point"].x, 1),
-                round(symbol["point"].y, 1),
-                symbol["curve_count"],
-                (
-                    round(symbol["rect"].width, 1),
-                    round(symbol["rect"].height, 1),
+    for symbol in wave_symbols:
+        wave_diagnostics.append(
+            {
+                "x": round(symbol["point"].x, 1),
+                "y": round(symbol["point"].y, 1),
+                "width": round(
+                    symbol["rect"].width,
+                    1,
                 ),
-            )
+                "height": round(
+                    symbol["rect"].height,
+                    1,
+                ),
+                "score": round(
+                    symbol.get(
+                        "template_score",
+                        0.0,
+                    ),
+                    3,
+                ),
+                "source": symbol.get(
+                    "detection_source",
+                    "UNKNOWN",
+                ),
+            }
         )
 
     candidate_diagnostics = []
 
     for candidate in fuse_candidates:
         candidate_diagnostics.append(
-            (
-                candidate["value"],
-                candidate["fuse_label"],
-                candidate["x_label"],
-                candidate["curve_count"],
-                candidate["rating_found"],
-            )
+            {
+                "value": candidate["value"],
+                "fuse_label": candidate["fuse_label"],
+                "x_label": candidate["x_label"],
+                "rating_found": candidate[
+                    "rating_found"
+                ],
+                "source": candidate.get(
+                    "detection_source",
+                    "UNKNOWN",
+                ),
+                "score": round(
+                    candidate.get(
+                        "template_score",
+                        0.0,
+                    ),
+                    3,
+                ),
+            }
         )
 
     write_log(
         log_callback,
-        "Fuse shape diagnostic: "
-        f"wave_symbols={symbol_diagnostics}; "
+        "Fuse image diagnostic: "
+        f"wave_symbols={wave_diagnostics}; "
         f"fuse_candidates={candidate_diagnostics}.",
         "DEBUG",
     )
@@ -2400,7 +2234,7 @@ def create_debug_image(
 
     if selected_fuses:
         fuse_shape.finish(
-            color=(1.0, 0.45, 0.0),
+            color=(1.0, 0.0, 0.0),
             width=1.6,
             stroke_opacity=1.0,
         )
@@ -2441,6 +2275,11 @@ def extract_pdf(
         for page_index, page in enumerate(document):
             page_number = page_index + 1
             page_start = time.perf_counter()
+
+            if page_number == 1:
+                log_fuse_template_status(
+                    log_callback=log_callback,
+                )
 
             if progress_callback is not None:
                 progress_callback(
