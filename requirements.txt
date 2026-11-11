@@ -9,3 +9,4 @@ opencv-python-headless
 numpy
 python-calamine
 xlrd
+opencv-python-headless
