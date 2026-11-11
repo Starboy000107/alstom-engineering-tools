@@ -2027,9 +2027,10 @@ def create_return_channel_rows(
     fuse_candidates: list[dict],
     green_segments: list[dict],
     log_callback=None,
-) -> tuple[list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict]]:
     rows = []
     debug_terminals = []
+    debug_fuses = []
 
     equipment_labels = find_equipment_label_points(
         page
@@ -2096,6 +2097,14 @@ def create_return_channel_rows(
                 used_fuse_candidate_ids,
             )
         )
+
+        # Only fuses selected for the final checklist row are shown
+        # on the debug image. Do not show all template candidates.
+        if ns_rack_fuse is not None:
+            debug_fuses.append(ns_rack_fuse)
+
+        if ixl_fuse is not None:
+            debug_fuses.append(ixl_fuse)
 
         fuse_text, fuse_review_required = (
             build_fuse_text(
@@ -2171,7 +2180,33 @@ def create_return_channel_rows(
             "DEBUG",
         )
 
-    return rows, debug_terminals
+    # Remove physically duplicated fuse boxes.
+    unique_debug_fuses = []
+    seen_fuse_positions = set()
+
+    for fuse in debug_fuses:
+        fuse_point = fuse.get("point")
+
+        if fuse_point is None:
+            continue
+
+        key = (
+            round(fuse_point.x, 1),
+            round(fuse_point.y, 1),
+            fuse.get("value", ""),
+        )
+
+        if key in seen_fuse_positions:
+            continue
+
+        seen_fuse_positions.add(key)
+        unique_debug_fuses.append(fuse)
+
+    return (
+        rows,
+        debug_terminals,
+        unique_debug_fuses,
+    )
 
 
 # ---------------------------------------------------------------------
@@ -2429,14 +2464,6 @@ def extract_pdf(
                 # Do not create a candidate row merely because a page title says
                 # RETURN CHANNEL and it contains terminals.
                 if len(fuse_candidates) < 2:
-                    # Generate a debug image even for skipped pages. This lets you
-                    # inspect red boxes around whatever fuse candidates were found.
-                    debug_images[page_number] = create_debug_image(
-                        page,
-                        [],
-                        fuse_candidates,
-                    )
-
                     write_log(
                         log_callback,
                         f"Page {page_number}: skipped; "
@@ -2473,15 +2500,17 @@ def extract_pdf(
                     )
                     continue
 
-                rows, debug_terminals = (
-                    create_return_channel_rows(
-                        page,
-                        item_labels,
-                        terminal_pairs,
-                        fuse_candidates,
-                        green_segments,
-                        log_callback=log_callback,
-                    )
+                (
+                    rows,
+                    debug_terminals,
+                    debug_fuses,
+                ) = create_return_channel_rows(
+                    page,
+                    item_labels,
+                    terminal_pairs,
+                    fuse_candidates,
+                    green_segments,
+                    log_callback=log_callback,
                 )
 
                 if rows:
@@ -2489,7 +2518,7 @@ def extract_pdf(
                         create_debug_image(
                             page,
                             debug_terminals,
-                            fuse_candidates,
+                            debug_fuses,
                         )
                     )
 
