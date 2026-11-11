@@ -978,47 +978,75 @@ def get_fuse_wave_image_candidates(
 
 def get_drawing_curve_bounds(
     drawing: dict,
-) -> list[fitz.Rect]:
+    page,
+) -> list[dict]:
     """
-    Return bounding boxes for curved PDF vector primitives.
+    Extract only small S/wave-like Bezier curve candidates.
 
-    The fuse shown in the drawings is a small wave / sine-like shape.
-    In native PDFs this is commonly represented by one or more Bezier
-    curve primitives, item type "c".
+    A Return Channel fuse wave is not a straight line, rectangle,
+    terminal block, or dashed box. It is represented by a short
+    Bezier curve whose control points create visible curvature.
 
-    This function does not use fuse text, Item names, drawing numbers,
-    locations, X board values, or fuse values.
+    No Item name, drawing number, location, fuse number, X board
+    identifier, or rack is used here.
     """
-    curve_bounds = []
+    candidates = []
+
+    page_scale = max(
+        float(page.rect.width),
+        float(page.rect.height),
+    )
+
+    minimum_width = max(
+        6.0,
+        page_scale * 0.004,
+    )
+
+    maximum_width = min(
+        60.0,
+        page_scale * 0.06,
+    )
+
+    minimum_height = max(
+        2.0,
+        page_scale * 0.0015,
+    )
+
+    maximum_height = min(
+        25.0,
+        page_scale * 0.025,
+    )
 
     for item in drawing.get("items", []):
         if not item:
             continue
 
-        item_type = item[0]
-
-        # PyMuPDF Bezier curve primitive.
-        if item_type != "c":
+        # PyMuPDF "c" is a cubic Bezier curve:
+        #
+        # item[1] = start
+        # item[2] = first control point
+        # item[3] = second control point
+        # item[4] = end
+        if item[0] != "c" or len(item) < 5:
             continue
 
-        if len(item) < 5:
-            continue
-
-        points = [
-            fitz.Point(item[1]),
-            fitz.Point(item[2]),
-            fitz.Point(item[3]),
-            fitz.Point(item[4]),
-        ]
+        start = fitz.Point(item[1])
+        control_1 = fitz.Point(item[2])
+        control_2 = fitz.Point(item[3])
+        end = fitz.Point(item[4])
 
         x_values = [
-            point.x
-            for point in points
+            start.x,
+            control_1.x,
+            control_2.x,
+            end.x,
         ]
 
         y_values = [
-            point.y
-            for point in points
+            start.y,
+            control_1.y,
+            control_2.y,
+            end.y,
         ]
 
         rectangle = fitz.Rect(
@@ -1028,12 +1056,97 @@ def get_drawing_curve_bounds(
             max(y_values),
         )
 
-        if rectangle.width <= 0 or rectangle.height <= 0:
+        width = rectangle.width
+        height = rectangle.height
+
+        if width < minimum_width:
             continue
 
-        curve_bounds.append(rectangle)
+        if width > maximum_width:
+            continue
 
-    return curve_bounds
+        if height < minimum_height:
+            continue
+
+        if height > maximum_height:
+            continue
+
+        # Fuse-wave curve is normally broadly horizontal.
+        endpoint_vertical_change = abs(
+            end.y - start.y
+        )
+
+        if endpoint_vertical_change > max(
+            5.0,
+            height * 0.75,
+        ):
+            continue
+
+        # Use a baseline between start/end to calculate the signed
+        # curve deflection of each Bezier control point.
+        baseline_y = (
+            start.y + end.y
+        ) / 2
+
+        control_1_offset = (
+            control_1.y - baseline_y
+        )
+
+        control_2_offset = (
+            control_2.y - baseline_y
+        )
+
+        # A real S/wave has significant curve deflection.
+        if (
+            abs(control_1_offset)
+            < minimum_height * 0.30
+        ):
+            continue
+
+        if (
+            abs(control_2_offset)
+            < minimum_height * 0.30
+        ):
+            continue
+
+        # Important:
+        # Fuse wave changes direction around the circuit baseline.
+        # Straight / simple bow curves generally do not satisfy this.
+        has_curvature_change = (
+            control_1_offset
+            * control_2_offset
+            < 0
+        )
+
+        if not has_curvature_change:
+            continue
+
+        aspect_ratio = width / max(height, 0.1)
+
+        if aspect_ratio < 1.1:
+            continue
+
+        candidates.append(
+            {
+                "rect": rectangle,
+                "point": fitz.Point(
+                    (
+                        rectangle.x0
+                        + rectangle.x1
+                    ) / 2,
+                    (
+                        rectangle.y0
+                        + rectangle.y1
+                    ) / 2,
+                ),
+                "curve_count": 1,
+                "curve_width": width,
+                "curve_height": height,
+                "detection_source": "VECTOR_S_WAVE",
+            }
+        )
+
+    return candidates
 
 
 def rect_distance(
@@ -1158,143 +1271,105 @@ def is_possible_fuse_wave(
     return True
 
 
-def cluster_fuse_wave_rectangles(
-    wave_rectangles: list[fitz.Rect],
+
+def fuse_symbol_is_near_current_rating(
+    symbol: dict,
+    words: list[dict],
     page,
-) -> list[dict]:
+) -> bool:
     """
-    Group adjacent curved vector elements into individual fuse-wave
-    symbol regions.
+    A valid fuse-wave should normally have a nearby current rating,
+    such as 100mA.
 
-    A single wave symbol can be stored as several small Bezier curves.
-    This joins close curves into one physical candidate.
-
-    No text is used here.
+    This is an additional physical/local validation. It rejects
+    unrelated S-like curves elsewhere in the drawing.
     """
-    if not wave_rectangles:
-        return []
-
     page_scale = max(
         float(page.rect.width),
         float(page.rect.height),
     )
 
-    join_distance = max(
-        8.0,
-        min(page_scale * 0.02, 35.0),
+    maximum_distance = max(
+        35.0,
+        min(page_scale * 0.08, 130.0),
     )
 
-    remaining = list(wave_rectangles)
-    clusters = []
-
-    while remaining:
-        first = remaining.pop(0)
-
-        cluster = [first]
-        changed = True
-
-        while changed:
-            changed = False
-
-            combined = fitz.Rect(cluster[0])
-
-            for rectangle in cluster[1:]:
-                combined |= rectangle
-
-            next_remaining = []
-
-            for candidate in remaining:
-                if (
-                    rect_distance(
-                        combined,
-                        candidate,
-                    )
-                    <= join_distance
-                ):
-                    cluster.append(candidate)
-                    changed = True
-                else:
-                    next_remaining.append(candidate)
-
-            remaining = next_remaining
-
-        cluster_rect = fitz.Rect(cluster[0])
-
-        for rectangle in cluster[1:]:
-            cluster_rect |= rectangle
-
-        if not is_possible_fuse_wave(
-            cluster_rect,
-            page,
+    for word in words:
+        if not CURRENT_RATING_PATTERN.fullmatch(
+            word["value"].upper()
         ):
             continue
 
-        clusters.append(
-            {
-                "rect": cluster_rect,
-                "point": rect_center(cluster_rect),
-                "curve_count": len(cluster),
-            }
-        )
+        if point_distance(
+            symbol["point"],
+            word["point"],
+        ) <= maximum_distance:
+            return True
 
-    return clusters
+    return False
 
 
 def detect_fuse_wave_symbols(
     page,
 ) -> list[dict]:
     """
-    Detect physical fuse-wave symbols.
+    Detect only physical wave-shaped fuse symbols.
 
-    First attempt native PDF vector curve detection.
-    If no suitable fuse waves are found, use raster/image recognition.
+    Detection requirements:
+      1. Small horizontal cubic Bezier with S-curve direction change.
+      2. Nearby current rating text, for example 100mA.
 
-    This prevents dependence on a specific PDF representation:
-      - native Bezier curves;
-      - line/path fragments;
-      - image-rendered symbols.
+    This intentionally rejects:
+      - straight fuses;
+      - cable/terminal blocks;
+      - rectangles;
+      - dashed revision boundaries;
+      - large merged circuit paths;
+      - ordinary non-fuse curved symbols.
     """
-    curve_rectangles = []
+    words = get_page_words(page)
+
+    symbols = []
 
     for drawing in page.get_drawings():
-        drawing_rect = drawing.get("rect")
-
-        if drawing_rect is None:
-            continue
-
-        if (
-            drawing_rect.width
-            > page.rect.width * 0.70
-            and drawing_rect.height
-            > page.rect.height * 0.20
+        for candidate in get_drawing_curve_bounds(
+            drawing,
+            page,
         ):
-            continue
+            if not fuse_symbol_is_near_current_rating(
+                candidate,
+                words,
+                page,
+            ):
+                continue
 
-        curve_rectangles.extend(
-            get_drawing_curve_bounds(drawing)
+            symbols.append(candidate)
+
+    # Remove physically duplicated curve candidates.
+    symbols.sort(
+        key=lambda symbol: (
+            symbol["point"].y,
+            symbol["point"].x,
         )
-
-    vector_symbols = cluster_fuse_wave_rectangles(
-        curve_rectangles,
-        page,
     )
 
-    # Native vector symbols are preferred when available.
-    if vector_symbols:
-        for symbol in vector_symbols:
-            symbol["detection_source"] = "VECTOR"
+    unique_symbols = []
 
-        return vector_symbols
+    for symbol in symbols:
+        duplicate_found = False
 
-    image_symbols = get_fuse_wave_image_candidates(
-        page
-    )
+        for existing in unique_symbols:
+            if point_distance(
+                symbol["point"],
+                existing["point"],
+            ) <= 10.0:
+                duplicate_found = True
+                break
 
-    for symbol in image_symbols:
-        symbol["curve_count"] = 0
-        symbol["detection_source"] = "IMAGE"
+        if not duplicate_found:
+            unique_symbols.append(symbol)
 
-    return image_symbols
+    return unique_symbols
 
 
 def words_near_fuse_symbol(
@@ -1303,12 +1378,12 @@ def words_near_fuse_symbol(
     page,
 ) -> list[dict]:
     """
-    Return text physically near one fuse-wave symbol.
+    Return text in the immediate local neighbourhood of a validated
+    fuse wave.
 
-    This is called only AFTER fuse shape detection.
-
-    The local search region is scaled by page size. It includes the
-    number label, X board identifier and rating around the fuse symbol.
+    A narrow local region prevents text from a nearby straight fuse,
+    terminal block or separate circuit from being assigned to this
+    wave symbol.
     """
     page_scale = max(
         float(page.rect.width),
@@ -1316,13 +1391,13 @@ def words_near_fuse_symbol(
     )
 
     horizontal_padding = max(
-        55.0,
-        min(page_scale * 0.10, 180.0),
+        25.0,
+        min(page_scale * 0.045, 75.0),
     )
 
     vertical_padding = max(
-        45.0,
-        min(page_scale * 0.08, 140.0),
+        20.0,
+        min(page_scale * 0.035, 55.0),
     )
 
     search_rect = fitz.Rect(
@@ -1335,9 +1410,7 @@ def words_near_fuse_symbol(
     nearby_words = []
 
     for word in words:
-        point = word["point"]
-
-        if search_rect.contains(point):
+        if search_rect.contains(word["point"]):
             nearby_words.append(word)
 
     return nearby_words
@@ -1597,6 +1670,16 @@ def extract_fuse_candidates(
         if local_x_terminal is None:
             continue
 
+        rating_found = local_fuse_has_current_rating(
+            nearby_words
+        )
+
+        # A valid fuse candidate must be the actual wave symbol and have
+        # local fuse number, local X board reference, and local current
+        # rating. This prevents detection of straight/ordinary links.
+        if not rating_found:
+            continue
+
         fuse_value = (
             f"X{local_x_terminal['number']}."
             f"f{local_fuse_number['number']}"
@@ -1613,17 +1696,9 @@ def extract_fuse_candidates(
 
         seen.add(key)
 
-        rating_found = local_fuse_has_current_rating(
-            nearby_words
-        )
-
-        confidence = 1
-
-        if fuse_symbol["curve_count"] >= 1:
-            confidence += 2
-
-        if rating_found:
-            confidence += 1
+        # All accepted candidates have:
+        # S-wave geometry + current rating + #/F number + X board.
+        confidence = 4
 
         candidates.append(
             {
