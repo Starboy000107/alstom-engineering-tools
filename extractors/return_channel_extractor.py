@@ -50,12 +50,12 @@ ITEM_PATTERN = re.compile(
 )
 
 FUSE_NUMBER_PATTERN = re.compile(
-    r"^\s*#\s*(?P<number>\d+)\s*$",
+    r"^\s*(?:#|F)\s*(?P<number>\d+)\s*$",
     re.IGNORECASE,
 )
 
 X_TERMINAL_PATTERN = re.compile(
-    r"^\s*X\s*(?P<number>\d+)\s*$",
+    r"^\s*X\s*[-.:]?\s*(?P<number>\d+)\s*$",
     re.IGNORECASE,
 )
 
@@ -76,15 +76,6 @@ IXL_CUBICLE_PATTERN = re.compile(
     r"\b",
     re.IGNORECASE,
 )
-
-
-# ---------------------------------------------------------------------
-# Controlled normalisation
-# ---------------------------------------------------------------------
-
-DRAWING_SEGMENT_ALIASES = {
-    "ATL": "ALT",
-}
 
 
 # ---------------------------------------------------------------------
@@ -238,18 +229,7 @@ def format_lines(
 def normalise_drawing_number(
     drawing_number: str,
 ) -> str:
-    if not drawing_number:
-        return ""
-
-    parts = drawing_number.upper().strip().split("/")
-
-    return "/".join(
-        DRAWING_SEGMENT_ALIASES.get(
-            part,
-            part,
-        )
-        for part in parts
-    )
+    return str(drawing_number).upper().strip()
 
 
 # ---------------------------------------------------------------------
@@ -787,410 +767,662 @@ def get_green_segments(
 
     return segments
 
+# ---------------------------------------------------------------------
+# Fuse extraction
+# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Fuse symbol detection: shape first, text second
+# ---------------------------------------------------------------------
 
-def get_wave_segments(
+def get_drawing_curve_bounds(
+    drawing: dict,
+) -> list[fitz.Rect]:
+    """
+    Return bounding boxes for curved PDF vector primitives.
+
+    The fuse shown in the drawings is a small wave / sine-like shape.
+    In native PDFs this is commonly represented by one or more Bezier
+    curve primitives, item type "c".
+
+    This function does not use fuse text, Item names, drawing numbers,
+    locations, X board values, or fuse values.
+    """
+    curve_bounds = []
+
+    for item in drawing.get("items", []):
+        if not item:
+            continue
+
+        item_type = item[0]
+
+        # PyMuPDF Bezier curve primitive.
+        if item_type != "c":
+            continue
+
+        if len(item) < 5:
+            continue
+
+        points = [
+            fitz.Point(item[1]),
+            fitz.Point(item[2]),
+            fitz.Point(item[3]),
+            fitz.Point(item[4]),
+        ]
+
+        x_values = [
+            point.x
+            for point in points
+        ]
+
+        y_values = [
+            point.y
+            for point in points
+        ]
+
+        rectangle = fitz.Rect(
+            min(x_values),
+            min(y_values),
+            max(x_values),
+            max(y_values),
+        )
+
+        if rectangle.width <= 0 or rectangle.height <= 0:
+            continue
+
+        curve_bounds.append(rectangle)
+
+    return curve_bounds
+
+
+def rect_distance(
+    first: fitz.Rect,
+    second: fitz.Rect,
+) -> float:
+    """
+    Minimum distance between two rectangles.
+
+    Returns zero where the rectangles overlap or touch.
+    """
+    horizontal_distance = max(
+        first.x0 - second.x1,
+        second.x0 - first.x1,
+        0,
+    )
+
+    vertical_distance = max(
+        first.y0 - second.y1,
+        second.y0 - first.y1,
+        0,
+    )
+
+    return math.hypot(
+        horizontal_distance,
+        vertical_distance,
+    )
+
+
+def expand_rect(
+    rectangle: fitz.Rect,
+    padding: float,
+) -> fitz.Rect:
+    return fitz.Rect(
+        rectangle.x0 - padding,
+        rectangle.y0 - padding,
+        rectangle.x1 + padding,
+        rectangle.y1 + padding,
+    )
+
+
+def rect_center(
+    rectangle: fitz.Rect,
+) -> fitz.Point:
+    return fitz.Point(
+        (
+            rectangle.x0
+            + rectangle.x1
+        ) / 2,
+        (
+            rectangle.y0
+            + rectangle.y1
+        ) / 2,
+    )
+
+
+def is_possible_fuse_wave(
+    rectangle: fitz.Rect,
+    page,
+) -> bool:
+    """
+    Identify a small local curved wave shape.
+
+    This is shape-only detection. It does not inspect nearby text.
+
+    A fuse wave is normally:
+      - a small curved vector;
+      - wider than it is tall;
+      - not a large curved drawing boundary;
+      - not a full-page revision cloud.
+
+    Values scale from PDF page dimensions, rather than using any
+    drawing number, Item name, rack ID, location, X board, or fuse
+    number.
+    """
+    page_scale = max(
+        float(page.rect.width),
+        float(page.rect.height),
+    )
+
+    minimum_width = max(
+        3.0,
+        page_scale * 0.002,
+    )
+
+    maximum_width = max(
+        90.0,
+        page_scale * 0.12,
+    )
+
+    minimum_height = max(
+        1.0,
+        page_scale * 0.0008,
+    )
+
+    maximum_height = max(
+        30.0,
+        page_scale * 0.04,
+    )
+
+    if rectangle.width < minimum_width:
+        return False
+
+    if rectangle.width > maximum_width:
+        return False
+
+    if rectangle.height < minimum_height:
+        return False
+
+    if rectangle.height > maximum_height:
+        return False
+
+    aspect_ratio = (
+        rectangle.width
+        / max(rectangle.height, 0.1)
+    )
+
+    # The common fuse wave is wide and shallow.
+    if aspect_ratio < 1.2:
+        return False
+
+    return True
+
+
+def cluster_fuse_wave_rectangles(
+    wave_rectangles: list[fitz.Rect],
     page,
 ) -> list[dict]:
     """
-    Return vector segments likely to belong to fuse-wave symbols.
+    Group adjacent curved vector elements into individual fuse-wave
+    symbol regions.
 
-    Fuse-wave symbols are usually small black curved paths. This does
-    not assume a fixed fuse number, X reference, location, drawing,
-    or Item. It identifies small curved vector objects near fuse text.
+    A single wave symbol can be stored as several small Bezier curves.
+    This joins close curves into one physical candidate.
+
+    No text is used here.
     """
-    segments = []
-
-    for drawing in page.get_drawings():
-        colour = drawing.get("color")
-
-        hsv = rgb_to_hsv(colour)
-
-        if hsv is not None:
-            _, saturation, value = hsv
-
-            # Ignore strongly coloured revision/circuit lines.
-            if saturation > 0.20 and value > 0.20:
-                continue
-
-        for item in drawing.get("items", []):
-            for start, end, segment_type in (
-                drawing_item_to_segments(item)
-            ):
-                if segment_type != "curve":
-                    continue
-
-                length = point_distance(start, end)
-
-                # Fuse waves are normally local/small curves.
-                if length < 2.0 or length > 100.0:
-                    continue
-
-                segments.append(
-                    {
-                        "start": start,
-                        "end": end,
-                    }
-                )
-
-    return segments
-
-
-def count_wave_segments_near_point(
-    point: fitz.Point,
-    wave_segments: list[dict],
-    maximum_distance: float,
-) -> int:
-    count = 0
-
-    for segment in wave_segments:
-        distance = point_to_segment_distance(
-            point,
-            segment["start"],
-            segment["end"],
-        )
-
-        if distance <= maximum_distance:
-            count += 1
-
-    return count
-
-
-# ---------------------------------------------------------------------
-# Fuse extraction from local symbol groups
-# ---------------------------------------------------------------------
-
-def extract_fuse_number_words(
-    words: list[dict],
-) -> list[dict]:
-    fuse_numbers = []
-    seen = set()
-
-    for index, word in enumerate(words):
-        value = word["value"].upper()
-
-        match = FUSE_NUMBER_PATTERN.fullmatch(value)
-
-        if match:
-            number = int(match.group("number"))
-
-            key = (
-                number,
-                round(word["x_center"], 1),
-                round(word["y_center"], 1),
-            )
-
-            if key not in seen:
-                seen.add(key)
-
-                fuse_numbers.append(
-                    {
-                        "number": number,
-                        "point": word["point"],
-                    }
-                )
-
-            continue
-
-        # Supports PDFs that split "#7" into separate "#", "7" words.
-        if value != "#":
-            continue
-
-        if index + 1 >= len(words):
-            continue
-
-        next_word = words[index + 1]
-
-        if abs(
-            next_word["y_center"]
-            - word["y_center"]
-        ) > 12:
-            continue
-
-        if (
-            next_word["x0"]
-            - word["x1"]
-        ) > 30:
-            continue
-
-        if not next_word["value"].isdigit():
-            continue
-
-        number = int(next_word["value"])
-
-        point = fitz.Point(
-            (
-                word["x0"]
-                + next_word["x1"]
-            ) / 2,
-            (
-                word["y_center"]
-                + next_word["y_center"]
-            ) / 2,
-        )
-
-        key = (
-            number,
-            round(point.x, 1),
-            round(point.y, 1),
-        )
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-
-        fuse_numbers.append(
-            {
-                "number": number,
-                "point": point,
-            }
-        )
-
-    return fuse_numbers
-
-
-def extract_x_terminal_words(
-    words: list[dict],
-) -> list[dict]:
-    x_terminals = []
-    seen = set()
-
-    for index, word in enumerate(words):
-        value = word["value"].upper()
-
-        match = X_TERMINAL_PATTERN.fullmatch(value)
-
-        if match:
-            number = int(match.group("number"))
-
-            key = (
-                number,
-                round(word["x_center"], 1),
-                round(word["y_center"], 1),
-            )
-
-            if key not in seen:
-                seen.add(key)
-
-                x_terminals.append(
-                    {
-                        "number": number,
-                        "point": word["point"],
-                    }
-                )
-
-            continue
-
-        # Supports "X", "3" as separate words.
-        if value != "X":
-            continue
-
-        if index + 1 >= len(words):
-            continue
-
-        next_word = words[index + 1]
-
-        if abs(
-            next_word["y_center"]
-            - word["y_center"]
-        ) > 12:
-            continue
-
-        if (
-            next_word["x0"]
-            - word["x1"]
-        ) > 30:
-            continue
-
-        if not next_word["value"].isdigit():
-            continue
-
-        number = int(next_word["value"])
-
-        point = fitz.Point(
-            (
-                word["x0"]
-                + next_word["x1"]
-            ) / 2,
-            (
-                word["y_center"]
-                + next_word["y_center"]
-            ) / 2,
-        )
-
-        key = (
-            number,
-            round(point.x, 1),
-            round(point.y, 1),
-        )
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-
-        x_terminals.append(
-            {
-                "number": number,
-                "point": point,
-            }
-        )
-
-    return x_terminals
-
-
-def get_current_rating_points(
-    words: list[dict],
-) -> list[fitz.Point]:
-    points = []
-
-    for word in words:
-        if CURRENT_RATING_PATTERN.fullmatch(
-            word["value"].upper()
-        ):
-            points.append(word["point"])
-
-    return points
-
-
-def extract_fuse_candidates(
-    page,
-) -> list[dict]:
-    """
-    Build fuse candidates from a local physical cluster:
-
-        #<fuse number>
-        + X<terminal block number>
-        + optional current rating such as 100mA
-        + nearby fuse-wave vector geometry where available.
-
-    Example local group:
-
-        #7
-        B24
-        X3
-        100mA
-
-    becomes:
-
-        X3.f7
-    """
-    words = get_page_words(page)
-
-    fuse_numbers = extract_fuse_number_words(words)
-    x_terminals = extract_x_terminal_words(words)
-    rating_points = get_current_rating_points(words)
-    wave_segments = get_wave_segments(page)
-
-    candidates = []
-    seen = set()
+    if not wave_rectangles:
+        return []
 
     page_scale = max(
         float(page.rect.width),
         float(page.rect.height),
     )
 
-    maximum_fuse_x_distance = max(
-        35.0,
+    join_distance = max(
+        8.0,
+        min(page_scale * 0.02, 35.0),
+    )
+
+    remaining = list(wave_rectangles)
+    clusters = []
+
+    while remaining:
+        first = remaining.pop(0)
+
+        cluster = [first]
+        changed = True
+
+        while changed:
+            changed = False
+
+            combined = fitz.Rect(cluster[0])
+
+            for rectangle in cluster[1:]:
+                combined |= rectangle
+
+            next_remaining = []
+
+            for candidate in remaining:
+                if (
+                    rect_distance(
+                        combined,
+                        candidate,
+                    )
+                    <= join_distance
+                ):
+                    cluster.append(candidate)
+                    changed = True
+                else:
+                    next_remaining.append(candidate)
+
+            remaining = next_remaining
+
+        cluster_rect = fitz.Rect(cluster[0])
+
+        for rectangle in cluster[1:]:
+            cluster_rect |= rectangle
+
+        if not is_possible_fuse_wave(
+            cluster_rect,
+            page,
+        ):
+            continue
+
+        clusters.append(
+            {
+                "rect": cluster_rect,
+                "point": rect_center(cluster_rect),
+                "curve_count": len(cluster),
+            }
+        )
+
+    return clusters
+
+
+def detect_fuse_wave_symbols(
+    page,
+) -> list[dict]:
+    """
+    Detect physical fuse-wave symbols from PDF vector geometry first.
+
+    The result contains only symbol locations. No # number, X board,
+    Item, drawing number or location is used in this stage.
+    """
+    curve_rectangles = []
+
+    for drawing in page.get_drawings():
+        drawing_rect = drawing.get("rect")
+
+        if drawing_rect is None:
+            continue
+
+        # Ignore very large vector objects early.
+        if (
+            drawing_rect.width
+            > page.rect.width * 0.70
+            and drawing_rect.height
+            > page.rect.height * 0.20
+        ):
+            continue
+
+        curve_rectangles.extend(
+            get_drawing_curve_bounds(drawing)
+        )
+
+    return cluster_fuse_wave_rectangles(
+        curve_rectangles,
+        page,
+    )
+
+
+def words_near_fuse_symbol(
+    words: list[dict],
+    fuse_symbol: dict,
+    page,
+) -> list[dict]:
+    """
+    Return text physically near one fuse-wave symbol.
+
+    This is called only AFTER fuse shape detection.
+
+    The local search region is scaled by page size. It includes the
+    number label, X board identifier and rating around the fuse symbol.
+    """
+    page_scale = max(
+        float(page.rect.width),
+        float(page.rect.height),
+    )
+
+    horizontal_padding = max(
+        55.0,
         min(page_scale * 0.10, 180.0),
     )
 
-    maximum_fuse_y_distance = max(
-        25.0,
-        min(page_scale * 0.05, 80.0),
+    vertical_padding = max(
+        45.0,
+        min(page_scale * 0.08, 140.0),
     )
 
-    for fuse_number in fuse_numbers:
-        for x_terminal in x_terminals:
-            horizontal_distance = abs(
-                fuse_number["point"].x
-                - x_terminal["point"].x
-            )
+    search_rect = fitz.Rect(
+        fuse_symbol["rect"].x0 - horizontal_padding,
+        fuse_symbol["rect"].y0 - vertical_padding,
+        fuse_symbol["rect"].x1 + horizontal_padding,
+        fuse_symbol["rect"].y1 + vertical_padding,
+    )
 
-            vertical_distance = abs(
-                fuse_number["point"].y
-                - x_terminal["point"].y
-            )
+    nearby_words = []
 
-            if horizontal_distance > maximum_fuse_x_distance:
+    for word in words:
+        point = word["point"]
+
+        if search_rect.contains(point):
+            nearby_words.append(word)
+
+    return nearby_words
+
+
+def extract_local_fuse_number(
+    nearby_words: list[dict],
+    fuse_point: fitz.Point,
+) -> dict | None:
+    """
+    Extract the nearest #number / Fnumber near a detected fuse symbol.
+    """
+    candidates = []
+
+    for index, word in enumerate(nearby_words):
+        value = word["value"].upper().strip()
+
+        match = FUSE_NUMBER_PATTERN.fullmatch(value)
+
+        if match:
+            candidates.append(
+                {
+                    "number": int(
+                        match.group("number")
+                    ),
+                    "point": word["point"],
+                    "source_text": word["value"],
+                }
+            )
+            continue
+
+        # Supports separate words:
+        # "#" + "7"
+        # "F" + "7"
+        if value not in {"#", "F"}:
+            continue
+
+        for next_index in range(
+            index + 1,
+            min(index + 4, len(nearby_words)),
+        ):
+            next_word = nearby_words[next_index]
+
+            if abs(
+                word["y_center"]
+                - next_word["y_center"]
+            ) > 18:
                 continue
 
-            if vertical_distance > maximum_fuse_y_distance:
+            if (
+                next_word["x0"]
+                - word["x1"]
+            ) > 40:
+                break
+
+            next_value = next_word["value"].strip()
+
+            if not next_value.isdigit():
                 continue
 
-            centre = fitz.Point(
+            point = fitz.Point(
                 (
-                    fuse_number["point"].x
-                    + x_terminal["point"].x
+                    word["x0"]
+                    + next_word["x1"]
                 ) / 2,
                 (
-                    fuse_number["point"].y
-                    + x_terminal["point"].y
+                    word["y_center"]
+                    + next_word["y_center"]
                 ) / 2,
             )
-
-            wave_count = count_wave_segments_near_point(
-                centre,
-                wave_segments,
-                maximum_distance=max(
-                    20.0,
-                    min(page_scale * 0.03, 60.0),
-                ),
-            )
-
-            rating_found = False
-
-            for rating_point in rating_points:
-                if point_distance(
-                    centre,
-                    rating_point,
-                ) <= max(
-                    30.0,
-                    min(page_scale * 0.08, 130.0),
-                ):
-                    rating_found = True
-                    break
-
-            fuse_value = (
-                f"X{x_terminal['number']}."
-                f"f{fuse_number['number']}"
-            )
-
-            key = (
-                fuse_value,
-                round(centre.x, 1),
-                round(centre.y, 1),
-            )
-
-            if key in seen:
-                continue
-
-            seen.add(key)
-
-            # The wave and rating are evidence scores. A valid native
-            # PDF may not represent the symbol as a Bezier curve, so
-            # lack of curve evidence is not an automatic rejection.
-            confidence = 0
-
-            if wave_count:
-                confidence += 2
-
-            if rating_found:
-                confidence += 1
 
             candidates.append(
                 {
-                    "value": fuse_value,
-                    "point": centre,
-                    "wave_count": wave_count,
-                    "rating_found": rating_found,
-                    "confidence": confidence,
+                    "number": int(next_value),
+                    "point": point,
+                    "source_text": (
+                        f"{word['value']}"
+                        f"{next_word['value']}"
+                    ),
                 }
             )
 
+            break
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda candidate: point_distance(
+            candidate["point"],
+            fuse_point,
+        )
+    )
+
+    return candidates[0]
+
+
+def extract_local_x_terminal(
+    nearby_words: list[dict],
+    fuse_point: fitz.Point,
+) -> dict | None:
+    """
+    Extract nearest X<number> terminal-board label near the fuse wave.
+
+    Supports:
+      X1
+      X 1
+      X-1
+      X.1
+    """
+    candidates = []
+
+    for index, word in enumerate(nearby_words):
+        value = word["value"].upper().strip()
+
+        match = X_TERMINAL_PATTERN.fullmatch(value)
+
+        if match:
+            candidates.append(
+                {
+                    "number": int(
+                        match.group("number")
+                    ),
+                    "point": word["point"],
+                    "source_text": word["value"],
+                }
+            )
+            continue
+
+        if value != "X":
+            continue
+
+        for next_index in range(
+            index + 1,
+            min(index + 4, len(nearby_words)),
+        ):
+            next_word = nearby_words[next_index]
+
+            if abs(
+                word["y_center"]
+                - next_word["y_center"]
+            ) > 18:
+                continue
+
+            if (
+                next_word["x0"]
+                - word["x1"]
+            ) > 40:
+                break
+
+            next_value = next_word["value"].strip()
+
+            if not next_value.isdigit():
+                continue
+
+            point = fitz.Point(
+                (
+                    word["x0"]
+                    + next_word["x1"]
+                ) / 2,
+                (
+                    word["y_center"]
+                    + next_word["y_center"]
+                ) / 2,
+            )
+
+            candidates.append(
+                {
+                    "number": int(next_value),
+                    "point": point,
+                    "source_text": (
+                        f"{word['value']}"
+                        f"{next_word['value']}"
+                    ),
+                }
+            )
+
+            break
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda candidate: point_distance(
+            candidate["point"],
+            fuse_point,
+        )
+    )
+
+    return candidates[0]
+
+
+def local_fuse_has_current_rating(
+    nearby_words: list[dict],
+) -> bool:
+    """
+    Current rating such as 100mA is validation evidence for a fuse
+    symbol. It is not needed to construct the fuse value.
+    """
+    for word in nearby_words:
+        if CURRENT_RATING_PATTERN.fullmatch(
+            word["value"].upper()
+        ):
+            return True
+
+    return False
+
+
+def extract_fuse_candidates(
+    page,
+) -> list[dict]:
+    """
+    Shape-first fuse detection.
+
+    Workflow:
+      1. detect small wave-shaped vector symbols;
+      2. inspect only local text around every wave;
+      3. locate nearest fuse number (#7 / F7);
+      4. locate nearest X board (X3);
+      5. generate X3.f7.
+
+    A candidate must have:
+      - detected fuse-wave shape;
+      - local fuse number;
+      - local X board number.
+
+    No KOW, OLY, drawing number, Item name, fixed X board, or fixed
+    fuse number is used.
+    """
+    words = get_page_words(page)
+
+    fuse_symbols = detect_fuse_wave_symbols(page)
+
+    candidates = []
+    seen = set()
+
+    for fuse_symbol in fuse_symbols:
+        nearby_words = words_near_fuse_symbol(
+            words,
+            fuse_symbol,
+            page,
+        )
+
+        local_fuse_number = extract_local_fuse_number(
+            nearby_words,
+            fuse_symbol["point"],
+        )
+
+        local_x_terminal = extract_local_x_terminal(
+            nearby_words,
+            fuse_symbol["point"],
+        )
+
+        if local_fuse_number is None:
+            continue
+
+        if local_x_terminal is None:
+            continue
+
+        fuse_value = (
+            f"X{local_x_terminal['number']}."
+            f"f{local_fuse_number['number']}"
+        )
+
+        key = (
+            fuse_value,
+            round(fuse_symbol["point"].x, 1),
+            round(fuse_symbol["point"].y, 1),
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        rating_found = local_fuse_has_current_rating(
+            nearby_words
+        )
+
+        confidence = 1
+
+        if fuse_symbol["curve_count"] >= 1:
+            confidence += 2
+
+        if rating_found:
+            confidence += 1
+
+        candidates.append(
+            {
+                "value": fuse_value,
+                "point": fuse_symbol["point"],
+                "rect": fuse_symbol["rect"],
+                "curve_count": fuse_symbol[
+                    "curve_count"
+                ],
+                "rating_found": rating_found,
+                "confidence": confidence,
+                "fuse_label": local_fuse_number[
+                    "source_text"
+                ],
+                "x_label": local_x_terminal[
+                    "source_text"
+                ],
+            }
+        )
+
     candidates.sort(
         key=lambda candidate: (
-            -candidate["confidence"],
             candidate["point"].y,
             candidate["point"].x,
         )
@@ -1198,6 +1430,51 @@ def extract_fuse_candidates(
 
     return candidates
 
+def log_fuse_detection_diagnostics(
+    page,
+    fuse_candidates: list[dict],
+    log_callback=None,
+):
+    """
+    Log shape-first fuse detection results.
+    """
+    symbols = detect_fuse_wave_symbols(page)
+
+    symbol_diagnostics = []
+
+    for symbol in symbols:
+        symbol_diagnostics.append(
+            (
+                round(symbol["point"].x, 1),
+                round(symbol["point"].y, 1),
+                symbol["curve_count"],
+                (
+                    round(symbol["rect"].width, 1),
+                    round(symbol["rect"].height, 1),
+                ),
+            )
+        )
+
+    candidate_diagnostics = []
+
+    for candidate in fuse_candidates:
+        candidate_diagnostics.append(
+            (
+                candidate["value"],
+                candidate["fuse_label"],
+                candidate["x_label"],
+                candidate["curve_count"],
+                candidate["rating_found"],
+            )
+        )
+
+    write_log(
+        log_callback,
+        "Fuse shape diagnostic: "
+        f"wave_symbols={symbol_diagnostics}; "
+        f"fuse_candidates={candidate_diagnostics}.",
+        "DEBUG",
+    )
 
 # ---------------------------------------------------------------------
 # Equipment labels and fuse assignment
@@ -1299,6 +1576,13 @@ def select_fuse_for_equipment(
     equipment_label: dict | None,
     excluded_values: set[str],
 ) -> dict | None:
+    """
+    Select the fuse physically nearest the relevant equipment label.
+
+    Fuse-wave shape and local text determine a candidate.
+    Equipment geometry determines whether it belongs to the NS Rack
+    or IXL/SACEM CoV Cubicle side.
+    """
     available = [
         candidate
         for candidate in fuse_candidates
@@ -1311,7 +1595,7 @@ def select_fuse_for_equipment(
     if equipment_label is None:
         available.sort(
             key=lambda candidate: (
-                -candidate["confidence"],
+                -candidate.get("confidence", 0),
                 candidate["point"].y,
                 candidate["point"].x,
             )
@@ -1325,7 +1609,9 @@ def select_fuse_for_equipment(
                 candidate["point"],
                 equipment_label["point"],
             ),
-            -candidate["confidence"],
+            -candidate.get("confidence", 0),
+            candidate["point"].y,
+            candidate["point"].x,
         )
     )
 
@@ -1852,6 +2138,12 @@ def extract_pdf(
 
                 fuse_candidates = extract_fuse_candidates(
                     page
+                )
+
+                log_fuse_detection_diagnostics(
+                    page,
+                    fuse_candidates,
+                    log_callback=log_callback,
                 )
 
                 green_segments = get_green_segments(
