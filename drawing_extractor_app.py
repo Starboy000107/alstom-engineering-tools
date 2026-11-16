@@ -489,11 +489,11 @@ def render_drawing_extractor_app():
                     <h1>Drawing Extractor</h1>
 
                     <p>
-                        Engineering drawing extraction and review platform
+                        Drawing extraction and review platform
                     </p>
 
                     <span class="extractor-header-tag">
-                        Engineering drawing verification workflow
+                        Drawing verification workflow
                     </span>
                 </div>
             </div>
@@ -505,13 +505,12 @@ def render_drawing_extractor_app():
         """
         <div class="extractor-information-card">
             <div class="extractor-card-title">
-                📘 Engineering drawing data extraction
+                📘 Drawing data extraction
             </div>
 
             <div class="extractor-card-description">
-                Select the drawing extraction type and upload a controlled
-                engineering drawing PDF. All extracted information must be
-                independently reviewed against the controlled drawing before
+                Select the drawing extraction type and upload a drawing PDF. All extracted information must be
+                independently reviewed against the drawing before
                 issue, approval, or site use.
             </div>
         </div>
@@ -562,11 +561,11 @@ def render_drawing_extractor_app():
         """
         <div class="extractor-upload-panel">
             <div class="extractor-card-title">
-                Controlled Drawing Upload
+                Drawing Upload
             </div>
 
             <div class="extractor-card-description">
-                Upload the approved or controlled engineering drawing in PDF
+                Upload the approved or drawing in PDF
                 format. The selected extraction workflow will be applied to
                 the uploaded document.
             </div>
@@ -575,11 +574,11 @@ def render_drawing_extractor_app():
     )
 
     uploaded_pdf = st.file_uploader(
-        "Upload controlled engineering drawing",
+        "Upload drawing",
         type=["pdf"],
         key="drawing_extractor_uploaded_pdf",
         help=(
-            "Upload a controlled engineering drawing in PDF format. "
+            "Upload a drawing in PDF format. "
             "The document will be processed using the selected "
             "drawing extraction workflow."
         ),
@@ -587,7 +586,7 @@ def render_drawing_extractor_app():
 
     if uploaded_pdf is None:
         st.info(
-            "Upload a controlled engineering drawing PDF to begin "
+            "Upload a drawing PDF to begin "
             "the extraction workflow."
         )
         return
@@ -597,7 +596,7 @@ def render_drawing_extractor_app():
     if not pdf_bytes.startswith(b"%PDF"):
         st.error(
             "The uploaded file could not be verified as a valid PDF "
-            "document. Please upload a controlled engineering drawing "
+            "document. Please upload a drawing "
             "in PDF format."
         )
         return
@@ -814,9 +813,9 @@ def render_drawing_extractor_app():
         <div class="extractor-footer">
             <strong>Drawing Extractor</strong>
             <br>
-            Alstom engineering drawing extraction and review tool
+            Alstom drawing extraction and review tool
             &nbsp;|&nbsp;
-            Verify all extracted information against the controlled
+            Verify all extracted information against the 
             drawing before use.
         </div>
         """
@@ -892,7 +891,7 @@ def render_ct_loop_review_area(
         st.image(
             page_image,
             caption=(
-                f"Controlled {extraction_type} drawing "
+                f"{extraction_type} drawing "
                 f"PDF page {selected_page}"
             ),
             use_container_width=True,
@@ -1099,7 +1098,7 @@ def render_return_channel_review_area(
         st.image(
             page_image,
             caption=(
-                f"Controlled {extraction_type} drawing "
+                f"{extraction_type} drawing "
                 f"PDF page {selected_page}"
             ),
             use_container_width=True,
