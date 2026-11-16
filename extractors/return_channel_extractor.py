@@ -2159,16 +2159,120 @@ def build_terminal_debug_rect(
         ),
     )
 
+def get_terminal_green_diagnostics(
+    terminal: dict,
+    page_segments: list[dict],
+) -> dict:
+    """
+    Small diagnostic summary for one selected terminal.
+    """
+    debug_rect = terminal.get("debug_rect")
+
+    if debug_rect is None:
+        return {
+            "connection_found": False,
+            "green_in_box": False,
+            "debug_rect": None,
+        }
+
+    green_in_box = connection_area_has_green_line(
+        debug_rect,
+        page_segments,
+    )
+
+    connection_segment = terminal.get(
+        "connection_segment"
+    )
+
+    return {
+        "connection_found": (
+            connection_segment is not None
+        ),
+        "selected_segment_green": (
+            connection_segment.get(
+                "is_green",
+                False,
+            )
+            if connection_segment is not None
+            else False
+        ),
+        "green_in_box": green_in_box,
+        "debug_rect": (
+            round(debug_rect.x0, 1),
+            round(debug_rect.y0, 1),
+            round(debug_rect.x1, 1),
+            round(debug_rect.y1, 1),
+        ),
+    }
+
+def connection_area_has_green_line(
+    debug_rect: fitz.Rect,
+    page_segments: list[dict],
+) -> bool:
+    """
+    Return True when a green/cyan horizontal vector segment passes
+    through the terminal connection area.
+
+    The debug rectangle is determined first from all local circuit
+    geometry, including black lines. Colour is then checked separately.
+
+    This avoids rejecting a valid green/cyan terminal connection merely
+    because find_terminal_connection_segment() selected a nearby black
+    line as the best structural segment.
+    """
+    minimum_overlap_ratio = 0.25
+
+    for segment in page_segments:
+        if not segment.get("is_green", False):
+            continue
+
+        if not is_horizontal_segment(segment):
+            continue
+
+        start = segment["start"]
+        end = segment["end"]
+
+        segment_x0 = min(start.x, end.x)
+        segment_x1 = max(start.x, end.x)
+        segment_y = (start.y + end.y) / 2
+
+        # The coloured segment must pass through the local terminal
+        # connection area vertically.
+        if not (
+            debug_rect.y0
+            <= segment_y
+            <= debug_rect.y1
+        ):
+            continue
+
+        overlap = horizontal_overlap_length(
+            segment_x0,
+            segment_x1,
+            debug_rect.x0,
+            debug_rect.x1,
+        )
+
+        # Reject tiny coloured marks/dots touching the box.
+        if overlap < (
+            debug_rect.width
+            * minimum_overlap_ratio
+        ):
+            continue
+
+        return True
+
+    return False
 
 def terminal_is_directly_connected_to_green(
     terminal: dict,
     page_segments: list[dict],
 ) -> bool:
     """
-    Locate the real horizontal terminal connection first, then return
-    True only when that selected local connection is green/cyan.
+    Find the terminal connection area using all vector segments, then
+    determine whether green/cyan horizontal linework exists inside that
+    same local area.
 
-    The debug rectangle is always set, regardless of colour.
+    The debug rectangle does not depend on line colour.
     """
     connection_segment = find_terminal_connection_segment(
         terminal,
@@ -2176,19 +2280,15 @@ def terminal_is_directly_connected_to_green(
     )
 
     terminal["connection_segment"] = connection_segment
+
     terminal["debug_rect"] = build_terminal_debug_rect(
         terminal,
         connection_segment,
     )
 
-    if connection_segment is None:
-        return False
-
-    return bool(
-        connection_segment.get(
-            "is_green",
-            False,
-        )
+    return connection_area_has_green_line(
+        terminal["debug_rect"],
+        page_segments,
     )
 
 
@@ -2385,6 +2485,17 @@ def create_return_channel_rows(
                 page_segments
             )
         )
+        
+        terminal_diagnostics = [
+            {
+                "terminal": terminal["terminal"],
+                **get_terminal_green_diagnostics(
+                    terminal,
+                    page_segments,
+                ),
+            }
+            for terminal in terminal_pair["terminals"]
+        ]
 
         terminal_block_text = ""
 
