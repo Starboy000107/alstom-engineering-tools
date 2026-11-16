@@ -725,10 +725,10 @@ def is_green_colour(
     colour,
 ) -> bool:
     """
-    Detect green and cyan/turquoise circuit linework.
+    Return True for green or cyan/turquoise electrical linework.
 
-    PDF electrical drawings often use cyan rather than a pure
-    conventional green.
+    CAD drawings may use conventional green or cyan/turquoise for
+    the cable-rack terminal connection.
     """
     hsv = rgb_to_hsv(colour)
 
@@ -737,9 +737,10 @@ def is_green_colour(
 
     hue, saturation, value = hsv
 
-    # Hue is in degrees here:
-    # green: approx. 65-165
-    # cyan/turquoise: approx. 165-205
+    # hue is degrees because rgb_to_hsv() converts it to 0-360.
+    #
+    # Covers green through cyan/turquoise, while excluding black,
+    # grey, red, magenta and ordinary blue drawing content.
     return (
         65 <= hue <= 205
         and saturation >= 0.25
@@ -1962,42 +1963,206 @@ def build_fuse_text(
 # Direct green-terminal detection
 # ---------------------------------------------------------------------
 
+def get_terminal_connection_regions(
+    terminal: dict,
+) -> list[fitz.Rect]:
+    """
+    Build likely terminal-connection regions relative to the extracted
+    terminal reference text.
+
+    A terminal reference such as V0.D9 is normally located immediately
+    above or below two terminal circles. The important connection is the
+    horizontal line between those circles.
+
+    The regions are calculated only from the text geometry. No terminal
+    name, location, drawing number or fixed page coordinate is used.
+    """
+    text_width = max(
+        terminal["x1"] - terminal["x0"],
+        1.0,
+    )
+
+    text_height = max(
+        terminal["y1"] - terminal["y0"],
+        1.0,
+    )
+
+    # Small horizontal expansion allows for the terminal-circle centres
+    # being slightly outside the text extents.
+    horizontal_padding = text_width * 0.08
+
+    # The terminal circles are normally around one to three text-heights
+    # above or below the reference text.
+    connection_distance = text_height * 0.25
+    connection_depth = text_height * 2.25
+
+    lower_region = fitz.Rect(
+        terminal["x0"] - horizontal_padding,
+        terminal["y1"] + connection_distance,
+        terminal["x1"] + horizontal_padding,
+        terminal["y1"]
+        + connection_distance
+        + connection_depth,
+    )
+
+    upper_region = fitz.Rect(
+        terminal["x0"] - horizontal_padding,
+        terminal["y0"]
+        - connection_distance
+        - connection_depth,
+        terminal["x1"] + horizontal_padding,
+        terminal["y0"] - connection_distance,
+    )
+
+    return [
+        lower_region,
+        upper_region,
+    ]
+
+
+def green_segment_matches_terminal_connection(
+    segment: dict,
+    connection_region: fitz.Rect,
+) -> bool:
+    """
+    Return True only when a green/cyan segment substantially overlaps
+    the horizontal terminal-to-terminal connection corridor.
+
+    A diagonal green cable entering from the left does not qualify.
+    A green line between the two terminal circles does qualify.
+    """
+    start = segment["start"]
+    end = segment["end"]
+
+    dx = abs(end.x - start.x)
+    dy = abs(end.y - start.y)
+
+    if dx <= 0.01:
+        return False
+
+    # The line joining the two terminal circles is expected to be
+    # predominantly horizontal. This rejects diagonal incoming wires.
+    if dy > dx * 0.20:
+        return False
+
+    segment_x0 = min(start.x, end.x)
+    segment_x1 = max(start.x, end.x)
+
+    overlap_x0 = max(
+        segment_x0,
+        connection_region.x0,
+    )
+
+    overlap_x1 = min(
+        segment_x1,
+        connection_region.x1,
+    )
+
+    horizontal_overlap = max(
+        0.0,
+        overlap_x1 - overlap_x0,
+    )
+
+    required_overlap = (
+        connection_region.width * 0.20
+    )
+
+    if horizontal_overlap < required_overlap:
+        return False
+
+    segment_y0 = min(start.y, end.y)
+    segment_y1 = max(start.y, end.y)
+
+    return not (
+        segment_y1 < connection_region.y0
+        or segment_y0 > connection_region.y1
+    )
+
+
+def merge_terminal_text_and_connection_rect(
+    terminal: dict,
+    connection_region: fitz.Rect,
+) -> fitz.Rect:
+    """
+    Create the red debug rectangle.
+
+    The rectangle includes both:
+      - the terminal reference text;
+      - the terminal-circle / connection corridor.
+
+    This makes it visible in the debug image exactly where the
+    green/cyan test is being made.
+    """
+    return fitz.Rect(
+        min(
+            terminal["x0"],
+            connection_region.x0,
+        ),
+        min(
+            terminal["y0"],
+            connection_region.y0,
+        ),
+        max(
+            terminal["x1"],
+            connection_region.x1,
+        ),
+        max(
+            terminal["y1"],
+            connection_region.y1,
+        ),
+    )
+
+
 def terminal_is_directly_connected_to_green(
     terminal: dict,
     green_segments: list[dict],
     page,
 ) -> bool:
     """
-    True only when a green/cyan vector segment reaches the terminal
-    reference point itself.
+    True only when green/cyan linework is found in the local horizontal
+    connection area between the two terminal circles.
 
-    Do not classify a terminal as green merely because green/cyan
-    linework is nearby.
+    Green linework merely approaching the terminal from the left/right,
+    or passing diagonally nearby, is not sufficient.
     """
     if not green_segments:
         return False
 
-    page_scale = max(
-        float(page.rect.width),
-        float(page.rect.height),
+    connection_regions = get_terminal_connection_regions(
+        terminal
     )
 
-    maximum_touch_distance = max(
-        2.5,
-        min(page_scale * 0.003, 5.0),
-    )
+    for connection_region in connection_regions:
+        for segment in green_segments:
+            if not green_segment_matches_terminal_connection(
+                segment,
+                connection_region,
+            ):
+                continue
 
-    terminal_point = terminal["point"]
+            # Store the exact checked area for the debug-image red box.
+            terminal["connection_rect"] = connection_region
 
-    for segment in green_segments:
-        distance = point_to_segment_distance(
-            terminal_point,
-            segment["start"],
-            segment["end"],
-        )
+            terminal["debug_rect"] = (
+                merge_terminal_text_and_connection_rect(
+                    terminal,
+                    connection_region,
+                )
+            )
 
-        if distance <= maximum_touch_distance:
             return True
+
+    # No matching green horizontal line was found. Still create a
+    # meaningful debug box below the label so you can inspect it.
+    default_region = connection_regions[0]
+
+    terminal["connection_rect"] = default_region
+    terminal["debug_rect"] = (
+        merge_terminal_text_and_connection_rect(
+            terminal,
+            default_region,
+        )
+    )
 
     return False
 
@@ -2008,21 +2173,18 @@ def terminal_pair_is_directly_green(
     page,
 ) -> bool:
     """
-    Both terminal references must directly connect to green linework.
-
-    This prevents unrelated green graphics elsewhere on the drawing
-    from creating the additional Cable Rack checklist column.
+    The Cable Rack instruction is required only where both selected
+    terminal references have a green/cyan connection between their
+    local terminal circles.
     """
-    terminal_results = [
+    return all(
         terminal_is_directly_connected_to_green(
             terminal,
             green_segments,
             page,
         )
         for terminal in terminal_pair["terminals"]
-    ]
-
-    return all(terminal_results)
+    )
 
 
 # ---------------------------------------------------------------------
@@ -2342,25 +2504,35 @@ def create_debug_image(
 
     # Terminal boxes: red.
     for terminal in selected_terminals:
+        source_rect = terminal.get("debug_rect")
+
+        if source_rect is None:
+            source_rect = fitz.Rect(
+                terminal["x0"],
+                terminal["y0"],
+                terminal["x1"],
+                terminal["y1"],
+            )
+
         rectangle = fitz.Rect(
             max(
                 0,
-                terminal["x0"]
+                source_rect.x0
                 - terminal_padding,
             ),
             max(
                 0,
-                terminal["y0"]
+                source_rect.y0
                 - terminal_padding,
             ),
             min(
                 page.rect.width,
-                terminal["x1"]
+                source_rect.x1
                 + terminal_padding,
             ),
             min(
                 page.rect.height,
-                terminal["y1"]
+                source_rect.y1
                 + terminal_padding,
             ),
         )
