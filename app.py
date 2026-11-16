@@ -8,6 +8,9 @@ from drawing_extractor_app import (
 from master_drawing_list_app import (
     render_master_drawing_list_app,
 )
+from test_sheet_generator_app import (
+    render_test_sheet_generator_app,
+)
 from ui_theme import render_global_theme
 
 
@@ -49,6 +52,7 @@ def main():
         options=[
             "Master Drawing List Generator",
             "Drawing Extractor",
+            "Test Sheet Generator",
         ],
         key="engineering_tool_selector",
     )
@@ -73,6 +77,9 @@ def main():
 
     elif selected_tool == "Drawing Extractor":
         render_drawing_extractor_app()
+
+    elif selected_tool == "Test Sheet Generator":
+        render_test_sheet_generator_app()
 
     # --------------------------------------------------------
     # Apply it once more after the tool.
