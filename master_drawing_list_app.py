@@ -15,7 +15,9 @@ from openpyxl import load_workbook
 from docx import Document
 import pandas as pd
 import streamlit as st
-
+import tempfile
+import shutil
+import subprocess
 import requests
 
 # ============================================================
@@ -1054,6 +1056,68 @@ REQUIRED_PHASE_ORDER = {
     "WTT-RE-OPEN": 230,
 }
 
+LOCATION_MAPPING_SHEET = "_Location Mapping"
+
+LOCATION_MAPPING_COLUMNS = [
+    "C1252 Drawing",
+    "Location Group",
+]
+
+DRAWING_TYPE_COLUMN = "Drawing Type"
+
+DRAWING_TYPE_ALIASES = {
+    "Scheme Plan": [
+        "SCHEME PLAN",
+    ],
+    "Bonding Plan": [
+        "BONDING PLAN",
+    ],
+    "Detail Design": [
+        "ODF DETAIL DESIGN",
+        "DETAIL DESIGN",
+    ],
+    "SER Room Layout": [
+        "SER ROOM LAYOUT",
+    ],
+    "Cable Schematic": [
+        "CABLE SCHEMATIC",
+    ],
+    "Cable Route Plan": [
+        "CABLE ROUTE PLAN",
+    ],
+    "Cable Plan": [
+        "CABLE PLAN",
+    ],
+    "Beacon Layout": [
+        "BEACON LAYOUT",
+    ],
+    "CT RC Layout": [
+        "CT RC LAYOUT",
+    ],
+    "Earthing Plan": [
+        "EARTHING PLAN",
+    ],
+    "Control Table": [
+        "CONTROL TABLE",
+        "CONTROL TABLES",
+    ],
+    "PDC Existing": [
+        "EXISTING PDC",
+        "PDC EXISTING",
+    ],
+    "New PDC": [
+        "NEW PDC",
+        "PDC NEW",
+    ],
+    "Additional New PDC": [
+        "ADDITIONAL NEW PDC",
+        "ADDITAL NEW PDC",
+        "ADDITIONAL PDC",
+    ],
+    "TFM Schematic": [
+        "TFM SCHEMATIC",
+    ],
+}
 
 # ============================================================
 # BASIC HELPERS
@@ -1106,12 +1170,6 @@ STATION_WORKSHEET_EXCEPTIONS = {
     # TCE worksheet contains both TCE and TCETUC drawings.
     "TCE": "TCE",
     "TCETUC": "TCE",
-
-    # SHD worksheet contains AB11, AB3 and MB drawings.
-    "SHD": "SHD",
-    "AB11": "SHD",
-    "AB3": "SHD",
-    "MB": "SHD",
 }
 
 
@@ -1124,7 +1182,6 @@ def get_station_worksheet_name(station_name):
         SUN + YOT -> SUN & YOT
         TUC + YOY -> TUC
         TCE + TCETUC -> TCE
-        SHD + AB11 + AB3 + MB = SHD
 
     All other stations keep their own worksheet name.
     """
@@ -1407,6 +1464,7 @@ def get_first_revision_columns(df):
     excluded_columns = {
         "Drawing Ref",
         "C1252 Drawing",
+        DRAWING_TYPE_COLUMN,
         "Description",
         "Normalized Drawing Number",
         "_Transmittal Scope Status",
@@ -1498,72 +1556,127 @@ def normalize_header(value):
 
 def normalize_drawing_number(value):
     """
-    Normalizes a C1252 drawing number.
+    Returns a valid normalized C1252 drawing number only.
 
-    A valid C1252 drawing number has exactly six sections:
+    Required format:
 
-        1252 / W / STATION / ALT / RXX / NUMBER
+        1252/W/STATION/ALT/REFERENCE/NUMBER
 
-    Example:
+    Exactly six slash-separated sections are required.
 
-        1252/W/TUT/ALT/R32/105
+    Examples:
 
-    Any additional slash-separated text, such as a revision
-    appended by a transmittal form, is excluded.
+        1252/W/KOW/ALT/R32/ 652
+            -> 1252/W/KOW/ALT/R32/652
 
-    Example:
+        1252/W/KOW/ALT/R32/652
+            -> 1252/W/KOW/ALT/R32/652
 
-        1252/W/TUT/ALT/R32/105/D3
-            -> 1252/W/TUT/ALT/R32/105
+        1252/W/KOW/ALT/R32/001 651
+            -> 1252/W/KOW/ALT/R32/001651
+            only if the remaining text is genuinely part of the
+            drawing number.
+
+    Invalid examples:
+
+        1252/W/KOW/ALT/R32
+            -> ""
+
+        1252/W/KOW/ALT/R32/652/EXTRA
+            -> ""
+
+        RANDOM TEXT
+            -> ""
+
+    The application must not output invalid drawing numbers.
     """
 
     if is_blank(value):
         return ""
 
     text = str(value)
+
+    # Treat underscores as slash separators, consistent with
+    # the existing application behaviour.
     text = text.replace("_", "/")
+
+    # Remove quotes and all whitespace anywhere in the drawing number.
+    # This fixes values such as:
+    #
+    #     1252/W/KOW/ALT/R32/ 652
+    #
+    # into:
+    #
+    #     1252/W/KOW/ALT/R32/652
     text = text.replace('"', "")
     text = text.replace("'", "")
-    text = text.replace("\r", "")
-    text = text.replace("\n", "")
-    text = text.replace("\t", "")
-    text = text.replace(" ", "")
+    text = re.sub(r"\s+", "", text)
 
     text = re.sub(r"/+", "/", text)
     text = text.strip().rstrip(
         ".,;:)]}>"
     ).upper()
 
+    # Strictly require exactly six segments.
+    #
+    # Segment layout:
+    #   1252 / W / KOW / ALT / R32 / 652
+    #
+    if not re.fullmatch(
+        r"1252/[A-Z0-9.-]+/[A-Z0-9.-]+/"
+        r"[A-Z0-9.-]+/[A-Z0-9.-]+/[A-Z0-9.-]+",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return ""
+
     parts = text.split("/")
 
-    # A normal C1252 drawing number contains:
-    #
-    # 1252/W/TUT/ALT/R32/105
-    #
-    # Therefore retain only the first six segments.
-    if (
-        len(parts) >= 6
-        and parts[0] == "1252"
-    ):
-        return "/".join(parts[:6])
+    if len(parts) != 6:
+        return ""
 
     return text
 
 
 def extract_drawing_ref(value):
-    value = normalize_drawing_number(value)
+    """
+    Returns a Drawing Ref only from a valid drawing number.
 
-    if not value:
-        return ""
+    Required Drawing Ref format:
 
-    parts = value.split("/")
+        Something/Something
 
-    return (
-        "/".join(parts[-2:])
-        if len(parts) >= 2
-        else value
+    Example:
+
+        1252/W/KOW/ALT/R32/652
+            -> R32/652
+
+    Invalid drawing numbers return an empty Drawing Ref.
+    """
+
+    drawing_number = normalize_drawing_number(
+        value
     )
 
+    if not drawing_number:
+        return ""
+
+    parts = drawing_number.split("/")
+
+    if len(parts) != 6:
+        return ""
+
+    drawing_ref = f"{parts[4]}/{parts[5]}"
+
+    # Strictly confirm the Drawing Ref format.
+    if not re.fullmatch(
+        r"[A-Z0-9.-]+/[A-Z0-9.-]+",
+        drawing_ref,
+        flags=re.IGNORECASE,
+    ):
+        return ""
+
+    return drawing_ref
 
 def extract_area_from_drawing_number(value):
     value = normalize_drawing_number(value)
@@ -1861,6 +1974,59 @@ def extract_embedded_drawing_numbers(value):
 
     return result
 
+def select_single_valid_dih_drawing_number(value):
+    """
+    Returns one valid C1252 drawing number from a cleaned DIH cell.
+
+    The strikethrough-removal process must run before this function.
+
+    Rules:
+    - Extract valid six-part drawing numbers.
+    - Remove duplicate drawing numbers.
+    - Return the number when exactly one unique drawing remains.
+    - Return blank when no valid drawing exists.
+    - Return blank when two or more DIFFERENT valid drawings remain.
+
+    Examples after strikethrough removal:
+
+        1252/W/OCC/ALT/J34/006
+            -> 1252/W/OCC/ALT/J34/006
+
+        1252/W/OCC/ALT/J34/012
+        1252/W/OCC/ALT/J34/012
+            -> 1252/W/OCC/ALT/J34/012
+
+        1252/W/OCC/ALT/J34/005
+        1252/W/OCC/ALT/J34/006
+            -> ""
+            because the cell remains ambiguous.
+    """
+
+    candidates = extract_embedded_drawing_numbers(
+        value
+    )
+
+    # The extraction function already deduplicates values, but
+    # normalize again for certainty.
+    unique_drawings = []
+
+    for candidate in candidates:
+        drawing_number = normalize_drawing_number(
+            candidate
+        )
+
+        if (
+            drawing_number
+            and drawing_number not in unique_drawings
+        ):
+            unique_drawings.append(
+                drawing_number
+            )
+
+    if len(unique_drawings) == 1:
+        return unique_drawings[0]
+
+    return ""
 
 def select_drawing_matching_ref(
     drawing_value,
@@ -1976,6 +2142,425 @@ def sort_by_drawing_ref(df):
 # ============================================================
 # EXCEL READING
 # ============================================================
+
+# ============================================================
+# EXCEL STRIKETHROUGH TEXT REMOVAL
+# ============================================================
+
+def get_excel_text_without_strikethrough(cell):
+    """
+    Removes only text portions that have strikethrough formatting.
+
+    Example:
+
+        1252/W/KOW/ALT/R35/202  <- struck through
+        1252/W/KOW/ALT/R35/212  <- normal text
+
+    becomes:
+
+        1252/W/KOW/ALT/R35/212
+
+    Important:
+    - A completely struck-through normal cell becomes blank.
+    - In a mixed rich-text cell, only explicitly struck-through
+      rich-text runs are removed.
+    - Plain rich-text fragments are retained. They must not be
+      removed just because the parent cell style is mixed.
+    """
+
+    original_value = cell.value
+
+    if original_value is None:
+        return None
+
+    # Do not alter formulas.
+    if cell.data_type == "f":
+        return original_value
+
+    # Numeric/date/boolean cells are returned unchanged.
+    if (
+        not isinstance(original_value, str)
+        and not hasattr(original_value, "__iter__")
+    ):
+        return original_value
+
+    # --------------------------------------------------------
+    # Standard text cell: no partial rich-text runs available.
+    # If the full cell is struck through, exclude it.
+    # --------------------------------------------------------
+    if isinstance(original_value, str):
+        if (
+            cell.font is not None
+            and cell.font.strike is True
+        ):
+            return ""
+
+        return original_value
+
+    # --------------------------------------------------------
+    # Rich-text cell.
+    #
+    # Keep normal/plain runs.
+    # Remove only runs explicitly formatted as strikethrough.
+    #
+    # Do NOT use cell.font.strike here. A mixed-format cell can
+    # report a parent style that is not reliable for every run.
+    # --------------------------------------------------------
+    cleaned_parts = []
+
+    for part in original_value:
+        # Plain string content within CellRichText is retained.
+        # It is not an explicitly struck-through TextBlock.
+        if isinstance(part, str):
+            cleaned_parts.append(part)
+            continue
+
+        part_text = str(
+            getattr(part, "text", "")
+        )
+
+        part_font = getattr(part, "font", None)
+
+        part_strike = (
+            getattr(part_font, "strike", None)
+            if part_font is not None
+            else None
+        )
+
+        # Remove this exact rich-text run only when Excel says
+        # this run is struck through.
+        if part_strike is True:
+            continue
+
+        cleaned_parts.append(part_text)
+
+    return "".join(cleaned_parts)
+
+
+def remove_strikethrough_from_excel_bytes(
+    file_bytes,
+    file_name,
+):
+    """
+    Creates an in-memory cleaned copy of an XLSX/XLSM workbook.
+
+    Any text formatted with strikethrough is excluded before the
+    workbook is later read by pandas.
+
+    The original uploaded file is never altered.
+    """
+
+    extension = Path(file_name).suffix.lower()
+
+    # OpenPyXL cannot read old binary XLS files. XLS files can still
+    # be handled by the existing pandas/xlrd/calaminne logic, but
+    # partial rich-text strikethrough cannot be reliably removed.
+    if extension == ".xls":
+        log_warning(
+            "Strikethrough removal skipped for legacy XLS file. "
+            "Please save it as XLSX or XLSM for reliable filtering.",
+            file_name=file_name,
+        )
+        return file_bytes
+
+    if extension not in {".xlsx", ".xlsm"}:
+        return file_bytes
+
+    workbook = None
+
+    try:
+        workbook = load_workbook(
+            io.BytesIO(file_bytes),
+            read_only=False,
+            data_only=False,
+            keep_vba=(extension == ".xlsm"),
+            rich_text=True,
+        )
+
+        changed_cells = 0
+
+        for worksheet in workbook.worksheets:
+            for row in worksheet.iter_rows():
+                for cell in row:
+                    original_value = cell.value
+
+                    if original_value is None:
+                        continue
+
+                    cleaned_value = (
+                        get_excel_text_without_strikethrough(
+                            cell
+                        )
+                    )
+
+                    # Do not rewrite unchanged values.
+                    if cleaned_value == original_value:
+                        continue
+
+                    # Optional useful testing log. It records only cells
+                    # where strikethrough content was actually removed.
+                    log_info(
+                        "Strikethrough text excluded from Excel cell",
+                        file_name=file_name,
+                        worksheet=worksheet.title,
+                        cell=cell.coordinate,
+                        original_text=str(original_value),
+                        cleaned_text=str(cleaned_value),
+                    )
+
+                    # Store only the retained plain text. pandas will then
+                    # receive the clean value in normal processing.
+                    cell.value = cleaned_value
+                    changed_cells += 1
+
+        output_buffer = io.BytesIO()
+
+        workbook.save(output_buffer)
+        output_buffer.seek(0)
+
+        log_info(
+            "Excel workbook cleaned before DIH/MOD processing",
+            file_name=file_name,
+            affected_cell_count=changed_cells,
+        )
+
+        return output_buffer.getvalue()
+
+    except TypeError as error:
+        if "rich_text" in str(error):
+            raise RuntimeError(
+                "This application requires openpyxl 3.1.0 or later "
+                "to read Excel rich-text strikethrough formatting."
+            ) from error
+
+        raise
+
+    except Exception as error:
+        raise RuntimeError(
+            f"Could not process strikethrough text in '{file_name}'. "
+            f"{type(error).__name__}: {error}"
+        ) from error
+
+    finally:
+        if workbook is not None:
+            workbook.close()
+# ============================================================
+# LEGACY XLS TO XLSX CONVERSION
+# ============================================================
+
+def convert_xls_to_xlsx_with_libreoffice(
+    file_bytes,
+    file_name,
+):
+    """
+    Converts a legacy XLS file to XLSX using LibreOffice Calc.
+
+    This works on Streamlit Cloud/Linux when libreoffice-calc is
+    installed through packages.txt.
+
+    Returns:
+        (
+            converted_xlsx_bytes,
+            converted_xlsx_file_name,
+        )
+    """
+
+    source_file_name = Path(file_name).name
+    source_stem = Path(source_file_name).stem
+
+    # Streamlit Cloud/Linux normally provides `soffice`.
+    # The fallback supports systems where it is named `libreoffice`.
+    libreoffice_command = (
+        shutil.which("soffice")
+        or shutil.which("libreoffice")
+    )
+
+    if not libreoffice_command:
+        raise RuntimeError(
+            "LibreOffice Calc is not installed on the server. "
+            "Add 'libreoffice-calc' to packages.txt, commit it to "
+            "GitHub, and redeploy the Streamlit application."
+        )
+
+    with tempfile.TemporaryDirectory(
+        prefix="alstom_xls_conversion_",
+    ) as temporary_directory_text:
+        temporary_directory = Path(
+            temporary_directory_text
+        )
+
+        input_directory = (
+            temporary_directory / "input"
+        )
+        output_directory = (
+            temporary_directory / "output"
+        )
+        profile_directory = (
+            temporary_directory / "lo_profile"
+        )
+
+        input_directory.mkdir()
+        output_directory.mkdir()
+        profile_directory.mkdir()
+
+        source_path = (
+            input_directory / source_file_name
+        )
+
+        source_path.write_bytes(file_bytes)
+
+        # Each Streamlit request receives its own LibreOffice profile.
+        # This prevents profile-lock errors when several users upload
+        # files at the same time.
+        command = [
+            libreoffice_command,
+            "--headless",
+            "--nologo",
+            "--nodefault",
+            "--nolockcheck",
+            "--norestore",
+            (
+                "-env:UserInstallation="
+                f"{profile_directory.as_uri()}"
+            ),
+            "--convert-to",
+            "xlsx:Calc MS Excel 2007 XML",
+            "--outdir",
+            str(output_directory),
+            str(source_path),
+        ]
+
+        process = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
+        expected_output_path = (
+            output_directory
+            / f"{source_stem}.xlsx"
+        )
+
+        # LibreOffice normally uses the exact expected filename.
+        # The fallback handles uncommon output naming behaviour.
+        if not expected_output_path.exists():
+            output_files = list(
+                output_directory.glob("*.xlsx")
+            )
+
+            if len(output_files) == 1:
+                expected_output_path = output_files[0]
+
+        if (
+            process.returncode != 0
+            or not expected_output_path.exists()
+        ):
+            raise RuntimeError(
+                "LibreOffice could not convert the XLS file to XLSX. "
+                f"File: '{file_name}'. "
+                f"Return code: {process.returncode}. "
+                f"Output: {process.stdout.strip()}. "
+                f"Error: {process.stderr.strip()}."
+            )
+
+        converted_bytes = (
+            expected_output_path.read_bytes()
+        )
+
+    converted_file_name = (
+        f"{source_stem}.xlsx"
+    )
+
+    log_info(
+        "Legacy XLS converted to XLSX before DIH/MOD processing",
+        original_file_name=file_name,
+        converted_file_name=converted_file_name,
+        original_size_mb=round(
+            len(file_bytes) / 1024 / 1024,
+            2,
+        ),
+        converted_size_mb=round(
+            len(converted_bytes) / 1024 / 1024,
+            2,
+        ),
+    )
+
+    return (
+        converted_bytes,
+        converted_file_name,
+    )
+
+
+def prepare_excel_file_without_strikethrough(
+    file_bytes,
+    file_name,
+):
+    """
+    Prepares every DIH/MOD Excel file before it is read.
+
+    Processing sequence:
+
+        XLS  -> LibreOffice conversion -> XLSX
+        XLSX -> used directly
+        XLSM -> used directly
+
+    Then:
+
+        XLSX/XLSM -> openpyxl rich-text processing
+                  -> remove strikethrough text
+                  -> pandas reads the cleaned workbook.
+
+    Returns:
+        (
+            cleaned_file_bytes,
+            effective_file_name,
+        )
+    """
+
+    extension = Path(file_name).suffix.lower()
+
+    effective_bytes = file_bytes
+    effective_file_name = file_name
+
+    # --------------------------------------------------------
+    # Step 1: Always convert legacy XLS to XLSX first.
+    # --------------------------------------------------------
+    if extension == ".xls":
+        (
+            effective_bytes,
+            effective_file_name,
+        ) = convert_xls_to_xlsx_with_libreoffice(
+            file_bytes,
+            file_name,
+        )
+
+    # --------------------------------------------------------
+    # Step 2: Remove strikethrough text from the resulting
+    # modern Excel workbook.
+    # --------------------------------------------------------
+    cleaned_bytes = (
+        remove_strikethrough_from_excel_bytes(
+            effective_bytes,
+            effective_file_name,
+        )
+    )
+
+    log_info(
+        "Excel file prepared for DIH/MOD reading",
+        original_file_name=file_name,
+        effective_file_name=effective_file_name,
+        original_extension=extension,
+        effective_extension=Path(
+            effective_file_name
+        ).suffix.lower(),
+    )
+
+    return (
+        cleaned_bytes,
+        effective_file_name,
+    )
 
 def get_excel_engines(file_name):
     extension = Path(file_name).suffix.lower()
@@ -2181,6 +2766,52 @@ def detect_dih_header_row(
 # ============================================================
 # REVISION HELPERS
 # ============================================================
+def is_dih_z_revision(marker):
+    """
+    Returns True for DIH terminal revisions such as:
+    AZ, DZ, EZ, HAZ, JAZ.
+    """
+    marker = normalize_header(marker)
+
+    return bool(
+        re.fullmatch(
+            r"[A-Z]{1,3}Z",
+            marker,
+        )
+    )
+
+
+def get_dih_z_family(marker):
+    """
+    Gets the DIH family from a terminal Z revision.
+
+    Examples:
+        AZ  -> A
+        DZ  -> D
+        HAZ -> HA
+    """
+    marker = normalize_header(marker)
+
+    if not is_dih_z_revision(marker):
+        return ""
+
+    return get_dih_family(f"{marker[:-1]}1")
+
+
+def create_dih_z_header(family):
+    """
+    Creates a terminal-Z revision header.
+
+    Examples:
+        family D -> B4 Stage DZ
+        family A -> A2 Stage AZ
+    """
+    group = DIH_GROUPS.get(family)
+
+    if group is None or not group["include_az"]:
+        return ""
+
+    return f"{group['name']} {family}Z"
 
 def parse_revision_marker(marker):
     marker = normalize_header(marker)
@@ -2247,8 +2878,10 @@ def normalize_approval_status(value):
 
 def parse_approval_date(value):
     """
-    Returns a pandas Timestamp where possible.
-    Blank or invalid dates return NaT.
+    Parses approval dates using the required formats only.
+
+    Transmittal forms use DD/MM/YYYY.
+    Existing generated workbooks use YYYY-MM-DD.
     """
 
     if is_blank(value):
@@ -2257,16 +2890,28 @@ def parse_approval_date(value):
     if isinstance(value, (pd.Timestamp, datetime)):
         return pd.Timestamp(value)
 
-    try:
-        parsed = pd.to_datetime(
-            str(value).strip(),
-            errors="coerce",
-            dayfirst=True,
-        )
+    text = clean_value(value)
 
-        return parsed
-    except Exception:
+    if not text:
         return pd.NaT
+
+    date_formats = [
+        "%Y-%m-%d",   # Existing workbook/export format
+        "%d/%m/%Y",   # Transmittal format: 12/04/2024 = 12 April
+        "%d-%m-%Y",
+        "%d/%m/%y",
+        "%d-%m-%y",
+    ]
+
+    for date_format in date_formats:
+        try:
+            return pd.Timestamp(
+                datetime.strptime(text, date_format)
+            )
+        except ValueError:
+            continue
+
+    return pd.NaT
 
 
 def format_approval_date(value):
@@ -2474,19 +3119,41 @@ def is_transmittal_drawing_header(value):
 
 
 def is_transmittal_revision_header(value):
+    """
+    Detects transmittal revision column headers.
+
+    Supports examples such as:
+
+        Rev
+        Rev:
+        Rev No.
+        Rev: No.
+        Revision
+        Revision No.
+        Version
+        Version No.
+    """
+
     text = normalize_header(value)
 
-    text = re.sub(
-        r"[\s:.\-]+$",
+    if not text:
+        return False
+
+    # Remove spaces and punctuation so all of these become:
+    # REVNO / REVISIONNO / VERSIONNO
+    compact_text = re.sub(
+        r"[\s:.\-]+",
         "",
         text,
-    ).strip()
+    )
 
-    return text in {
+    return compact_text in {
         "REV",
+        "REVNO",
         "REVISION",
-        "REVISION NO",
+        "REVISIONNO",
         "VERSION",
+        "VERSIONNO",
     }
 
 
@@ -3043,6 +3710,23 @@ def extract_transmittal_table_records(
                     or table_revision
                 )
 
+                # A drawing-specific appended revision different from the
+                # table Rev is a modification transmittal.
+                #
+                # Example:
+                #
+                # Table Rev: A3
+                # Drawing:   1252/W/SHD/ALT/R35/211/A2
+                #
+                # Result:
+                # Drawing:   1252/W/SHD/ALT/R35/211
+                # Revision:  A2
+                # Is MOD:    True
+                is_appended_revision_modification = bool(
+                    appended_revision
+                    and appended_revision != table_revision
+                )
+
                 records.append(
                     {
                         "Normalized Drawing Number":
@@ -3055,7 +3739,10 @@ def extract_transmittal_table_records(
                             status,
                         "Approval Date":
                             approval_date,
-                        "Source Row": full_row_text,
+                        "Source Row": 
+                            full_row_text,
+                        "Is Appended Revision Modification":
+                            is_appended_revision_modification,
                     }
                 )
 
@@ -3066,6 +3753,7 @@ def extract_transmittal_table_records(
         "Status",
         "Approval Date",
         "Source Row",
+        "Is Appended Revision Modification",
     ]
 
     if not records:
@@ -3498,6 +4186,7 @@ def combine_transmittal_registers(
                 "Status",
                 "Approval Date",
                 "Source Row",
+                "Is Appended Revision Modification",
             ]
         )
 
@@ -3571,6 +4260,12 @@ def combine_transmittal_registers(
                             "",
                         )
                     ),
+                "Is Appended Revision Modification": bool(
+                    latest.get(
+                        "Is Appended Revision Modification",
+                        False,
+                    )
+                ),
             }
         )
 
@@ -3749,9 +4444,20 @@ def get_transmittal_column_group(column):
 
 def is_modification_transmittal(row):
     """
-    Returns True when the transmittal row describes a
-    modification drawing/transmittal.
+    Returns True when the transmittal row represents a modification.
     """
+
+    appended_revision_modification = row.get(
+        "Is Appended Revision Modification",
+        False,
+    )
+
+    if (
+        appended_revision_modification is True
+        or clean_value(appended_revision_modification).upper()
+        in {"TRUE", "YES", "1"}
+    ):
+        return True
 
     text = " ".join(
         [
@@ -3852,7 +4558,12 @@ def build_transmittal_record_lookup(
             "Is Modification": is_modification_transmittal(
                 row
             ),
-
+            "Is Appended Revision Modification": bool(
+                row.get(
+                    "Is Appended Revision Modification",
+                    False,
+                )
+            ),
             "Is Detail Design": is_detail_design_transmittal(
                 row
             ),
@@ -3932,6 +4643,480 @@ def add_transmittal_mod_headers(
             result[mod_header] = ""
 
     return result
+
+# ============================================================
+# DIH LOCATION / SUB-LOCATION CLASSIFICATION
+# ============================================================
+
+def get_dih_contract_title_text(
+    raw_df,
+    header_row,
+):
+    """
+    Reads Contract Title / Delivery Title text from the section above
+    the DIH table header.
+
+    This intentionally does not use the file name. It uses the actual
+    DIH worksheet document heading/content.
+    """
+
+    if raw_df is None or raw_df.empty:
+        return ""
+
+    if header_row <= 0:
+        return ""
+
+    title_parts = []
+
+    heading_df = raw_df.iloc[:header_row]
+
+    for _, row in heading_df.iterrows():
+        row_values = [
+            clean_value(value)
+            for value in row.tolist()
+            if clean_value(value)
+        ]
+
+        if not row_values:
+            continue
+
+        row_text = " ".join(row_values)
+        normalized_row_text = normalize_header(row_text)
+
+        if (
+            "CONTRACT TITLE" in normalized_row_text
+            or "DELIVERY TITLE" in normalized_row_text
+        ):
+            title_parts.append(row_text)
+
+    # Fallback: search all header-area text only.
+    # Do not search the drawing rows because drawing titles could
+    # incorrectly influence the document-level classification.
+    if not title_parts:
+        for value in heading_df.astype(
+            object
+        ).to_numpy().ravel():
+            text = clean_value(value)
+
+            if text:
+                title_parts.append(text)
+
+    return " ".join(title_parts)
+
+def detect_drawing_type_from_text(text):
+    """
+    Detects the configured Drawing Type from DIH document heading text.
+
+    Priority is important.
+
+    PDC types must be detected before generic DETAIL DESIGN because
+    these headings should be classified as PDC drawings:
+
+        DWG-Detail Design-New PDC
+            -> New PDC
+
+        DWG-Detail Design-Additional New PDC
+            -> Additional New PDC
+
+        DWG-Detail Design-Existing PDC
+            -> PDC Existing
+    """
+
+    text = normalize_header(text)
+
+    if not text:
+        return ""
+
+    # --------------------------------------------------------
+    # Priority 1: PDC types.
+    #
+    # Check Additional New PDC first because its wording includes
+    # New PDC. Without this order it could incorrectly become
+    # only New PDC.
+    # --------------------------------------------------------
+    pdc_type_priority = [
+        (
+            "Additional New PDC",
+            [
+                "ADDITIONAL NEW PDC",
+                "ADDITAL NEW PDC",
+                "ADDITIONAL PDC",
+            ],
+        ),
+        (
+            "New PDC",
+            [
+                "NEW PDC",
+                "PDC NEW",
+            ],
+        ),
+        (
+            "PDC Existing",
+            [
+                "EXISTING PDC",
+                "PDC EXISTING",
+            ],
+        ),
+    ]
+
+    for drawing_type, aliases in pdc_type_priority:
+        for alias in aliases:
+            alias_text = normalize_header(alias)
+
+            if alias_text and alias_text in text:
+                return drawing_type
+
+    # --------------------------------------------------------
+    # Priority 2: all ordinary Drawing Types.
+    #
+    # PDC types are intentionally excluded because they have
+    # already been checked above.
+    # --------------------------------------------------------
+    excluded_types = {
+        "PDC Existing",
+        "New PDC",
+        "Additional New PDC",
+    }
+
+    sorted_types = sorted(
+        [
+            (drawing_type, aliases)
+            for drawing_type, aliases
+            in DRAWING_TYPE_ALIASES.items()
+            if drawing_type not in excluded_types
+        ],
+        key=lambda item: max(
+            len(normalize_header(alias))
+            for alias in item[1]
+        ),
+        reverse=True,
+    )
+
+    for drawing_type, aliases in sorted_types:
+        for alias in aliases:
+            alias_text = normalize_header(alias)
+
+            if alias_text and alias_text in text:
+                return drawing_type
+
+    return ""
+
+
+def get_dih_drawing_type(
+    raw_df,
+    header_row,
+):
+    """
+    Reads DIH heading text above the drawing table and extracts
+    the configured Drawing Type only from the text after DWG.
+
+    This does not use the uploaded file name.
+
+    Example source:
+
+        ITC-A04-THW-GEN-DWG-SER ROOM LAYOUT FOR THW
+
+    Result:
+
+        SER Room Layout
+    """
+
+    if raw_df is None or raw_df.empty:
+        return ""
+
+    if header_row <= 0:
+        return ""
+
+    heading_df = raw_df.iloc[:header_row]
+
+    # Review each heading row separately so the search remains
+    # focused on document/header content rather than drawing rows.
+    for _, row in heading_df.iterrows():
+        row_values = [
+            clean_value(value)
+            for value in row.tolist()
+            if clean_value(value)
+        ]
+
+        if not row_values:
+            continue
+
+        row_text = " ".join(row_values)
+
+        # Only classify the part of the header after DWG.
+        #
+        # Supports:
+        # DWG-SER ROOM LAYOUT
+        # DWG - SER ROOM LAYOUT
+        # DWG: SER ROOM LAYOUT
+        # DWG_SER ROOM LAYOUT
+        drawing_type_match = re.search(
+            r"(?i)\bDWG\s*[-_:]?\s*(.+)$",
+            row_text,
+        )
+
+        if not drawing_type_match:
+            continue
+
+        drawing_type_text = drawing_type_match.group(1)
+
+        drawing_type = detect_drawing_type_from_text(
+            drawing_type_text
+        )
+
+        if drawing_type:
+            return drawing_type
+
+    return ""
+
+def get_location_base_station(station_name):
+    """
+    Converts special station codes to their parent location.
+    """
+
+    station = normalize_header(station_name)
+
+    shd_codes = {
+        "SHD",
+        "AB3",
+        "AB11",
+        "MB",
+        "TRT",
+    }
+
+    if station in shd_codes:
+        return "SHD"
+
+    return clean_value(station)
+
+
+def contains_location_pair(
+    text,
+    main_location,
+    sub_location,
+):
+    """
+    Matches formats such as:
+
+        KOW-TCL
+        KOW - TCL
+        KOWTCL
+        KOW / TCL
+        KOW_TCL
+    """
+
+    normalized_text = normalize_header(text)
+
+    main_location = normalize_header(main_location)
+    sub_location = normalize_header(sub_location)
+
+    if not normalized_text:
+        return False
+
+    separated_pattern = (
+        rf"(?<![A-Z0-9])"
+        rf"{re.escape(main_location)}"
+        rf"\s*[-_/]?\s*"
+        rf"{re.escape(sub_location)}"
+        rf"(?![A-Z0-9])"
+    )
+
+    joined_pattern = (
+        rf"(?<![A-Z0-9])"
+        rf"{re.escape(main_location)}"
+        rf"{re.escape(sub_location)}"
+        rf"(?![A-Z0-9])"
+    )
+
+    return bool(
+        re.search(separated_pattern, normalized_text)
+        or re.search(joined_pattern, normalized_text)
+    )
+
+def choose_best_location_group(
+    existing_group,
+    new_group,
+):
+    """
+    Chooses the more specific location grouping.
+
+    Examples:
+
+        Existing: HOK - AEL
+        New:      HOK
+        Result:   HOK - AEL
+
+        Existing: KOW
+        New:      KOW - TCL
+        Result:   KOW - TCL
+
+        Existing: SHD - AB3
+        New:      SHD
+        Result:   SHD - AB3
+    """
+
+    existing_group = clean_value(existing_group)
+    new_group = clean_value(new_group)
+
+    if not existing_group:
+        return new_group
+
+    if not new_group:
+        return existing_group
+
+    existing_key = normalize_header(existing_group)
+    new_key = normalize_header(new_group)
+
+    # Same result; no change is required.
+    if existing_key == new_key:
+        return existing_group
+
+    # A subgroup contains " - ", e.g.:
+    # HOK - AEL
+    # KOW - TCL
+    # TSY - UP
+    # SHD - AB3
+    existing_is_subgroup = " - " in existing_group
+    new_is_subgroup = " - " in new_group
+
+    # Never replace a specific existing subgroup with
+    # a generic base station.
+    if existing_is_subgroup and not new_is_subgroup:
+        return existing_group
+
+    # Allow a newly detected specific subgroup to improve
+    # an old generic station assignment.
+    if new_is_subgroup and not existing_is_subgroup:
+        return new_group
+
+    # If both are equally specific but different, prefer the
+    # new result because it came from newly uploaded DIH/MOD data.
+    return new_group
+
+def detect_dih_location_group(
+    station_name,
+    drawing_title,
+    contract_title_text,
+):
+    """
+    Determines the output worksheet name for one DIH drawing.
+
+    SHD output worksheets:
+        SHD
+        SHD - AB3
+        SHD - AB11
+        SHD - MB
+        SHD - TRT
+
+    Direct drawing-station mapping:
+        AB3  -> SHD - AB3
+        AB11 -> SHD - AB11
+        MB   -> SHD - MB
+        TRT  -> SHD - TRT
+
+    For drawings whose station is SHD, the Drawing Title and then
+    Contract / Delivery Title are used to identify any SHD subgroup.
+    """
+
+    station_key = normalize_header(station_name)
+
+    # --------------------------------------------------------
+    # Direct station-to-worksheet mapping.
+    #
+    # Prevents AB3, AB11, MB and TRT drawings from falling
+    # into the general SHD worksheet.
+    # --------------------------------------------------------
+    direct_station_groups = {
+        "AB3": "SHD - AB3",
+        "AB11": "SHD - AB11",
+        "MB": "SHD - MB",
+        "TRT": "SHD - TRT",
+    }
+
+    if station_key in direct_station_groups:
+        return direct_station_groups[station_key]
+
+    base_station = get_location_base_station(
+        station_name
+    )
+
+    if not base_station:
+        return ""
+
+    drawing_title = clean_value(drawing_title)
+    contract_title_text = clean_value(
+        contract_title_text
+    )
+
+    # Drawing title is more specific than contract title.
+    search_sources = [
+        drawing_title,
+        contract_title_text,
+    ]
+
+    location_subgroups = {
+        "HOK": [
+            ("AEL", "HOK - AEL"),
+            ("TCL", "HOK - TCL"),
+        ],
+        "KOW": [
+            ("AEL", "KOW - AEL"),
+            ("TCL", "KOW - TCL"),
+        ],
+        "TSY": [
+            ("UP", "TSY - UP"),
+            ("DN", "TSY - DN"),
+        ],
+        "SHD": [
+            ("AB11", "SHD - AB11"),
+            ("AB3", "SHD - AB3"),
+            ("MB", "SHD - MB"),
+            ("TRT", "SHD - TRT"),
+        ],
+    }
+
+    possible_subgroups = location_subgroups.get(
+        base_station,
+        [],
+    )
+
+    for source_text in search_sources:
+        source_text = clean_value(source_text)
+
+        if not source_text:
+            continue
+
+        normalized_source = normalize_header(
+            source_text
+        )
+
+        for sub_location, worksheet_name in possible_subgroups:
+            # Examples:
+            # SHD-AB3
+            # SHD AB3
+            # SHDAB3
+            if contains_location_pair(
+                source_text,
+                base_station,
+                sub_location,
+            ):
+                return worksheet_name
+
+            # Example:
+            # Drawing station: SHD
+            # Drawing title: AB3 DRAWING INDEX
+            if re.search(
+                rf"(?<![A-Z0-9])"
+                rf"{re.escape(sub_location)}"
+                rf"(?![A-Z0-9])",
+                normalized_source,
+            ):
+                return worksheet_name
+
+    # SHD drawings with no AB3 / AB11 / MB / TRT identifier
+    # remain in the ordinary SHD worksheet.
+    return base_station
+
 # ============================================================
 # DIH REGISTER
 # ============================================================
@@ -4198,6 +5383,22 @@ def read_dih_register(
         )
     )
 
+    contract_title_text = get_dih_contract_title_text(
+        raw_df,
+        header_row,
+    )
+
+    # Detect Drawing Type from DIH heading text after DWG.
+    #
+    # Example:
+    # ITC-B04-THW-ATC-DWG-CT RC LAYOUT
+    # -> CT RC Layout
+    document_drawing_type = get_dih_drawing_type(
+        raw_df,
+        header_row,
+    )
+    
+
     # Read actual DIH content to identify Scheme Plan or Bonding Plan.
     # This does not depend on the uploaded file name.
     document_plan_type = (
@@ -4208,14 +5409,24 @@ def read_dih_register(
 
     output = pd.DataFrame(index=df.index)
 
-    output["DIH Drawing Number"] = (
-        df[drawing_column].apply(clean_value)
-    )
-
+    # Select a valid drawing after the Excel-cell strikethrough text
+    # has already been removed.
+    #
+    # This handles:
+    #
+    #   struck-through old number + valid replacement number
+    #
+    # and duplicated valid numbers remaining after removal.
     output["Normalized Drawing Number"] = (
         df[drawing_column].apply(
-            normalize_drawing_number
+            select_single_valid_dih_drawing_number
         )
+    )
+
+    # Export only the validated normalized drawing number.
+    # This removes all internal spaces.
+    output["DIH Drawing Number"] = (
+        output["Normalized Drawing Number"]
     )
 
     output["DIH Description"] = (
@@ -4223,6 +5434,24 @@ def read_dih_register(
             clean_description
         )
     )
+
+    # One DIH document normally represents one drawing type.
+    # The type comes from the DIH heading, not from the file name.
+    output["DIH Drawing Type"] = document_drawing_type
+
+    output["DIH Location Group"] = [
+        detect_dih_location_group(
+            station_name=extract_area_from_drawing_number(
+                drawing_number
+            ),
+            drawing_title=drawing_title,
+            contract_title_text=contract_title_text,
+        )
+        for drawing_number, drawing_title in zip(
+            output["Normalized Drawing Number"],
+            output["DIH Description"],
+        )
+    ]
 
     categories = []
     revisions = []
@@ -4315,19 +5544,13 @@ def get_dynamic_dih_headers(dih_df):
         for marker in extract_dih_revision_markers(
             revision
         ):
-            if marker == "AZ":
-                family = "A"
+            if is_dih_z_revision(marker):
+                family = get_dih_z_family(marker)
 
-                az_header = (
-                    create_dih_az_header(
-                        family
-                    )
-                )
+                z_header = create_dih_z_header(family)
 
-                if az_header:
-                    headers.append(
-                        az_header
-                    )
+                if z_header:
+                    headers.append(z_header)
 
                 continue
 
@@ -4413,15 +5636,10 @@ def map_dih_revision_to_headers(
     for marker in extract_dih_revision_markers(
         revision
     ):
-        if marker == "AZ":
-            # AZ belongs to the currently detected DIH family.
-            # If the DIH revision field contains only AZ, use A
-            # as the default family.
-            family = "A"
+        if is_dih_z_revision(marker):
+            family = get_dih_z_family(marker)
 
-            header = create_dih_az_header(
-                family
-            )
+            header = create_dih_z_header(family)
 
             if header in dynamic_headers:
                 result[header] = marker
@@ -4490,6 +5708,8 @@ def create_dih_lookup(
             continue
 
         descriptions = []
+        drawing_types = []
+        location_groups = []
         phase_values = {}
         categories = []
 
@@ -4503,6 +5723,30 @@ def create_dih_lookup(
 
             if description:
                 descriptions.append(description)
+
+            drawing_type = clean_value(
+                row.get(
+                    "DIH Drawing Type",
+                    "",
+                )
+            )
+
+            if drawing_type:
+                drawing_types.append(
+                    drawing_type
+                )
+            
+            location_group = clean_value(
+                row.get(
+                    "DIH Location Group",
+                    "",
+                )
+            )
+
+            if location_group:
+                location_groups.append(
+                    location_group
+                )
 
             # Always define category for every DIH row.
             category = clean_value(
@@ -4543,6 +5787,12 @@ def create_dih_lookup(
         lookup[drawing_number] = {
             "Description": first_non_blank_description(
                 descriptions
+            ),
+            "Drawing Type": first_non_blank(
+                drawing_types
+            ),
+            "Location Group": first_non_blank(
+                location_groups
             ),
             "Phase Values": phase_values,
             "Categories": categories,
@@ -4611,6 +5861,7 @@ def get_header_group(header):
     if column_text in {
         "Drawing Ref",
         "C1252 Drawing",
+        DRAWING_TYPE_COLUMN,
         "Description",
     }:
         return column_text
@@ -5083,16 +6334,15 @@ def read_modification_register(
         index=range(len(df))
     )
 
-    output["Modification Drawing Number"] = (
-        df["_SelectedDrawingNumber"].apply(
-            clean_value
+    output["Normalized Drawing Number"] = (
+        df["_NormalizedSelectedDrawing"].apply(
+            normalize_drawing_number
         )
     )
 
-    output["Normalized Drawing Number"] = (
-        df["_NormalizedSelectedDrawing"].apply(
-            clean_value
-        )
+    # Always export the normalized valid drawing number.
+    output["Modification Drawing Number"] = (
+        output["Normalized Drawing Number"]
     )
 
     output["Description"] = (
@@ -5196,11 +6446,24 @@ def combine_duplicate_master_rows(df):
 
             if column == "Description":
                 # Keep only the description from the first record.
-                # Do not concatenate descriptions from multiple
-                # Modification Sheet files.
                 first_row[column] = clean_description(
                     group.iloc[0][column]
                 )
+
+            elif column == DRAWING_TYPE_COLUMN:
+                # A drawing should have one drawing type.
+                # Keep the first non-blank DIH-derived type.
+                first_row[column] = first_non_blank(
+                    values
+                )
+
+            elif column == "_Location Group":
+                # Do not combine worksheet group names.
+                #
+                # A drawing must belong to one worksheet only.
+                # The first non-blank DIH-derived location group wins.
+                first_row[column] = first_non_blank(values)
+
             else:
                 first_row[column] = (
                     combine_unique_values(values)
@@ -5237,13 +6500,15 @@ def create_final_master(
     if dih_df is None:
         dih_df = pd.DataFrame(
             columns=[
-                "DIH Drawing Number",
-                "Normalized Drawing Number",
-                "DIH Description",
-                "DIH Category",
-                "DIH Revision",
-                "DIH Plan Type",
-            ]
+            "DIH Drawing Number",
+            "Normalized Drawing Number",
+            "DIH Description",
+            "DIH Drawing Type",
+            "DIH Location Group",
+            "DIH Category",
+            "DIH Revision",
+            "DIH Plan Type",
+        ]
         )
 
     dih_headers = get_dynamic_dih_headers(
@@ -5307,6 +6572,8 @@ def create_final_master(
             normalized_number,
             {
                 "Description": "",
+                "Drawing Type": "",
+                "Location Group": "",
                 "Phase Values": {},
                 "Categories": [],
             },
@@ -5327,12 +6594,69 @@ def create_final_master(
             )
         )
 
+        # ----------------------------------------------------
+        # Determine output worksheet for MOD records.
+        #
+        # Priority:
+        #
+        # 1. Matching DIH location group, when available.
+        # 2. MOD description/title.
+        # 3. Normal station fallback later in
+        #    get_output_worksheet_group().
+        #
+        # Examples:
+        #
+        # 1252/W/HOK/ALT/R05/002
+        # Description:
+        # SER HOK UP AEL DRAWING REGISTERS INDEX
+        #
+        # -> HOK - AEL
+        #
+        # 1252/W/KOW/ALT/R35/212
+        # Description:
+        # KOW-TCL DRAWING INDEX
+        #
+        # -> KOW - TCL
+        # ----------------------------------------------------
+
+        dih_location_group = clean_value(
+            matched_dih.get(
+                "Location Group",
+                "",
+            )
+        )
+
+        mod_description_location_group = (
+            detect_dih_location_group(
+                station_name=extract_area_from_drawing_number(
+                    normalized_number
+                ),
+                drawing_title=description,
+                contract_title_text="",
+            )
+        )
+
+        # Prefer DIH classification where it exists.
+        # If no DIH is uploaded or the MOD drawing is not present
+        # in DIH, use the MOD Description classification.
+        location_group = (
+            dih_location_group
+            or mod_description_location_group
+        )
+
         output_row = {
             "Drawing Ref": extract_drawing_ref(
                 drawing_number
             ),
             "C1252 Drawing": drawing_number,
+            DRAWING_TYPE_COLUMN: clean_value(
+                matched_dih.get(
+                    "Drawing Type",
+                    "",
+                )
+            ),
             "Description": description,
+            "_Location Group": location_group,
         }
 
         for header in all_phase_headers:
@@ -5454,9 +6778,21 @@ def create_final_master(
                 drawing_number
             ),
             "C1252 Drawing": drawing_number,
+            DRAWING_TYPE_COLUMN: clean_value(
+                dih_data.get(
+                    "Drawing Type",
+                    "",
+                )
+            ),
             "Description": clean_description(
                 dih_data.get(
                     "Description",
+                    "",
+                )
+            ),
+            "_Location Group": clean_value(
+                dih_data.get(
+                    "Location Group",
                     "",
                 )
             ),
@@ -5476,7 +6812,9 @@ def create_final_master(
     columns = [
         "Drawing Ref",
         "C1252 Drawing",
+        DRAWING_TYPE_COLUMN,
         "Description",
+        "_Location Group",
     ] + all_phase_headers
 
     if not output_rows:
@@ -5586,6 +6924,7 @@ def combine_existing_master_header(
     if main_header in {
         "Drawing Ref",
         "C1252 Drawing",
+        DRAWING_TYPE_COLUMN,
         "Description",
     }:
         return main_header
@@ -5926,6 +7265,7 @@ def extract_existing_approval_data(
             ) in {
                 "DRAWING REF",
                 "C1252 DRAWING",
+                normalize_header(DRAWING_TYPE_COLUMN),
                 "DESCRIPTION",
             }:
                 continue
@@ -6126,7 +7466,6 @@ def get_existing_approval_data_for_station(
         AIR + AWE -> AIR
         SUN + YOT -> SUN & YOT
         TCE + TCETUC -> TCE
-        SHD + AB11 + AB3 + MB = SHD
 
     Approval data from matching legacy worksheets is combined.
     """
@@ -6242,6 +7581,15 @@ def read_existing_master_list(
         DESCRIPTION_ALIASES,
     )
 
+    drawing_type_column = find_column(
+        df,
+        [
+            DRAWING_TYPE_COLUMN,
+            "Type",
+            "Drawing Category",
+        ],
+    )
+
     drawing_ref_column = find_column(
         df,
         DRAWING_REF_ALIASES,
@@ -6258,6 +7606,14 @@ def read_existing_master_list(
         rename_columns[
             description_column
         ] = "Description"
+
+    if (
+        drawing_type_column is not None
+        and drawing_type_column != DRAWING_TYPE_COLUMN
+    ):
+        rename_columns[
+            drawing_type_column
+        ] = DRAWING_TYPE_COLUMN
 
     if (
         drawing_ref_column is not None
@@ -6277,22 +7633,71 @@ def read_existing_master_list(
     if "Description" not in df.columns:
         df["Description"] = ""
 
-    df["C1252 Drawing"] = df[
-        "C1252 Drawing"
-    ].apply(clean_value)
+    if DRAWING_TYPE_COLUMN not in df.columns:
+        df[DRAWING_TYPE_COLUMN] = ""
 
+    # Normalize and validate the full C1252 drawing number.
     df["Normalized Drawing Number"] = df[
         "C1252 Drawing"
-    ].apply(normalize_drawing_number)
+    ].apply(
+        normalize_drawing_number
+    )
 
+    # Only retain the normalized valid drawing number.
+    # Example:
+    # 1252/W/KOW/ALT/R32/ 652
+    # -> 1252/W/KOW/ALT/R32/652
+    df["C1252 Drawing"] = df[
+        "Normalized Drawing Number"
+    ]
+
+    # Always regenerate Drawing Ref from the valid drawing number.
+    # Example:
+    # 1252/W/KOW/ALT/R32/652
+    # -> R32/652
     df["Drawing Ref"] = df[
-        "Drawing Ref"
-    ].apply(clean_value)
+        "C1252 Drawing"
+    ].apply(
+        extract_drawing_ref
+    )
 
     df["Description"] = df[
         "Description"
-    ].apply(clean_description)
+    ].apply(
+        clean_description
+    )
 
+    df[DRAWING_TYPE_COLUMN] = df[
+            DRAWING_TYPE_COLUMN
+        ].apply(clean_value)
+
+    # --------------------------------------------------------
+    # Restore DIH-derived output worksheet assignments from the
+    # hidden metadata sheet.
+    #
+    # Example:
+    # 1252/W/KOW/ALT/R35/212 -> KOW - TCL
+    #
+    # This prevents a later update from moving the drawing back
+    # to KOW merely because its station code is KOW.
+    # --------------------------------------------------------
+
+    existing_location_mapping = (
+        read_existing_location_mapping(
+            file_bytes,
+            file_name,
+        )
+    )
+
+    df["_Location Group"] = df[
+        "Normalized Drawing Number"
+    ].map(
+        existing_location_mapping
+    ).fillna("").apply(clean_value)
+
+
+    # Remove rows where the drawing number did not match the required
+    # six-section C1252 drawing-number format.
     df = df[
         df[
             "Normalized Drawing Number"
@@ -6316,8 +7721,10 @@ def read_existing_master_list(
     standard_columns = [
         "Drawing Ref",
         "C1252 Drawing",
+        DRAWING_TYPE_COLUMN,
         "Description",
         "Normalized Drawing Number",
+        "_Location Group",
     ]
 
     remaining_columns = [
@@ -6365,6 +7772,7 @@ def merge_with_existing_master(
         for column in [
             "Drawing Ref",
             "C1252 Drawing",
+            DRAWING_TYPE_COLUMN,
             "Description",
         ]:
             if column not in dataframe.columns:
@@ -6413,6 +7821,7 @@ def merge_with_existing_master(
     standard_columns = [
         "Drawing Ref",
         "C1252 Drawing",
+        DRAWING_TYPE_COLUMN,
         "Description",
     ]
 
@@ -6504,6 +7913,16 @@ def merge_with_existing_master(
                     existing_index,
                     column,
                 ] = new_value
+            elif column == DRAWING_TYPE_COLUMN:
+                # Keep a single Drawing Type.
+                #
+                # Prefer a new DIH-derived value when available.
+                # Otherwise preserve the existing value.
+                existing.loc[
+                    existing_index,
+                    column,
+                ] = new_value or old_value
+
             elif column == "Description":
                 # Keep the existing description.
                 # Do not concatenate descriptions from DIH or
@@ -6512,6 +7931,26 @@ def merge_with_existing_master(
                     existing_index,
                     column,
                 ] = old_value
+
+            elif column == "_Location Group":
+                # Keep the most specific worksheet assignment.
+                #
+                # Examples:
+                #
+                # Existing: HOK - AEL
+                # New MOD:  HOK
+                # Result:   HOK - AEL
+                #
+                # Existing: KOW
+                # New MOD:  KOW - TCL
+                # Result:   KOW - TCL
+                existing.loc[
+                    existing_index,
+                    column,
+                ] = choose_best_location_group(
+                    old_value,
+                    new_value,
+                )
 
             else:
                 existing.loc[
@@ -6576,8 +8015,10 @@ def get_stage_groups_from_columns(df):
     excluded_columns = {
         "Drawing Ref",
         "C1252 Drawing",
+        DRAWING_TYPE_COLUMN,
         "Description",
         "Normalized Drawing Number",
+        "_Location Group",
     }
 
     for column in df.columns:
@@ -6620,36 +8061,80 @@ def get_active_stage_groups_for_row(
 
     return active_groups
 
-def is_detail_design_transmittal(row):
+def is_detail_design_or_ser_layout_text(value):
     """
-    Returns True only when the transmittal description/source text
-    contains CIRCUIT BOOK or SER LAYOUT.
+    Returns True only when the transmittal text contains one of the
+    approved drawing/document types:
+
+        DETAIL DESIGN
+        CIRCUIT BOOK
     """
 
-    text = clean_value(
-        row.get("Source Row", "")
-    )
-
-    text = normalize_header(text)
+    text = normalize_header(value)
 
     return (
-        "CIRCUIT BOOK" in text
-        or "SER LAYOUT" in text
+        "DETAIL DESIGN" in text
+        or "CIRCUIT BOOK" in text
     )
+
+def is_pdc_transmittal_text(value):
+    """
+    Returns True where the transmittal relates to any PDC type.
+
+    PDC transmittals must not be treated as Detail Design
+    transmittals, even if their title contains words such as
+    'Detail Design - New PDC'.
+    """
+
+    text = normalize_header(value)
+
+    pdc_keywords = [
+        "EXISTING PDC",
+        "PDC EXISTING",
+        "NEW PDC",
+        "PDC NEW",
+        "ADDITIONAL NEW PDC",
+        "ADDITIONAL PDC",
+        "ADDITAL NEW PDC",
+    ]
+
+    return any(keyword in text for keyword in pdc_keywords)
+
+
+def is_detail_design_transmittal(row):
+    """
+    A transmittal is eligible for Detail Design approval handling
+    only when it contains DETAIL DESIGN or CIRCUIT BOOK and is not
+    a PDC transmittal.
+    """
+
+    text = " ".join(
+        [
+            clean_value(row.get("Transmittal Stage", "")),
+            clean_value(row.get("Source Row", "")),
+        ]
+    )
+
+    # Important: PDC documents may contain phrases such as
+    # "Detail Design - New PDC". They are PDC drawings, not
+    # Detail Design drawings for approval-header purposes.
+    if is_pdc_transmittal_text(text):
+        return False
+
+    return is_detail_design_or_ser_layout_text(text)
 
 def build_transmittal_scope_lookup(
     transmittal_df,
 ):
     """
-    Builds a global approval lookup directly from the
-    transmittal records.
-
-    The lookup does not depend on the drawing existing in
-    the Master Drawing List.
+    Builds a transmittal approval lookup.
 
     Key:
 
-        Station + Revision + Stage
+        Drawing Number + Revision + Stage
+
+    This prevents a transmittal for KOW - TCL drawings from
+    incorrectly approving headers in KOW or KOW - AEL worksheets.
     """
 
     lookup = {}
@@ -6675,6 +8160,8 @@ def build_transmittal_scope_lookup(
     for order, (_, row) in enumerate(
         transmittal_df.iterrows()
     ):
+        # Modification transmittals are handled separately at
+        # individual drawing-cell level.
         if is_modification_transmittal(row):
             continue
 
@@ -6693,15 +8180,6 @@ def build_transmittal_scope_lookup(
         )
 
         if not drawing_number or not revision:
-            continue
-
-        station = normalize_header(
-            extract_area_from_drawing_number(
-                drawing_number
-            )
-        )
-
-        if not station:
             continue
 
         stage = clean_value(
@@ -6723,18 +8201,14 @@ def build_transmittal_scope_lookup(
         )
 
         key = (
-            station,
+            drawing_number,
             revision,
             stage_key,
         )
 
         candidate = {
-            "Status": normalize_approval_status(
-                row.get(
-                    "Status",
-                    "",
-                )
-            ),
+            "Drawing Number": drawing_number,
+            "Status": "APPROVED",
             "Approval Date": format_approval_date(
                 row.get(
                     "Approval Date",
@@ -6768,7 +8242,7 @@ def build_transmittal_scope_lookup(
 
         if latest is not None:
             lookup[key] = {
-                # Every matched transmittal is displayed as approved.
+                "Drawing Number": drawing_number,
                 "Status": "APPROVED",
                 "Approval Date": format_approval_date(
                     latest.get(
@@ -6782,7 +8256,6 @@ def build_transmittal_scope_lookup(
                         stage,
                     )
                 ),
-                # Important: retain the CIRCUIT BOOK / SER LAYOUT flag.
                 "Is Detail Design": bool(
                     latest.get(
                         "Is Detail Design",
@@ -6991,6 +8464,7 @@ def reorder_transmittal_columns(
         for column in [
             "Drawing Ref",
             "C1252 Drawing",
+            DRAWING_TYPE_COLUMN,
             "Description",
         ]
         if column in df.columns
@@ -7137,11 +8611,13 @@ def get_visible_columns_for_sheet(
     base_columns = [
         "Drawing Ref",
         "C1252 Drawing",
+        DRAWING_TYPE_COLUMN,
         "Description",
     ]
 
     internal_columns = {
         "Normalized Drawing Number",
+        "_Location Group",
         "_Transmittal Status Data",
         "_Transmittal Scope Status",
     }
@@ -7271,6 +8747,7 @@ def get_excel_subheader(column_name):
     if column_name in {
         "Drawing Ref",
         "C1252 Drawing",
+        DRAWING_TYPE_COLUMN,
         "Description",
     }:
         return column_name
@@ -7502,8 +8979,9 @@ def get_status_for_column(
         Is Detail Design,
         Transmittal Match Found
 
-    Detail Design is True only where the matched transmittal
-    description contains CIRCUIT BOOK or SER LAYOUT.
+    The match is based on actual drawing numbers contained in the
+    current output worksheet. This avoids incorrectly applying a
+    KOW - TCL transmittal to KOW or KOW - AEL worksheets.
     """
 
     revision = get_subheader_revision_value(
@@ -7520,90 +8998,96 @@ def get_status_for_column(
     if not column_stage_key:
         return "", "", False, False
 
-    # Find stations in the current worksheet.
-    sheet_stations = set()
-
     if (
-        sheet_df is not None
-        and not sheet_df.empty
-        and "C1252 Drawing" in sheet_df.columns
+        sheet_df is None
+        or sheet_df.empty
+        or "C1252 Drawing" not in sheet_df.columns
     ):
-        for drawing_number in sheet_df["C1252 Drawing"]:
-            station = extract_area_from_drawing_number(
-                drawing_number
-            )
+        return "", "", False, False
 
-            if station:
-                sheet_stations.add(
-                    normalize_header(station)
-                )
+    # --------------------------------------------------------
+    # Get every valid drawing number in this exact worksheet.
+    #
+    # Examples:
+    #
+    # KOW - TCL worksheet:
+    #   1252/W/KOW/ALT/R35/212
+    #   1252/W/KOW/ALT/R35/213
+    #
+    # KOW worksheet:
+    #   1252/W/KOW/ALT/R35/001
+    # --------------------------------------------------------
 
-    station_revision_records = []
+    worksheet_drawings = {
+        normalize_drawing_number(drawing_number)
+        for drawing_number in sheet_df["C1252 Drawing"]
+        if normalize_drawing_number(drawing_number)
+    }
 
+    if not worksheet_drawings:
+        return "", "", False, False
+
+    matching_records = []
+    stage_less_records = []
+    has_stage_specific_record = False
+
+   # --------------------------------------------------------
+    # transmittal_lookup keys are:
+    #
+    # (
+    #     normalized_drawing_number,
+    #     transmittal_revision,
+    #     normalized_stage,
+    # )
+    #
+    # This allows approvals to be matched only to drawings that
+    # are actually present in the current output worksheet.
+    # --------------------------------------------------------
     for key, record in transmittal_lookup.items():
         if not isinstance(key, tuple) or len(key) != 3:
             continue
 
-        (
-            record_station,
-            record_revision,
-            record_stage,
-        ) = key
-
-        record_station = normalize_header(
-            record_station
-        )
-
         record_revision = normalize_transmittal_revision(
-            record_revision
+            key[1]
         )
 
         record_stage_key = normalize_stage_text(
-            record_stage
+            key[2]
+        )
+
+        record_drawing = normalize_drawing_number(
+            record.get("Drawing Number", "")
         )
 
         if record_revision != revision:
             continue
 
-        if (
-            sheet_stations
-            and record_station not in sheet_stations
-        ):
+        # Only use transmittal records whose drawing actually
+        # exists in the current output worksheet.
+        if record_drawing not in worksheet_drawings:
             continue
 
-        station_revision_records.append(
-            (
-                record_stage_key,
-                record,
-            )
-        )
+        if record_stage_key:
+            has_stage_specific_record = True
 
-    if not station_revision_records:
-        return "", "", False, False
+            if record_stage_key == column_stage_key:
+                matching_records.append(record)
 
-    stage_specific_records = [
-        record
-        for record_stage_key, record
-        in station_revision_records
-        if record_stage_key != ""
-    ]
+        else:
+            stage_less_records.append(record)
 
-    stage_less_records = [
-        record
-        for record_stage_key, record
-        in station_revision_records
-        if record_stage_key == ""
-    ]
+    # --------------------------------------------------------
+    # If the transmittal explicitly identifies a stage, use
+    # only matching stage records.
+    # --------------------------------------------------------
 
-    if stage_specific_records:
-        matching_records = [
-            record
-            for record_stage_key, record
-            in station_revision_records
-            if record_stage_key == column_stage_key
-        ]
+    if has_stage_specific_record:
+        records_to_use = matching_records
 
     else:
+        # If a transmittal has no identifiable stage, retain your
+        # original behaviour: apply it only to the first matching
+        # revision column in the worksheet.
         if first_revision_columns is None:
             first_revision_columns = (
                 get_first_revision_columns(sheet_df)
@@ -7616,13 +9100,13 @@ def get_status_for_column(
         if column_name != first_column:
             return "", "", False, False
 
-        matching_records = stage_less_records
+        records_to_use = stage_less_records
 
-    if not matching_records:
+    if not records_to_use:
         return "", "", False, False
 
     latest = get_latest_transmittal_record(
-        pd.DataFrame(matching_records)
+        pd.DataFrame(records_to_use)
     )
 
     if latest is None:
@@ -7635,15 +9119,11 @@ def get_status_for_column(
         )
     )
 
-    # Do not change anything in the header unless the matching
-    # transmittal row contains CIRCUIT BOOK or SER LAYOUT.
-    #
-    # Return True as the fourth value so an old approval date from
-    # the existing workbook is NOT applied as a fallback.
+    # A transmittal was found for drawings in this worksheet.
+    # Do not fall back to an old workbook approval date.
     if not is_detail_design:
         return "", "", False, True
 
-    # Detail Design transmittals are always displayed as approved.
     return (
         "APPROVED",
         format_approval_date(
@@ -7962,6 +9442,97 @@ def apply_existing_approved_cell_values(
                 approved_format,
             )
 
+def get_stage_subheader_display(
+    column_name,
+    sheet_df,
+):
+    """
+    Returns:
+
+        (
+            display_subheader,
+            has_odf_detail_design,
+        )
+
+    Rule per worksheet and per revision column:
+
+    - If at least one drawing with a value in this revision column
+      has Drawing Type = Detail Design, show the normal revision
+      name only.
+
+          A1
+          A2
+          A3
+
+    - Only show:
+
+          A3
+          (No Detail Design)
+
+      when there are active drawing values in this column and none
+      of those drawings have Drawing Type = Detail Design.
+
+    MOD columns are excluded because MOD approvals are shown in
+    individual drawing cells.
+    """
+
+    subheader = get_excel_subheader(
+        column_name
+    )
+
+    revision = get_subheader_revision_value(
+        column_name
+    )
+
+    # Do not change ordinary non-revision columns.
+    if not revision:
+        return subheader, False
+
+    # MOD is not assessed at header level.
+    if normalize_header(column_name).endswith(" MOD"):
+        return subheader, False
+
+    if (
+        sheet_df is None
+        or sheet_df.empty
+        or column_name not in sheet_df.columns
+        or DRAWING_TYPE_COLUMN not in sheet_df.columns
+    ):
+        return subheader, False
+
+    # Check only drawings which have an actual value in this
+    # specific revision/substage column.
+    applicable_rows = sheet_df[
+        sheet_df[column_name].apply(
+            lambda value: bool(clean_value(value))
+        )
+    ]
+
+    if applicable_rows.empty:
+        return subheader, False
+
+    # Important:
+    #
+    # Any one Detail Design drawing is enough for the
+    # revision header to be treated as Detail Design.
+    has_odf_detail_design = any(
+        is_detail_design_or_ser_layout_text(
+            row.get(
+                DRAWING_TYPE_COLUMN,
+                "",
+            )
+        )
+        for _, row in applicable_rows.iterrows()
+    )
+
+    if has_odf_detail_design:
+        return subheader, True
+
+    return (
+        f"{subheader}\n(No Detail Design)",
+        False,
+    )
+
             
 def format_worksheet(
     workbook,
@@ -8052,6 +9623,7 @@ def format_worksheet(
     base_columns = {
         "Drawing Ref",
         "C1252 Drawing",
+        DRAWING_TYPE_COLUMN,
         "Description",
     }
 
@@ -8146,10 +9718,12 @@ def format_worksheet(
                     sub_index
                 ]
 
-                subheader = (
-                    get_excel_subheader(
-                        original_column
-                    )
+                (
+                    subheader,
+                    has_odf_detail_design,
+                ) = get_stage_subheader_display(
+                    original_column,
+                    df,
                 )
 
                 if not subheader:
@@ -8207,8 +9781,12 @@ def format_worksheet(
                 header_text = subheader
 
                 # Add the date only when the matched transmittal description
-                # contains CIRCUIT BOOK or SER LAYOUT.
-                if approval_date and is_detail_design:
+                # contains Detail Design or CIRCUIT BOOK.
+                if (
+                    approval_date
+                    and is_detail_design
+                    and has_odf_detail_design
+                ):
                     header_text = (
                         f"{subheader}\n"
                         f"(Detail Design: {approval_date})"
@@ -8308,6 +9886,19 @@ def format_worksheet(
             description_format,
         )
 
+    # Restore old approvals first.
+    #
+    # New transmittal values are written afterwards so they take
+    # priority over older values in the uploaded existing workbook.
+    apply_existing_approved_cell_values(
+        workbook,
+        worksheet,
+        df,
+        existing_cell_statuses,
+    )
+
+    # Apply current uploaded modification transmittals last.
+    # This ensures the newest transmittal revision/date is retained.
     if apply_transmittal_status:
         apply_modification_transmittal_values(
             workbook,
@@ -8315,13 +9906,6 @@ def format_worksheet(
             df,
             transmittal_record_lookup,
         )
-
-    apply_existing_approved_cell_values(
-        workbook,
-        worksheet,
-        df,
-        existing_cell_statuses,
-    )
 
 
 def safe_sheet_name(
@@ -8499,6 +10083,248 @@ def get_scheme_bonding_plan_dataframe(
     ].copy()
 
     return sort_by_drawing_ref(result)
+
+def get_output_worksheet_group(row):
+    """
+    Returns the final Excel worksheet name.
+
+    DIH-derived subgroup names are retained, for example:
+        SHD - AB3
+        SHD - AB11
+        SHD - MB
+        SHD - TRT
+
+    Simple station names use the configured grouping rules:
+        AWE -> AIR
+        YOT -> SUN & YOT
+        YOY -> TUC
+        TCETUC -> TCE
+    """
+
+    dih_location_group = clean_value(
+        row.get(
+            "_Location Group",
+            "",
+        )
+    )
+
+    if dih_location_group:
+        return get_station_worksheet_name(
+            dih_location_group
+        )
+
+    drawing_number = row.get(
+        "C1252 Drawing",
+        "",
+    )
+
+    station_name = extract_area_from_drawing_number(
+        drawing_number
+    )
+
+    return get_station_worksheet_name(
+        station_name
+    )
+
+def create_location_mapping_dataframe(final_df):
+    """
+    Creates a hidden metadata table that preserves the output
+    worksheet/location assignment for each drawing.
+
+    This is used when the generated workbook is later uploaded
+    in Update mode without the original DIH files.
+    """
+
+    result = pd.DataFrame(
+        columns=LOCATION_MAPPING_COLUMNS
+    )
+
+    if (
+        final_df is None
+        or final_df.empty
+        or "C1252 Drawing" not in final_df.columns
+    ):
+        return result
+
+    records = []
+
+    for _, row in final_df.iterrows():
+        drawing_number = normalize_drawing_number(
+            row.get("C1252 Drawing", "")
+        )
+
+        if not drawing_number:
+            continue
+
+        # Prefer the DIH-detected group already stored internally.
+        location_group = clean_value(
+            row.get("_Location Group", "")
+        )
+
+        # If DIH did not provide a location group, use the normal
+        # station worksheet grouping rules:
+        #
+        # AWE -> AIR
+        # YOT -> SUN & YOT
+        # YOY -> TUC
+        # TCETUC -> TCE
+        if not location_group:
+            location_group = get_output_worksheet_group(
+                row
+            )
+
+        if not location_group:
+            continue
+
+        records.append(
+            {
+                "C1252 Drawing": drawing_number,
+                "Location Group": location_group,
+            }
+        )
+
+    if not records:
+        return result
+
+    result = pd.DataFrame(records)
+
+    result["C1252 Drawing"] = result[
+        "C1252 Drawing"
+    ].apply(normalize_drawing_number)
+
+    result["Location Group"] = result[
+        "Location Group"
+    ].apply(clean_value)
+
+    result = result[
+        result["C1252 Drawing"].astype(str).str.strip() != ""
+    ].copy()
+
+    # One drawing must have one worksheet assignment.
+    # Keep the first assignment, which comes from the existing
+    # DIH-derived _Location Group where available.
+    result = result.drop_duplicates(
+        subset=["C1252 Drawing"],
+        keep="first",
+    )
+
+    return result[
+        LOCATION_MAPPING_COLUMNS
+    ].reset_index(drop=True)
+
+def read_existing_location_mapping(
+    file_bytes,
+    file_name,
+):
+    """
+    Reads the hidden _Location Mapping worksheet from a previously
+    generated Master Drawing List.
+
+    Returns:
+
+        {
+            "1252/W/KOW/ALT/R35/212": "KOW - TCL",
+            "1252/W/HOK/ALT/R10/001": "HOK - AEL",
+        }
+
+    If the worksheet does not exist, an empty dictionary is returned.
+    This allows older workbooks to continue working normally.
+    """
+
+    mapping = {}
+
+    try:
+        sheet_names = get_sheet_names(
+            file_bytes,
+            file_name,
+        )
+
+        mapping_sheet_name = None
+
+        for sheet_name in sheet_names:
+            if (
+                normalize_header(sheet_name)
+                == normalize_header(
+                    LOCATION_MAPPING_SHEET
+                )
+            ):
+                mapping_sheet_name = sheet_name
+                break
+
+        # Older workbooks will not have this sheet.
+        if not mapping_sheet_name:
+            return mapping
+
+        mapping_df = read_excel_sheet(
+            file_bytes,
+            file_name,
+            mapping_sheet_name,
+            header=0,
+        )
+
+        if mapping_df is None or mapping_df.empty:
+            return mapping
+
+        mapping_df.columns = make_unique_column_names(
+            mapping_df.columns
+        )
+
+        drawing_column = find_column(
+            mapping_df,
+            [
+                "C1252 Drawing",
+                "Drawing Number",
+                "Drawing No.",
+                "Drawing No",
+            ],
+        )
+
+        location_column = find_column(
+            mapping_df,
+            [
+                "Location Group",
+                "Output Worksheet",
+                "Worksheet",
+            ],
+        )
+
+        if (
+            drawing_column is None
+            or location_column is None
+        ):
+            return mapping
+
+        for _, row in mapping_df.iterrows():
+            drawing_number = normalize_drawing_number(
+                row.get(drawing_column, "")
+            )
+
+            location_group = clean_value(
+                row.get(location_column, "")
+            )
+
+            if drawing_number and location_group:
+                mapping[drawing_number] = location_group
+
+        log_info(
+            "Existing location mapping loaded",
+            file_name=file_name,
+            mapping_count=len(mapping),
+        )
+
+        return mapping
+
+    except Exception as error:
+        # Do not stop the update workflow if an old workbook
+        # does not contain valid mapping metadata.
+        log_warning(
+            "Could not read existing location mapping",
+            file_name=file_name,
+            error_type=type(error).__name__,
+        )
+
+        return mapping
+
 
 def generate_output_excel(
     final_df,
@@ -8724,8 +10550,9 @@ def generate_output_excel(
         #   TCE + TCETUC -> TCE
         # ----------------------------------------------------
 
-        station_worksheet_values = area_values.apply(
-            get_station_worksheet_name
+        station_worksheet_values = station_final_df.apply(
+            get_output_worksheet_group,
+            axis=1,
         )
 
         areas = [
@@ -8829,6 +10656,38 @@ def generate_output_excel(
             ],
             modification_details_df,
         )
+        # ====================================================
+        # HIDDEN LOCATION MAPPING WORKSHEET
+        # ====================================================
+
+        location_mapping_df = (
+            create_location_mapping_dataframe(
+                final_df
+            )
+        )
+
+        location_mapping_sheet = safe_sheet_name(
+            LOCATION_MAPPING_SHEET,
+            used_names,
+        )
+
+        location_mapping_df.to_excel(
+            writer,
+            sheet_name=location_mapping_sheet,
+            index=False,
+        )
+
+        format_information_worksheet(
+            workbook,
+            writer.sheets[location_mapping_sheet],
+            location_mapping_df,
+        )
+
+        # Hide technical metadata from ordinary users.
+        # It remains available for future Update mode uploads.
+        writer.sheets[
+            location_mapping_sheet
+        ].hide()
 
         # ====================================================
         # INFORMATION WORKSHEET
@@ -10354,6 +12213,8 @@ def render_master_drawing_list_interface():
                 "DIH Drawing Number",
                 "Normalized Drawing Number",
                 "DIH Description",
+                "DIH Drawing Type",
+                "DIH Location Group",
                 "DIH Category",
                 "DIH Revision",
                 "DIH Plan Type",
@@ -10412,12 +12273,20 @@ def render_master_drawing_list_interface():
                     for uploaded_modification_file in modification_files:
                         try:
                             (
+                                cleaned_modification_bytes,
+                                cleaned_modification_file_name,
+                            ) = prepare_excel_file_without_strikethrough(
+                                uploaded_modification_file.getvalue(),
+                                uploaded_modification_file.name,
+                            )
+
+                            (
                                 single_modification_df,
                                 single_modification_sheet,
                                 single_modification_header,
                             ) = read_modification_register(
-                                uploaded_modification_file.getvalue(),
-                                uploaded_modification_file.name,
+                                cleaned_modification_bytes,
+                                cleaned_modification_file_name,
                             )
 
                         except Exception as error:
@@ -10481,13 +12350,21 @@ def render_master_drawing_list_interface():
                     for uploaded_dih_file in dih_files:
                         try:
                             (
+                                cleaned_dih_bytes,
+                                cleaned_dih_file_name,
+                            ) = prepare_excel_file_without_strikethrough(
+                                uploaded_dih_file.getvalue(),
+                                uploaded_dih_file.name,
+                            )
+
+                            (
                                 single_dih_df,
                                 single_dih_sheet,
                                 single_dih_header,
                                 single_dih_category,
                             ) = read_dih_register(
-                                uploaded_dih_file.getvalue(),
-                                uploaded_dih_file.name,
+                                cleaned_dih_bytes,
+                                cleaned_dih_file_name,
                             )
 
                         except Exception as error:
@@ -10800,6 +12677,7 @@ def render_master_drawing_list_interface():
                     columns=[
                         "Drawing Ref",
                         "C1252 Drawing",
+                        DRAWING_TYPE_COLUMN,
                         "Description",
                     ]
                 )
