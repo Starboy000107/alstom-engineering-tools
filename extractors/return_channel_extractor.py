@@ -2100,72 +2100,61 @@ def build_terminal_debug_rect(
     connection_segment: dict | None,
 ) -> fitz.Rect:
     """
-    Build one local rectangle covering:
-      - the terminal text;
-      - the actual horizontal connection line.
+    Build a terminal debug rectangle.
 
-    This rectangle is independent of whether the line is green.
+    Width:
+        Exactly follows the CT-loop debug-box width: the extracted
+        terminal text width only.
+
+    Height:
+        Extends from the terminal text to the detected local horizontal
+        connection line, so the terminal circles / line area is visible.
+
+    The horizontal size deliberately does not expand to the full wire
+    length, which prevents wide or overlapping red boxes.
     """
+    text_x0 = terminal["x0"]
+    text_y0 = terminal["y0"]
+    text_x1 = terminal["x1"]
+    text_y1 = terminal["y1"]
+
+    # If no local horizontal connection was found, draw exactly the
+    # normal CT-style terminal text box.
     if connection_segment is None:
-        # Fallback only when no suitable horizontal vector line exists.
-        # It is deliberately compact and does not use a large guessed
-        # box below the label.
         return fitz.Rect(
-            terminal["x0"],
-            terminal["y0"],
-            terminal["x1"],
-            terminal["y1"],
+            text_x0,
+            text_y0,
+            text_x1,
+            text_y1,
         )
 
-    start = connection_segment["start"]
-    end = connection_segment["end"]
-
-    segment_x0 = min(start.x, end.x)
-    segment_x1 = max(start.x, end.x)
     segment_y = connection_segment["segment_y"]
 
-    text_width = max(
-        terminal["x1"] - terminal["x0"],
-        1.0,
-    )
-
     text_height = max(
-        terminal["y1"] - terminal["y0"],
+        text_y1 - text_y0,
         1.0,
     )
 
-    # Keep the debug box local to the terminal. Do not box a long wire
-    # extending across the whole drawing.
-    local_x0 = max(
-        segment_x0,
-        terminal["x0"] - text_width * 0.45,
-    )
-
-    local_x1 = min(
-        segment_x1,
-        terminal["x1"] + text_width * 0.45,
-    )
-
+    # Small vertical allowance around the detected connection line.
+    # This is derived from text size, not a page-specific coordinate.
     line_padding = max(
-        3.0,
-        text_height * 0.35,
+        2.5,
+        text_height * 0.30,
     )
 
+    # Important:
+    # Keep X bounds exactly equal to the text bounds.
+    #
+    # Only extend Y bounds to include the connection line.
     return fitz.Rect(
+        text_x0,
         min(
-            terminal["x0"],
-            local_x0,
-        ),
-        min(
-            terminal["y0"],
+            text_y0,
             segment_y - line_padding,
         ),
+        text_x1,
         max(
-            terminal["x1"],
-            local_x1,
-        ),
-        max(
-            terminal["y1"],
+            text_y1,
             segment_y + line_padding,
         ),
     )
