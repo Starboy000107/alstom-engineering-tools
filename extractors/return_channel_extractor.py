@@ -747,87 +747,50 @@ def is_green_colour(
         and value >= 0.20
     )
 
-def rect_distance_to_segment(
-    rectangle: fitz.Rect,
-    start: fitz.Point,
-    end: fitz.Point,
-) -> float:
+
+def get_page_segments(
+    page,
+) -> list[dict]:
     """
-    Return the shortest approximate distance between a rectangle and a
-    line segment.
+    Extract all usable vector drawing segments from the page.
+
+    Includes black, green, cyan, red and other vector linework.
     """
-    if rectangle.intersects(
-        fitz.Rect(
-            min(start.x, end.x),
-            min(start.y, end.y),
-            max(start.x, end.x),
-            max(start.y, end.y),
+    segments = []
+
+    for drawing in page.get_drawings():
+        stroke_colour = drawing.get("color")
+        fill_colour = drawing.get("fill")
+
+        segment_is_green = (
+            is_green_colour(stroke_colour)
+            or is_green_colour(fill_colour)
         )
-    ):
-        return 0.0
 
-    corners = [
-        fitz.Point(rectangle.x0, rectangle.y0),
-        fitz.Point(rectangle.x1, rectangle.y0),
-        fitz.Point(rectangle.x0, rectangle.y1),
-        fitz.Point(rectangle.x1, rectangle.y1),
-    ]
+        for item in drawing.get("items", []):
+            for start, end, segment_type in (
+                drawing_item_to_segments(item)
+            ):
+                length = point_distance(
+                    start,
+                    end,
+                )
 
-    distances = [
-        point_to_segment_distance(
-            corner,
-            start,
-            end,
-        )
-        for corner in corners
-    ]
+                if length < 1.0:
+                    continue
 
-    distances.extend(
-        [
-            point_to_segment_distance(
-                start,
-                fitz.Point(rectangle.x0, rectangle.y0),
-                fitz.Point(rectangle.x1, rectangle.y0),
-            ),
-            point_to_segment_distance(
-                start,
-                fitz.Point(rectangle.x1, rectangle.y0),
-                fitz.Point(rectangle.x1, rectangle.y1),
-            ),
-            point_to_segment_distance(
-                start,
-                fitz.Point(rectangle.x1, rectangle.y1),
-                fitz.Point(rectangle.x0, rectangle.y1),
-            ),
-            point_to_segment_distance(
-                start,
-                fitz.Point(rectangle.x0, rectangle.y1),
-                fitz.Point(rectangle.x0, rectangle.y0),
-            ),
-            point_to_segment_distance(
-                end,
-                fitz.Point(rectangle.x0, rectangle.y0),
-                fitz.Point(rectangle.x1, rectangle.y0),
-            ),
-            point_to_segment_distance(
-                end,
-                fitz.Point(rectangle.x1, rectangle.y0),
-                fitz.Point(rectangle.x1, rectangle.y1),
-            ),
-            point_to_segment_distance(
-                end,
-                fitz.Point(rectangle.x1, rectangle.y1),
-                fitz.Point(rectangle.x0, rectangle.y1),
-            ),
-            point_to_segment_distance(
-                end,
-                fitz.Point(rectangle.x0, rectangle.y1),
-                fitz.Point(rectangle.x0, rectangle.y0),
-            ),
-        ]
-    )
+                segments.append(
+                    {
+                        "start": start,
+                        "end": end,
+                        "type": segment_type,
+                        "stroke_colour": stroke_colour,
+                        "fill_colour": fill_colour,
+                        "is_green": segment_is_green,
+                    }
+                )
 
-    return min(distances)
+    return segments
 
 def get_green_segments(
     page,
@@ -1963,19 +1926,16 @@ def build_fuse_text(
 # Direct green-terminal detection
 # ---------------------------------------------------------------------
 
-def get_terminal_connection_regions(
+def get_terminal_connection_search_regions(
     terminal: dict,
 ) -> list[fitz.Rect]:
     """
-    Build likely terminal-connection regions relative to the extracted
-    terminal reference text.
+    Return upper and lower possible locations for the physical
+    horizontal terminal connection.
 
-    A terminal reference such as V0.D9 is normally located immediately
-    above or below two terminal circles. The important connection is the
-    horizontal line between those circles.
-
-    The regions are calculated only from the text geometry. No terminal
-    name, location, drawing number or fixed page coordinate is used.
+    The text label may appear above or below the terminal circles.
+    These are only search regions. The actual final region is selected
+    from nearby horizontal vector linework, whether black or green.
     """
     text_width = max(
         terminal["x1"] - terminal["x0"],
@@ -1987,31 +1947,26 @@ def get_terminal_connection_regions(
         1.0,
     )
 
-    # Small horizontal expansion allows for the terminal-circle centres
-    # being slightly outside the text extents.
-    horizontal_padding = text_width * 0.08
+    horizontal_padding = text_width * 0.15
 
-    # The terminal circles are normally around one to three text-heights
-    # above or below the reference text.
-    connection_distance = text_height * 0.25
-    connection_depth = text_height * 2.25
+    # Search far enough from the text to cover terminal circles and
+    # the horizontal connection line, but do not create the final
+    # debug rectangle from this large area.
+    search_depth = text_height * 3.0
+    gap = text_height * 0.10
 
     lower_region = fitz.Rect(
         terminal["x0"] - horizontal_padding,
-        terminal["y1"] + connection_distance,
+        terminal["y1"] + gap,
         terminal["x1"] + horizontal_padding,
-        terminal["y1"]
-        + connection_distance
-        + connection_depth,
+        terminal["y1"] + gap + search_depth,
     )
 
     upper_region = fitz.Rect(
         terminal["x0"] - horizontal_padding,
-        terminal["y0"]
-        - connection_distance
-        - connection_depth,
+        terminal["y0"] - gap - search_depth,
         terminal["x1"] + horizontal_padding,
-        terminal["y0"] - connection_distance,
+        terminal["y0"] - gap,
     )
 
     return [
@@ -2020,16 +1975,11 @@ def get_terminal_connection_regions(
     ]
 
 
-def green_segment_matches_terminal_connection(
+def is_horizontal_segment(
     segment: dict,
-    connection_region: fitz.Rect,
 ) -> bool:
     """
-    Return True only when a green/cyan segment substantially overlaps
-    the horizontal terminal-to-terminal connection corridor.
-
-    A diagonal green cable entering from the left does not qualify.
-    A green line between the two terminal circles does qualify.
+    True for predominantly horizontal vector segments.
     """
     start = segment["start"]
     end = segment["end"]
@@ -2037,151 +1987,237 @@ def green_segment_matches_terminal_connection(
     dx = abs(end.x - start.x)
     dy = abs(end.y - start.y)
 
-    if dx <= 0.01:
+    if dx < 1.0:
         return False
 
-    # The line joining the two terminal circles is expected to be
-    # predominantly horizontal. This rejects diagonal incoming wires.
-    if dy > dx * 0.20:
-        return False
+    # A line is considered horizontal when its vertical movement is
+    # small compared with its horizontal length.
+    return dy <= dx * 0.12
+
+
+def horizontal_overlap_length(
+    first_x0: float,
+    first_x1: float,
+    second_x0: float,
+    second_x1: float,
+) -> float:
+    """
+    Return horizontal overlap between two x-axis ranges.
+    """
+    return max(
+        0.0,
+        min(first_x1, second_x1)
+        - max(first_x0, second_x0),
+    )
+
+
+def find_terminal_connection_segment(
+    terminal: dict,
+    page_segments: list[dict],
+) -> dict | None:
+    """
+    Find the best local horizontal vector segment associated with a
+    terminal reference.
+
+    Crucially, this searches black and coloured lines. Therefore the
+    debug box is determined from the actual terminal connection even
+    when the connection is black.
+
+    The returned segment may be green/cyan or black.
+    """
+    search_regions = get_terminal_connection_search_regions(
+        terminal
+    )
+
+    best_candidate = None
+    best_score = None
+
+    for search_region in search_regions:
+        for segment in page_segments:
+            if not is_horizontal_segment(segment):
+                continue
+
+            start = segment["start"]
+            end = segment["end"]
+
+            segment_x0 = min(start.x, end.x)
+            segment_x1 = max(start.x, end.x)
+            segment_y = (start.y + end.y) / 2
+
+            if not (
+                search_region.y0
+                <= segment_y
+                <= search_region.y1
+            ):
+                continue
+
+            overlap = horizontal_overlap_length(
+                segment_x0,
+                segment_x1,
+                search_region.x0,
+                search_region.x1,
+            )
+
+            if overlap <= 0:
+                continue
+
+            # Prefer a line that crosses a substantial part of the
+            # terminal-label width and is closest to the label.
+            vertical_distance = min(
+                abs(segment_y - terminal["y0"]),
+                abs(segment_y - terminal["y1"]),
+            )
+
+            segment_length = point_distance(
+                start,
+                end,
+            )
+
+            score = (
+                overlap * 10.0
+                + min(segment_length, 100.0)
+                - vertical_distance * 2.0
+            )
+
+            if (
+                best_score is None
+                or score > best_score
+            ):
+                best_score = score
+
+                best_candidate = {
+                    **segment,
+                    "search_region": search_region,
+                    "segment_y": segment_y,
+                    "horizontal_overlap": overlap,
+                }
+
+    return best_candidate
+
+
+def build_terminal_debug_rect(
+    terminal: dict,
+    connection_segment: dict | None,
+) -> fitz.Rect:
+    """
+    Build one local rectangle covering:
+      - the terminal text;
+      - the actual horizontal connection line.
+
+    This rectangle is independent of whether the line is green.
+    """
+    if connection_segment is None:
+        # Fallback only when no suitable horizontal vector line exists.
+        # It is deliberately compact and does not use a large guessed
+        # box below the label.
+        return fitz.Rect(
+            terminal["x0"],
+            terminal["y0"],
+            terminal["x1"],
+            terminal["y1"],
+        )
+
+    start = connection_segment["start"]
+    end = connection_segment["end"]
 
     segment_x0 = min(start.x, end.x)
     segment_x1 = max(start.x, end.x)
+    segment_y = connection_segment["segment_y"]
 
-    overlap_x0 = max(
+    text_width = max(
+        terminal["x1"] - terminal["x0"],
+        1.0,
+    )
+
+    text_height = max(
+        terminal["y1"] - terminal["y0"],
+        1.0,
+    )
+
+    # Keep the debug box local to the terminal. Do not box a long wire
+    # extending across the whole drawing.
+    local_x0 = max(
         segment_x0,
-        connection_region.x0,
+        terminal["x0"] - text_width * 0.45,
     )
 
-    overlap_x1 = min(
+    local_x1 = min(
         segment_x1,
-        connection_region.x1,
+        terminal["x1"] + text_width * 0.45,
     )
 
-    horizontal_overlap = max(
-        0.0,
-        overlap_x1 - overlap_x0,
+    line_padding = max(
+        3.0,
+        text_height * 0.35,
     )
 
-    required_overlap = (
-        connection_region.width * 0.20
-    )
-
-    if horizontal_overlap < required_overlap:
-        return False
-
-    segment_y0 = min(start.y, end.y)
-    segment_y1 = max(start.y, end.y)
-
-    return not (
-        segment_y1 < connection_region.y0
-        or segment_y0 > connection_region.y1
-    )
-
-
-def merge_terminal_text_and_connection_rect(
-    terminal: dict,
-    connection_region: fitz.Rect,
-) -> fitz.Rect:
-    """
-    Create the red debug rectangle.
-
-    The rectangle includes both:
-      - the terminal reference text;
-      - the terminal-circle / connection corridor.
-
-    This makes it visible in the debug image exactly where the
-    green/cyan test is being made.
-    """
     return fitz.Rect(
         min(
             terminal["x0"],
-            connection_region.x0,
+            local_x0,
         ),
         min(
             terminal["y0"],
-            connection_region.y0,
+            segment_y - line_padding,
         ),
         max(
             terminal["x1"],
-            connection_region.x1,
+            local_x1,
         ),
         max(
             terminal["y1"],
-            connection_region.y1,
+            segment_y + line_padding,
         ),
     )
 
 
 def terminal_is_directly_connected_to_green(
     terminal: dict,
-    green_segments: list[dict],
-    page,
+    page_segments: list[dict],
 ) -> bool:
     """
-    True only when green/cyan linework is found in the local horizontal
-    connection area between the two terminal circles.
+    Locate the real horizontal terminal connection first, then return
+    True only when that selected local connection is green/cyan.
 
-    Green linework merely approaching the terminal from the left/right,
-    or passing diagonally nearby, is not sufficient.
+    The debug rectangle is always set, regardless of colour.
     """
-    if not green_segments:
+    connection_segment = find_terminal_connection_segment(
+        terminal,
+        page_segments,
+    )
+
+    terminal["connection_segment"] = connection_segment
+    terminal["debug_rect"] = build_terminal_debug_rect(
+        terminal,
+        connection_segment,
+    )
+
+    if connection_segment is None:
         return False
 
-    connection_regions = get_terminal_connection_regions(
-        terminal
-    )
-
-    for connection_region in connection_regions:
-        for segment in green_segments:
-            if not green_segment_matches_terminal_connection(
-                segment,
-                connection_region,
-            ):
-                continue
-
-            # Store the exact checked area for the debug-image red box.
-            terminal["connection_rect"] = connection_region
-
-            terminal["debug_rect"] = (
-                merge_terminal_text_and_connection_rect(
-                    terminal,
-                    connection_region,
-                )
-            )
-
-            return True
-
-    # No matching green horizontal line was found. Still create a
-    # meaningful debug box below the label so you can inspect it.
-    default_region = connection_regions[0]
-
-    terminal["connection_rect"] = default_region
-    terminal["debug_rect"] = (
-        merge_terminal_text_and_connection_rect(
-            terminal,
-            default_region,
+    return bool(
+        connection_segment.get(
+            "is_green",
+            False,
         )
     )
-
-    return False
 
 
 def terminal_pair_is_directly_green(
     terminal_pair: dict,
-    green_segments: list[dict],
-    page,
+    page_segments: list[dict],
 ) -> bool:
     """
-    The Cable Rack instruction is required only where both selected
-    terminal references have a green/cyan connection between their
-    local terminal circles.
+    Cable Rack action is included only when both selected terminal
+    connections are green/cyan.
+
+    The actual connection line is found independently of its colour,
+    so black-line cases receive correct debug boxes too.
     """
     return all(
         terminal_is_directly_connected_to_green(
             terminal,
-            green_segments,
-            page,
+            page_segments,
         )
         for terminal in terminal_pair["terminals"]
     )
@@ -2264,7 +2300,7 @@ def create_return_channel_rows(
     item_labels: list[dict],
     terminal_pairs: list[dict],
     fuse_candidates: list[dict],
-    green_segments: list[dict],
+    page_segments: list[dict],
     log_callback=None,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     rows = []
@@ -2357,8 +2393,7 @@ def create_return_channel_rows(
         terminal_is_green = (
             terminal_pair_is_directly_green(
                 terminal_pair,
-                green_segments,
-                page,
+                page_segments
             )
         )
 
@@ -2402,7 +2437,7 @@ def create_return_channel_rows(
                     "title, local fuse symbol/text groups, "
                     "terminal geometry and direct green-line "
                     "terminal connectivity. Verify against "
-                    " drawing."
+                    "drawing."
                 ),
             }
         )
@@ -2418,7 +2453,9 @@ def create_return_channel_rows(
             f"ixl_fuse="
             f"{ixl_fuse['value'] if ixl_fuse else 'NOT FOUND'}; "
             f"green_terminal={terminal_is_green}; "
-            f"green_segments_on_page={len(green_segments)}.",
+            f"green_segments_on_page="
+            f"{sum(segment['is_green'] for segment in page_segments)}; "
+            f"total_segments_on_page={len(page_segments)}.",
             "DEBUG",
         )
 
@@ -2725,9 +2762,15 @@ def extract_pdf(
                     )
                     continue
 
-                green_segments = get_green_segments(
+                page_segments = get_page_segments(
                     page
                 )
+
+                green_segments = [
+                    segment
+                    for segment in page_segments
+                    if segment["is_green"]
+                ]
 
                 write_log(
                     log_callback,
@@ -2768,7 +2811,7 @@ def extract_pdf(
                     item_labels,
                     terminal_pairs,
                     fuse_candidates,
-                    green_segments,
+                    page_segments,
                     log_callback=log_callback,
                 )
 
