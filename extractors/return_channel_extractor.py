@@ -724,6 +724,12 @@ def drawing_item_to_segments(
 def is_green_colour(
     colour,
 ) -> bool:
+    """
+    Detect green and cyan/turquoise circuit linework.
+
+    PDF electrical drawings often use cyan rather than a pure
+    conventional green.
+    """
     hsv = rgb_to_hsv(colour)
 
     if hsv is None:
@@ -731,14 +737,96 @@ def is_green_colour(
 
     hue, saturation, value = hsv
 
-    # Generic green region in HSV.
-    # Cyan is normally above this range.
+    # Hue is in degrees here:
+    # green: approx. 65-165
+    # cyan/turquoise: approx. 165-205
     return (
-        65 <= hue <= 165
-        and saturation >= 0.30
+        65 <= hue <= 205
+        and saturation >= 0.25
         and value >= 0.20
     )
 
+def rect_distance_to_segment(
+    rectangle: fitz.Rect,
+    start: fitz.Point,
+    end: fitz.Point,
+) -> float:
+    """
+    Return the shortest approximate distance between a rectangle and a
+    line segment.
+    """
+    if rectangle.intersects(
+        fitz.Rect(
+            min(start.x, end.x),
+            min(start.y, end.y),
+            max(start.x, end.x),
+            max(start.y, end.y),
+        )
+    ):
+        return 0.0
+
+    corners = [
+        fitz.Point(rectangle.x0, rectangle.y0),
+        fitz.Point(rectangle.x1, rectangle.y0),
+        fitz.Point(rectangle.x0, rectangle.y1),
+        fitz.Point(rectangle.x1, rectangle.y1),
+    ]
+
+    distances = [
+        point_to_segment_distance(
+            corner,
+            start,
+            end,
+        )
+        for corner in corners
+    ]
+
+    distances.extend(
+        [
+            point_to_segment_distance(
+                start,
+                fitz.Point(rectangle.x0, rectangle.y0),
+                fitz.Point(rectangle.x1, rectangle.y0),
+            ),
+            point_to_segment_distance(
+                start,
+                fitz.Point(rectangle.x1, rectangle.y0),
+                fitz.Point(rectangle.x1, rectangle.y1),
+            ),
+            point_to_segment_distance(
+                start,
+                fitz.Point(rectangle.x1, rectangle.y1),
+                fitz.Point(rectangle.x0, rectangle.y1),
+            ),
+            point_to_segment_distance(
+                start,
+                fitz.Point(rectangle.x0, rectangle.y1),
+                fitz.Point(rectangle.x0, rectangle.y0),
+            ),
+            point_to_segment_distance(
+                end,
+                fitz.Point(rectangle.x0, rectangle.y0),
+                fitz.Point(rectangle.x1, rectangle.y0),
+            ),
+            point_to_segment_distance(
+                end,
+                fitz.Point(rectangle.x1, rectangle.y0),
+                fitz.Point(rectangle.x1, rectangle.y1),
+            ),
+            point_to_segment_distance(
+                end,
+                fitz.Point(rectangle.x1, rectangle.y1),
+                fitz.Point(rectangle.x0, rectangle.y1),
+            ),
+            point_to_segment_distance(
+                end,
+                fitz.Point(rectangle.x0, rectangle.y1),
+                fitz.Point(rectangle.x0, rectangle.y0),
+            ),
+        ]
+    )
+
+    return min(distances)
 
 def get_green_segments(
     page,
@@ -1880,10 +1968,12 @@ def terminal_is_directly_connected_to_green(
     page,
 ) -> bool:
     """
-    True only where green circuitwork directly touches the terminal
-    reference/terminal connection region.
+    Return True only when green/cyan circuitwork is sufficiently close
+    to the terminal reference area.
 
-    It does not accept a green path somewhere else on the page.
+    The terminal text is often above, below, or beside the terminal
+    circle, so use an expanded terminal-label rectangle rather than
+    the text centre alone.
     """
     if not green_segments:
         return False
@@ -1893,33 +1983,55 @@ def terminal_is_directly_connected_to_green(
         float(page.rect.height),
     )
 
-    maximum_touch_distance = max(
-        3.5,
-        min(page_scale * 0.005, 8.0),
+    # This is deliberately larger than the old 3.5-8 point threshold,
+    # because the terminal identifier text is not drawn inside the
+    # terminal circle.
+    terminal_padding = max(
+        12.0,
+        min(page_scale * 0.018, 26.0),
     )
 
-    terminal_point = terminal["point"]
+    terminal_area = fitz.Rect(
+        terminal["x0"] - terminal_padding,
+        terminal["y0"] - terminal_padding,
+        terminal["x1"] + terminal_padding,
+        terminal["y1"] + terminal_padding,
+    )
 
     for segment in green_segments:
-        distance = point_to_segment_distance(
-            terminal_point,
+        segment_rect = fitz.Rect(
+            min(
+                segment["start"].x,
+                segment["end"].x,
+            ),
+            min(
+                segment["start"].y,
+                segment["end"].y,
+            ),
+            max(
+                segment["start"].x,
+                segment["end"].x,
+            ),
+            max(
+                segment["start"].y,
+                segment["end"].y,
+            ),
+        )
+
+        # Fast positive case: coloured line passes through the
+        # terminal reference region.
+        if terminal_area.intersects(segment_rect):
+            return True
+
+        # Handles line endpoints that finish immediately beside the
+        # terminal symbol/reference.
+        distance = rect_distance_to_segment(
+            terminal_area,
             segment["start"],
             segment["end"],
         )
 
-        if distance <= maximum_touch_distance:
-            return True
-
-        if point_distance(
-            terminal_point,
-            segment["start"],
-        ) <= maximum_touch_distance:
-            return True
-
-        if point_distance(
-            terminal_point,
-            segment["end"],
-        ) <= maximum_touch_distance:
+        if distance <= 4.0:
             return True
 
     return False
@@ -2172,11 +2284,14 @@ def create_return_channel_rows(
             log_callback,
             f"Return Channel Item={item_name}; "
             f"terminal={terminal_pair['text']}; "
+            f"terminal_1={terminal_pair['terminals'][0]['terminal']}; "
+            f"terminal_2={terminal_pair['terminals'][1]['terminal']}; "
             f"ns_fuse="
             f"{ns_rack_fuse['value'] if ns_rack_fuse else 'NOT FOUND'}; "
             f"ixl_fuse="
             f"{ixl_fuse['value'] if ixl_fuse else 'NOT FOUND'}; "
-            f"green_terminal={terminal_is_green}.",
+            f"green_terminal={terminal_is_green}; "
+            f"green_segments_on_page={len(green_segments)}.",
             "DEBUG",
         )
 
@@ -2475,6 +2590,13 @@ def extract_pdf(
 
                 green_segments = get_green_segments(
                     page
+                )
+
+                write_log(
+                    log_callback,
+                    f"Page {page_number}: detected "
+                    f"{len(green_segments)} green/cyan vector segment(s).",
+                    "DEBUG",
                 )
 
                 write_log(
