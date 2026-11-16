@@ -1862,7 +1862,7 @@ def select_fuse_for_equipment(
 
     Candidates are excluded by their physical list index, not fuse
     value. This permits two physically separate fuse symbols to have
-    the same fuse reference where the controlled drawing shows that.
+    the same fuse reference where the drawing shows that.
     """
     available = [
         (index, candidate)
@@ -1968,12 +1968,11 @@ def terminal_is_directly_connected_to_green(
     page,
 ) -> bool:
     """
-    Return True only when green/cyan circuitwork is sufficiently close
-    to the terminal reference area.
+    True only when a green/cyan vector segment reaches the terminal
+    reference point itself.
 
-    The terminal text is often above, below, or beside the terminal
-    circle, so use an expanded terminal-label rectangle rather than
-    the text centre alone.
+    Do not classify a terminal as green merely because green/cyan
+    linework is nearby.
     """
     if not green_segments:
         return False
@@ -1983,55 +1982,21 @@ def terminal_is_directly_connected_to_green(
         float(page.rect.height),
     )
 
-    # This is deliberately larger than the old 3.5-8 point threshold,
-    # because the terminal identifier text is not drawn inside the
-    # terminal circle.
-    terminal_padding = max(
-        12.0,
-        min(page_scale * 0.018, 26.0),
+    maximum_touch_distance = max(
+        2.5,
+        min(page_scale * 0.003, 5.0),
     )
 
-    terminal_area = fitz.Rect(
-        terminal["x0"] - terminal_padding,
-        terminal["y0"] - terminal_padding,
-        terminal["x1"] + terminal_padding,
-        terminal["y1"] + terminal_padding,
-    )
+    terminal_point = terminal["point"]
 
     for segment in green_segments:
-        segment_rect = fitz.Rect(
-            min(
-                segment["start"].x,
-                segment["end"].x,
-            ),
-            min(
-                segment["start"].y,
-                segment["end"].y,
-            ),
-            max(
-                segment["start"].x,
-                segment["end"].x,
-            ),
-            max(
-                segment["start"].y,
-                segment["end"].y,
-            ),
-        )
-
-        # Fast positive case: coloured line passes through the
-        # terminal reference region.
-        if terminal_area.intersects(segment_rect):
-            return True
-
-        # Handles line endpoints that finish immediately beside the
-        # terminal symbol/reference.
-        distance = rect_distance_to_segment(
-            terminal_area,
+        distance = point_to_segment_distance(
+            terminal_point,
             segment["start"],
             segment["end"],
         )
 
-        if distance <= 4.0:
+        if distance <= maximum_touch_distance:
             return True
 
     return False
@@ -2275,7 +2240,7 @@ def create_return_channel_rows(
                     "title, local fuse symbol/text groups, "
                     "terminal geometry and direct green-line "
                     "terminal connectivity. Verify against "
-                    "controlled drawing."
+                    " drawing."
                 ),
             }
         )
