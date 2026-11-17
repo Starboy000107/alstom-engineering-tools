@@ -1,229 +1,21 @@
 from __future__ import annotations
 
-import html
 import io
 import re
 import zipfile
-from collections import defaultdict, deque
 from datetime import date
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 
 # =============================================================================
-# FIXED TEST PROCEDURE CONFIGURATION
-# =============================================================================
-# These definitions come from C1252-TAC-0274.
-# Route data, branches, paths, stations and event positions come only from
-# the user-uploaded PDF.
-
-PROCEDURE_REFERENCE = "C1252-TAC-0274"
-PROCEDURE_TITLE = "Trackside ATC Low-Speed Dynamic Test Procedure"
-
-
-TEST_TYPES: Dict[str, Dict[str, str]] = {
-    "LS01": {
-        "id": "ATC-TNC-TRA-LS01",
-        "name": "MTIB Initialization Test",
-        "icon": "📡",
-        "purpose": (
-            "Verify that ATC on-board can be localized and calibrated "
-            "on an MTIB beacon."
-        ),
-    },
-    "LS02": {
-        "id": "ATC-TNC-TRA-LS02",
-        "name": "STIB Initialization Test",
-        "icon": "📍",
-        "purpose": (
-            "Verify that ATC provides accurate localization upon STIB."
-        ),
-    },
-    "LS03": {
-        "id": "ATC-TNC-TRA-LS03",
-        "name": "Spacing Stopping Point Test – Track Circuit",
-        "icon": "🚦",
-        "purpose": (
-            "Verify correspondence between variants and invariants "
-            "for a track-circuit stopping point."
-        ),
-    },
-    "LS04": {
-        "id": "ATC-TNC-TRA-LS04",
-        "name": "Special Stopping Point Test – Signal Without Overlap",
-        "icon": "🔴",
-        "purpose": (
-            "Verify correspondence between variants and invariants "
-            "for a signal stopping point without overlap."
-        ),
-    },
-    "LS05": {
-        "id": "ATC-TNC-TRA-LS05",
-        "name": "Complex Stopping Point Test – Signal With Overlap",
-        "icon": "🔴",
-        "purpose": (
-            "Verify correspondence between variants and invariants "
-            "for a signal stopping point with overlap."
-        ),
-    },
-    "LS06": {
-        "id": "ATC-TNC-TRA-LS06",
-        "name": "Stopping Point Test – Point",
-        "icon": "🔀",
-        "purpose": (
-            "Verify correspondence between variants and invariants "
-            "for convergence or divergence points."
-        ),
-    },
-    "LS07": {
-        "id": "ATC-TNC-TRA-LS07",
-        "name": "Stopping Point Test – End of SACEM",
-        "icon": "⛔",
-        "purpose": (
-            "Verify that CM/AM is not available beyond End of SACEM."
-        ),
-    },
-    "LS08": {
-        "id": "ATC-TNC-TRA-LS08",
-        "name": "Station Stopping Point and Door Side Verification",
-        "icon": "🚉",
-        "purpose": (
-            "Verify station stopping position and correct enabled door side."
-        ),
-    },
-    "LS09": {
-        "id": "ATC-TNC-TRA-LS09",
-        "name": "PSD Operation Pre-Test",
-        "icon": "🚪",
-        "purpose": (
-            "Verify ATC / PSD door command interface behaviour."
-        ),
-    },
-    "LS10": {
-        "id": "ATC-TNC-TRA-LS10",
-        "name": "Emergency Stop Zone Test",
-        "icon": "⚠️",
-        "purpose": (
-            "Verify CM/AUTO is unavailable inside an active Emergency Stop Zone."
-        ),
-    },
-    "LS11": {
-        "id": "ATC-TNC-TRA-LS11",
-        "name": "Change of End Test",
-        "icon": "🔄",
-        "purpose": (
-            "Verify Change of End can be completed without delocalization or EB."
-        ),
-    },
-    "LS12": {
-        "id": "ATC-TNC-TRA-LS12",
-        "name": "Temporary Speed Restriction Test",
-        "icon": "🚧",
-        "purpose": (
-            "Verify correct train behaviour after a TSR is applied."
-        ),
-    },
-    "LS13": {
-        "id": "ATC-TNC-TRA-LS13",
-        "name": "Return Channel Test",
-        "icon": "📶",
-        "purpose": (
-            "Verify train information is received through the return-channel loop."
-        ),
-    },
-    "LS14": {
-        "id": "ATC-TNC-TRA-LS14",
-        "name": "End of Shunt Test",
-        "icon": "🚂",
-        "purpose": (
-            "Verify End of Shunt declaration and CM/AM recovery position."
-        ),
-    },
-}
-
-
-GENERIC_ROUTE_REVIEW_CODE = "ROUTE-REVIEW"
-
-
-# =============================================================================
-# PAGE UI
-# =============================================================================
-
-def render_test_sheet_generator_styles() -> None:
-    st.markdown(
-        """
-        <style>
-        .tsg-hero {
-            background: linear-gradient(
-                135deg,
-                #102A43 0%,
-                #164E72 65%,
-                #E52B1E 160%
-            );
-            padding: 28px 32px;
-            border-radius: 18px;
-            margin-bottom: 18px;
-            box-shadow: 0 10px 25px rgba(16,42,67,.22);
-        }
-
-        .tsg-hero h1 {
-            margin: 0 !important;
-            color: white !important;
-            font-size: 30px !important;
-        }
-
-        .tsg-hero p {
-            margin: 10px 0 0 0 !important;
-            color: #E1EEF6 !important;
-            font-size: 15px;
-        }
-
-        .tsg-info {
-            background: #EDF7FF;
-            border: 1px solid #B8DCF4;
-            border-left: 5px solid #0064A6;
-            border-radius: 12px;
-            padding: 14px 16px;
-            margin: 10px 0;
-        }
-
-        .tsg-warning {
-            background: #FFF7E8;
-            border: 1px solid #F5C16C;
-            border-left: 5px solid #E37400;
-            border-radius: 12px;
-            padding: 14px 16px;
-            margin: 10px 0;
-        }
-
-        .tsg-success {
-            background: #EDFFF3;
-            border: 1px solid #A3D9B1;
-            border-left: 5px solid #16803C;
-            border-radius: 12px;
-            padding: 14px 16px;
-            margin: 10px 0;
-        }
-
-        div.stButton > button {
-            min-height: 46px;
-            border-radius: 10px;
-            font-weight: 650;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# =============================================================================
-# GENERIC UTILITIES
+# BASIC HELPERS
 # =============================================================================
 
 def safe_text(value: Any) -> str:
+    """Convert values safely to stripped text."""
     if value is None:
         return ""
 
@@ -236,18 +28,21 @@ def safe_text(value: Any) -> str:
     return str(value).strip()
 
 
+def normalise_spaces(value: Any) -> str:
+    return re.sub(r"\s+", " ", safe_text(value)).strip()
+
+
 def normalise_branch(value: Any) -> str:
     """
-    Converts:
-        9-1-1-0   -> 09-01-1-0
-        09-01-1-0 -> 09-01-1-0
-        0-1-1-0   -> 00-01-1-0
+    Examples:
+        9-1-1-0       -> 09-01-1-0
+        09-01-1-0     -> 09-01-1-0
+        9 - 1 - 1 - 0 -> 09-01-1-0
     """
-
     text = safe_text(value)
 
     match = re.search(
-        r"(\d{1,2})-(\d{1,2})-(\d{1,2})-(\d{1,2})",
+        r"(\d{1,2})\s*-\s*(\d{1,2})\s*-\s*(\d{1,2})\s*-\s*(\d{1,3})",
         text,
     )
 
@@ -264,1196 +59,851 @@ def normalise_branch(value: Any) -> str:
     )
 
 
-def branch_tokens(value: Any) -> List[str]:
-    matches = re.findall(
-        r"\b\d{1,2}-\d{1,2}-\d{1,2}-\d{1,2}\b",
-        safe_text(value),
-    )
+def branch_parts(branch: str) -> tuple[str, str, str]:
+    parts = safe_text(branch).split("-")
 
-    output: List[str] = []
+    sector = parts[0] if len(parts) >= 1 else ""
+    section = parts[1] if len(parts) >= 2 else ""
+    subsection = "-".join(parts[:3]) if len(parts) >= 3 else ""
 
-    for match in matches:
-        branch = normalise_branch(match)
+    return sector, section, subsection
 
-        if branch not in output:
-            output.append(branch)
+
+def clean_filename(value: str) -> str:
+    value = safe_text(value)
+    value = re.sub(r'[\\/:*?"<>|]', "_", value)
+    value = re.sub(r"\s+", "_", value)
+    return value[:150] or "Test_Sheet"
+
+
+def to_number(value: Any) -> Optional[float]:
+    text = safe_text(value).replace(",", "").replace(" ", "")
+
+    if not text:
+        return None
+
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def yes_no(value: Any) -> bool:
+    return safe_text(value).upper() in {
+        "YES",
+        "Y",
+        "TRUE",
+        "1",
+        "T",
+    }
+
+
+# =============================================================================
+# INPUT COLUMN NORMALISATION
+# =============================================================================
+
+COLUMN_ALIASES: Dict[str, List[str]] = {
+    "kp": [
+        "kp",
+        "k.p.",
+        "k.p",
+        "abscissa",
+        "abscissa_m",
+        "abscissa (m)",
+        "chainage",
+        "chainage_m",
+    ],
+    "branch": [
+        "branch",
+        "branch_number",
+        "branch number",
+    ],
+    "sector": [
+        "sector",
+    ],
+    "section": [
+        "section",
+    ],
+    "subsection": [
+        "subsection",
+        "sub section",
+        "sub-section",
+        "sub_section",
+    ],
+    "event_name": [
+        "event_name",
+        "event name",
+        "name",
+        "singularity",
+        "singularity_name",
+        "type",
+    ],
+    "remarks": [
+        "remarks",
+        "remark",
+        "description",
+        "details",
+        "singularities",
+    ],
+    "variant_number": [
+        "variant_number",
+        "variant number",
+        "variant",
+        "variant_no",
+        "variant no",
+        "rank",
+    ],
+    "participate_variant": [
+        "participate_variant",
+        "participating_variant",
+        "participate variant",
+        "associated_variant",
+        "associated variant",
+    ],
+    "anticipate_variant": [
+        "anticipate_variant",
+        "anticipated_variant",
+        "anticipate variant",
+        "anticipated variant",
+    ],
+    "location_name": [
+        "location_name",
+        "location",
+        "asset",
+        "asset_name",
+        "signal",
+        "track_circuit",
+    ],
+    "direction": [
+        "direction",
+        "track_direction",
+        "normal_direction",
+    ],
+}
+
+
+def find_column(dataframe: pd.DataFrame, aliases: List[str]) -> Optional[str]:
+    lookup = {
+        normalise_spaces(column).lower(): column
+        for column in dataframe.columns
+    }
+
+    for alias in aliases:
+        if alias.lower() in lookup:
+            return lookup[alias.lower()]
+
+    return None
+
+
+def standardise_subdivision_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert user workbook columns into standard internal columns.
+
+    The source workbook can use different headings such as:
+    - K.P.
+    - Abscissa
+    - Name
+    - Remarks
+    - Associated Variant
+    """
+    output = pd.DataFrame(index=raw.index)
+
+    for standard_name, aliases in COLUMN_ALIASES.items():
+        source_column = find_column(raw, aliases)
+
+        if source_column:
+            output[standard_name] = raw[source_column]
+        else:
+            output[standard_name] = ""
+
+    output["kp"] = output["kp"].apply(to_number)
+
+    output["branch"] = output["branch"].apply(normalise_branch)
+
+    for index in output.index:
+        branch = safe_text(output.at[index, "branch"])
+        branch_sector, branch_section, branch_subsection = branch_parts(branch)
+
+        if not safe_text(output.at[index, "sector"]):
+            output.at[index, "sector"] = branch_sector
+
+        if not safe_text(output.at[index, "section"]):
+            output.at[index, "section"] = branch_section
+
+        if not safe_text(output.at[index, "subsection"]):
+            output.at[index, "subsection"] = branch_subsection
+
+    for column in output.columns:
+        if column != "kp":
+            output[column] = output[column].apply(safe_text)
+
+    output["source_row"] = raw.index + 2
 
     return output
 
 
-def branch_sector(branch: str) -> str:
-    parts = safe_text(branch).split("-")
-    return parts[0] if len(parts) >= 1 else ""
-
-
-def branch_section(branch: str) -> str:
-    parts = safe_text(branch).split("-")
-    return parts[1] if len(parts) >= 2 else ""
-
-
-def branch_subsection(branch: str) -> str:
-    parts = safe_text(branch).split("-")
-
-    if len(parts) >= 3:
-        return "-".join(parts[:3])
-
-    return ""
-
-
-# =============================================================================
-# PDF TEXT EXTRACTION
-# =============================================================================
-
-def extract_pdf_text(pdf_bytes: bytes) -> List[str]:
-    try:
-        from pypdf import PdfReader
-    except ImportError as exc:
-        raise RuntimeError(
-            "Missing dependency: pypdf. "
-            "Install with: pip install pypdf"
-        ) from exc
-
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-
-    return [
-        page.extract_text() or ""
-        for page in reader.pages
-    ]
-
-
-# =============================================================================
-# EVENT / TEST TYPE IDENTIFICATION
-# =============================================================================
-
-def identify_event_type(text: str) -> str:
-    value = safe_text(text).upper()
-
-    # Explicit procedure IDs are the most reliable.
-    id_match = re.search(
-        r"ATC[- ]?TNC[- ]?TRA[- ]?LS(0[1-9]|1[0-4])",
-        value,
-    )
-
-    if id_match:
-        return f"LS{id_match.group(1)}"
-
-    if "MTIB" in value or "MOVING TRAIN INITIAL" in value:
-        return "LS01"
-
-    if "STIB" in value or "STATIONARY TRAIN INITIAL" in value:
-        return "LS02"
-
-    if "END OF SHUNT" in value or "EXIT SACEM" in value:
-        return "LS14"
-
-    if "CHANGE OF END" in value or "CHANGE ENDS" in value:
-        return "LS11"
-
-    if (
-        "EMERGENCY STOP ZONE" in value
-        or "EMERGENCY ZONE" in value
-        or " ESZ " in f" {value} "
-    ):
-        return "LS10"
-
-    if "RETURN CHANNEL" in value or "R/C LOOP" in value:
-        return "LS13"
-
-    if "TEMPORARY SPEED RESTRICTION" in value:
-        return "LS12"
-
-    if re.search(r"\bTSR\b", value):
-        return "LS12"
-
-    if "PSD" in value:
-        return "LS09"
-
-    if (
-        "STATION STOP" in value
-        or "DOOR SIDE" in value
-        or "PLATFORM STOP" in value
-    ):
-        return "LS08"
-
-    if "END OF SACEM" in value:
-        return "LS07"
-
-    if "OVERLAP" in value or " O/L " in f" {value} ":
-        return "LS05"
-
-    if "POINT" in value or re.search(r"\b(RP|NP)\b", value):
-        return "LS06"
-
-    if "SIGNAL" in value or "PEP" in value:
-        return "LS04"
-
-    if "TRACK CIRCUIT" in value or "T/C" in value:
-        return "LS03"
-
-    return ""
-
-
-# =============================================================================
-# ROUTE GRAPH EXTRACTION
-# =============================================================================
-
-def add_connection(
-    graph: Dict[str, Set[str]],
-    reverse_graph: Dict[str, Set[str]],
-    source: str,
-    destination: str,
-) -> None:
-    """Creates one directed connection: source -> destination."""
-
-    if not source or not destination:
-        return
-
-    if source == destination:
-        return
-
-    graph[source].add(destination)
-    reverse_graph[destination].add(source)
-
-    # Make sure all branches exist as graph nodes.
-    graph[destination]
-    reverse_graph[source]
-
-
-def looks_like_route_data(text: str) -> bool:
-    """
-    Avoid treating arbitrary tables as route paths.
-
-    A line or paragraph is accepted only if it contains route-related wording.
-    """
-
-    value = safe_text(text).lower()
-
-    keywords = [
-        "route",
-        "branches to run",
-        "branch sequence",
-        "transmission",
-        "path",
-        "first route",
-        "second route",
-        "third route",
-        "fourth route",
-        "anticipated branches",
-        "from ",
-        " to ",
-    ]
-
-    return any(keyword in value for keyword in keywords)
-
-
-def extract_route_graph(
-    page_texts: List[str],
-) -> Tuple[
-    Dict[str, Set[str]],
-    Dict[str, Set[str]],
-    pd.DataFrame,
-]:
-    """
-    Extracts ordered route branch sequences.
-
-    Example PDF text:
-
-        First route:
-        09-01-1-0, 09-01-2-0, 09-01-3-0, 14-04-1-1
-
-    Creates:
-
-        09-01-1-0 -> 09-01-2-0
-        09-01-2-0 -> 09-01-3-0
-        09-01-3-0 -> 14-04-1-1
-    """
-
-    graph: Dict[str, Set[str]] = defaultdict(set)
-    reverse_graph: Dict[str, Set[str]] = defaultdict(set)
-    evidence_rows: List[Dict[str, str]] = []
-
-    route_start_pattern = re.compile(
-        r"(?i)(?="
-        r"\b(?:first|second|third|fourth)?\s*route\b"
-        r"|\broute\s*[A-Z0-9]"
-        r"|\bbranches?\s+to\s+run\b"
-        r")"
-    )
-
-    for page_number, page_text in enumerate(page_texts, start=1):
-        compact = re.sub(r"[ \t]+", " ", page_text)
-        compact = re.sub(r"\n{2,}", "\n", compact)
-
-        # -------------------------------------------------------------
-        # Strategy 1:
-        # Route blocks. This is the preferred extraction method.
-        # -------------------------------------------------------------
-        blocks = route_start_pattern.split(compact)
-
-        for block in blocks:
-            if not looks_like_route_data(block):
-                continue
-
-            branches = branch_tokens(block)
-
-            if len(branches) < 2:
-                continue
-
-            for source, destination in zip(
-                branches,
-                branches[1:],
-            ):
-                add_connection(
-                    graph,
-                    reverse_graph,
-                    source,
-                    destination,
-                )
-
-                evidence_rows.append(
-                    {
-                        "source_branch": source,
-                        "destination_branch": destination,
-                        "page": str(page_number),
-                        "evidence": block[:400],
-                    }
-                )
-
-        # -------------------------------------------------------------
-        # Strategy 2:
-        # Individual lines which contain route wording and branch sequence.
-        # -------------------------------------------------------------
-        for line in compact.splitlines():
-            if not looks_like_route_data(line):
-                continue
-
-            branches = branch_tokens(line)
-
-            if len(branches) < 2:
-                continue
-
-            for source, destination in zip(
-                branches,
-                branches[1:],
-            ):
-                add_connection(
-                    graph,
-                    reverse_graph,
-                    source,
-                    destination,
-                )
-
-                evidence_rows.append(
-                    {
-                        "source_branch": source,
-                        "destination_branch": destination,
-                        "page": str(page_number),
-                        "evidence": line[:400],
-                    }
-                )
-
-    evidence = pd.DataFrame(
-        evidence_rows,
-        columns=[
-            "source_branch",
-            "destination_branch",
-            "page",
-            "evidence",
-        ],
-    )
-
-    if not evidence.empty:
-        evidence = evidence.drop_duplicates().reset_index(drop=True)
-
-    return graph, reverse_graph, evidence
-
-
-# =============================================================================
-# EVENT EXTRACTION
-# =============================================================================
-
-def nearest_branch_from_lines(
-    lines: List[str],
-    line_index: int,
-) -> str:
-    """
-    Looks around an event line for the nearest branch reference.
-    """
-
-    search_offsets = [
-        0,
-        -1,
-        1,
-        -2,
-        2,
-        -3,
-        3,
-        -4,
-        4,
-    ]
-
-    for offset in search_offsets:
-        target_index = line_index + offset
-
-        if target_index < 0 or target_index >= len(lines):
-            continue
-
-        found = branch_tokens(lines[target_index])
-
-        if found:
-            return found[0]
-
-    return ""
-
-
-def extract_test_events(
-    page_texts: List[str],
-) -> pd.DataFrame:
-    """
-    Extracts possible LS01-LS14 events from the same uploaded PDF.
-
-    The function attempts to find:
-    - test type;
-    - nearest branch;
-    - abscissa;
-    - variant number;
-    - source evidence.
-
-    If the source PDF is graphic/image-only, the user can still add or correct
-    test rows in the Streamlit table.
-    """
-
-    rows: List[Dict[str, Any]] = []
-
-    abscissa_pattern = re.compile(
-        r"(?:Abs(?:cissa)?|K\.?P\.?|Installation\s*K\.?P\.?)"
-        r"\s*[:=]?\s*(-?\d+(?:[.,]\d+)?)",
-        flags=re.IGNORECASE,
-    )
-
-    variant_pattern = re.compile(
-        r"(?:Associated\s+Variant|Variant(?:\s+Number)?)"
-        r"\s*[:=]?\s*(\d+)",
-        flags=re.IGNORECASE,
-    )
-
-    for page_number, page_text in enumerate(page_texts, start=1):
-        lines = [
-            re.sub(r"\s+", " ", line).strip()
-            for line in page_text.splitlines()
-            if line.strip()
-        ]
-
-        for index, line in enumerate(lines):
-            context_lines = lines[
-                max(index - 3, 0): min(index + 4, len(lines))
-            ]
-
-            context = " ".join(context_lines)
-            test_code = identify_event_type(context)
-
-            if not test_code:
-                continue
-
-            branch = nearest_branch_from_lines(
-                lines=lines,
-                line_index=index,
-            )
-
-            abscissa_match = abscissa_pattern.search(context)
-            variant_match = variant_pattern.search(context)
-
-            rows.append(
-                {
-                    "test_code": test_code,
-                    "test_id": TEST_TYPES[test_code]["id"],
-                    "test_name": TEST_TYPES[test_code]["name"],
-                    "branch": branch,
-                    "sector": branch_sector(branch),
-                    "section": branch_section(branch),
-                    "subsection": branch_subsection(branch),
-                    "abscissa_m": (
-                        float(
-                            abscissa_match.group(1).replace(",", ".")
-                        )
-                        if abscissa_match
-                        else None
-                    ),
-                    "variant_number": (
-                        variant_match.group(1)
-                        if variant_match
-                        else ""
-                    ),
-                    "event_description": context[:1000],
-                    "source_page": page_number,
-                    "review_status": "To be reviewed",
-                    "remarks": "",
-                }
-            )
-
-    columns = [
+def standardise_mapping_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
+    """Validate and standardise the TestMapping sheet."""
+    required_columns = [
+        "event_pattern",
         "test_code",
-        "test_id",
         "test_name",
-        "branch",
-        "sector",
-        "section",
-        "subsection",
-        "abscissa_m",
-        "variant_number",
-        "event_description",
-        "source_page",
-        "review_status",
-        "remarks",
+        "needs_abscissa",
+        "include_anticipate",
     ]
 
-    if not rows:
-        return pd.DataFrame(columns=columns)
+    lookup = {
+        normalise_spaces(column).lower(): column
+        for column in raw.columns
+    }
 
-    events = pd.DataFrame(rows)
+    missing = [
+        column
+        for column in required_columns
+        if column.lower() not in lookup
+    ]
 
-    return (
-        events.drop_duplicates(
-            subset=[
-                "test_code",
-                "branch",
-                "event_description",
-                "source_page",
-            ]
+    if missing:
+        raise ValueError(
+            "TestMapping sheet is missing required column(s): "
+            + ", ".join(missing)
         )
-        .reset_index(drop=True)
-    )
 
+    mapping = pd.DataFrame()
 
-# =============================================================================
-# START / END POINT LOGIC
-# =============================================================================
+    for column in required_columns + ["checks"]:
+        source_column = lookup.get(column.lower())
 
-def starting_points(
-    graph: Dict[str, Set[str]],
-) -> List[str]:
-    """
-    A starting point is a branch which has an outgoing connection.
-
-    We do not include terminal nodes because a train cannot begin a route there
-    and continue to another branch.
-    """
-
-    return sorted(
-        branch
-        for branch, next_branches in graph.items()
-        if next_branches
-    )
-
-
-def reachable_endpoints(
-    graph: Dict[str, Set[str]],
-    start_branch: str,
-) -> List[str]:
-    """
-    Returns ONLY final reachable endpoints.
-
-    Intermediate route branches are intentionally excluded.
-
-    Example:
-        A -> B -> C -> D
-        A -> B -> E
-
-    User chooses start A.
-
-    Returned endpoints:
-        D
-        E
-
-    Not returned:
-        B
-        C
-    """
-
-    visited: Set[str] = set()
-    queue: deque = deque([start_branch])
-    endpoints: Set[str] = set()
-
-    while queue:
-        current = queue.popleft()
-
-        if current in visited:
-            continue
-
-        visited.add(current)
-
-        next_branches = graph.get(current, set())
-
-        # A branch with no outgoing connection is a final end point.
-        if not next_branches:
-            if current != start_branch:
-                endpoints.add(current)
-            continue
-
-        for next_branch in next_branches:
-            if next_branch not in visited:
-                queue.append(next_branch)
-
-    return sorted(endpoints)
-
-
-def find_paths(
-    graph: Dict[str, Set[str]],
-    start_branch: str,
-    end_branch: str,
-    max_paths: int = 20,
-    max_depth: int = 150,
-) -> List[List[str]]:
-    """
-    Finds directed paths from selected Start Point to selected End Point.
-    """
-
-    paths: List[List[str]] = []
-
-    def visit(
-        current_branch: str,
-        current_path: List[str],
-        visited: Set[str],
-    ) -> None:
-        if len(paths) >= max_paths:
-            return
-
-        if len(current_path) > max_depth:
-            return
-
-        if current_branch == end_branch:
-            paths.append(current_path.copy())
-            return
-
-        for next_branch in sorted(
-            graph.get(current_branch, set())
-        ):
-            if next_branch in visited:
-                continue
-
-            visit(
-                current_branch=next_branch,
-                current_path=current_path + [next_branch],
-                visited=visited | {next_branch},
-            )
-
-    visit(
-        current_branch=start_branch,
-        current_path=[start_branch],
-        visited={start_branch},
-    )
-
-    return paths
-
-
-# =============================================================================
-# ROUTE DIAGRAM
-# =============================================================================
-
-def build_path_diagram(
-    path: List[str],
-    start_branch: str,
-    end_branch: str,
-) -> str:
-    """
-    SVG is returned inside a complete HTML document.
-    It must be rendered with components.html(), not st.markdown().
-    """
-
-    if not path:
-        return """
-        <html>
-            <body>
-                <p>No selected route path.</p>
-            </body>
-        </html>
-        """
-
-    node_spacing = 170
-    width = max(900, len(path) * node_spacing + 130)
-
-    svg_nodes: List[str] = []
-
-    for index, branch in enumerate(path):
-        x = 90 + (index * node_spacing)
-
-        if branch == start_branch:
-            fill = "#DCF7E7"
-            stroke = "#16803C"
-            label = "START"
-        elif branch == end_branch:
-            fill = "#FFE3E3"
-            stroke = "#D64545"
-            label = "END"
+        if source_column:
+            mapping[column] = raw[source_column]
         else:
-            fill = "#E7F3FC"
-            stroke = "#0064A6"
-            label = "ROUTE"
+            mapping[column] = ""
 
-        safe_branch = html.escape(branch)
+    mapping["event_pattern"] = mapping["event_pattern"].apply(safe_text)
+    mapping["test_code"] = mapping["test_code"].apply(safe_text)
+    mapping["test_name"] = mapping["test_name"].apply(safe_text)
+    mapping["needs_abscissa"] = mapping["needs_abscissa"].apply(yes_no)
+    mapping["include_anticipate"] = mapping["include_anticipate"].apply(yes_no)
+    mapping["checks"] = mapping["checks"].apply(safe_text)
 
-        svg_nodes.append(
-            f"""
-            <line
-                x1="{x - 70}"
-                y1="128"
-                x2="{x + 70}"
-                y2="128"
-                stroke="{stroke}"
-                stroke-width="7"
-                stroke-linecap="round"
-            />
+    mapping = mapping[
+        mapping["event_pattern"].astype(str).str.strip().ne("")
+    ].copy()
 
-            <circle
-                cx="{x}"
-                cy="128"
-                r="27"
-                fill="{fill}"
-                stroke="{stroke}"
-                stroke-width="5"
-            />
-
-            <text
-                x="{x}"
-                y="184"
-                text-anchor="middle"
-                font-family="Arial, sans-serif"
-                font-size="13"
-                fill="#102A43"
-                font-weight="700"
-            >
-                {safe_branch}
-            </text>
-
-            <text
-                x="{x}"
-                y="207"
-                text-anchor="middle"
-                font-family="Arial, sans-serif"
-                font-size="11"
-                fill="{stroke}"
-                font-weight="700"
-            >
-                {label}
-            </text>
-            """
-        )
-
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <style>
-            body {{
-                margin: 0;
-                padding: 0;
-                background: transparent;
-                font-family: Arial, sans-serif;
-            }}
-
-            .route-box {{
-                overflow-x: auto;
-                background: #FFFFFF;
-                border: 1px solid #D9E2EC;
-                border-radius: 16px;
-                padding: 12px;
-            }}
-        </style>
-    </head>
-
-    <body>
-        <div class="route-box">
-            <svg
-                width="{width}"
-                height="245"
-                viewBox="0 0 {width} 245"
-                xmlns="http://www.w3.org/2000/svg"
-            >
-                <rect
-                    width="{width}"
-                    height="245"
-                    rx="14"
-                    fill="#F8FBFD"
-                />
-
-                <text
-                    x="28"
-                    y="38"
-                    font-family="Arial, sans-serif"
-                    font-size="20"
-                    font-weight="700"
-                    fill="#102A43"
-                >
-                    Selected Train Route
-                </text>
-
-                <text
-                    x="28"
-                    y="64"
-                    font-family="Arial, sans-serif"
-                    font-size="13"
-                    fill="#52606D"
-                >
-                    Green = Starting Point | Blue = Route Branch | Red = End Point
-                </text>
-
-                <line
-                    x1="25"
-                    y1="128"
-                    x2="{width - 35}"
-                    y2="128"
-                    stroke="#B0BEC5"
-                    stroke-width="4"
-                />
-
-                <polygon
-                    points="{width - 22},128 {width - 47},115 {width - 47},141"
-                    fill="#102A43"
-                />
-
-                {''.join(svg_nodes)}
-            </svg>
-        </div>
-    </body>
-    </html>
-    """
+    return mapping.reset_index(drop=True)
 
 
 # =============================================================================
-# TEST PLAN CREATION
+# PARTICIPATE / ANTICIPATE VARIANT RESOLUTION
 # =============================================================================
 
-def event_matches_path(
-    event_branch: str,
-    path: List[str],
-) -> bool:
+def extract_variant_from_text(text: Any, label: str) -> str:
     """
-    Event belongs to the selected path if:
-    - its exact branch belongs to the path, OR
-    - its sub-section belongs to a path sub-section.
+    Extract values such as:
 
-    The second rule handles PDFs that list event data as 09-01-2-x but route
-    data as another branch in the same subsection.
+        Associated variant: (TUC KP T/C)
+        Anticipate variant: 14-07-1
+        Participating variant = 3
+
+    This supports source data where variants have not yet been separated
+    into dedicated workbook columns.
     """
+    value = safe_text(text)
 
-    branch = normalise_branch(event_branch)
+    pattern = (
+        rf"{label}"
+        r"(?:\s+(?:variant|variants|number))?"
+        r"\s*[:=]?\s*"
+        r"\(?([^()\n]+?)\)?"
+        r"(?=$|;|\||\n|,?\s+(?:anticipate|associated|participate|"
+        r"number of|rank of|sub section))"
+    )
 
-    if not branch:
-        return False
+    match = re.search(pattern, value, flags=re.IGNORECASE)
 
-    if branch in path:
-        return True
+    if match:
+        return normalise_spaces(match.group(1))
 
-    event_subsection = branch_subsection(branch)
+    return ""
 
-    return any(
-        branch_subsection(path_branch) == event_subsection
-        for path_branch in path
+
+def build_variant_index(subdivision: pd.DataFrame) -> Dict[str, List[pd.Series]]:
+    """
+    Builds an index which can be used to locate a variant and obtain
+    its related event abscissa.
+    """
+    index: Dict[str, List[pd.Series]] = {}
+
+    for _, row in subdivision.iterrows():
+        variant = safe_text(row.get("variant_number"))
+
+        if not variant:
+            continue
+
+        key = variant.upper()
+        index.setdefault(key, []).append(row)
+
+    return index
+
+
+def resolve_variant_abscissa(
+    variant_value: str,
+    variant_index: Dict[str, List[pd.Series]],
+    reference_kp: Optional[float],
+) -> Optional[float]:
+    """
+    Find the closest matching variant row and return its KP/abscissa.
+
+    If there are several rows with the same variant number, the nearest
+    row to the participating event KP is used.
+    """
+    value = safe_text(variant_value).upper()
+
+    if not value:
+        return None
+
+    candidate_keys = [value]
+
+    numeric_match = re.search(r"\b(\d+)\b", value)
+
+    if numeric_match:
+        candidate_keys.append(numeric_match.group(1))
+
+    candidates: List[pd.Series] = []
+
+    for key in candidate_keys:
+        candidates.extend(variant_index.get(key, []))
+
+    if not candidates:
+        return None
+
+    candidates_with_kp = [
+        row for row in candidates
+        if pd.notna(row.get("kp"))
+    ]
+
+    if not candidates_with_kp:
+        return None
+
+    if reference_kp is None:
+        return float(candidates_with_kp[0]["kp"])
+
+    closest = min(
+        candidates_with_kp,
+        key=lambda row: abs(float(row["kp"]) - reference_kp),
+    )
+
+    return float(closest["kp"])
+
+
+# =============================================================================
+# TEST-POINT BUILDING
+# =============================================================================
+
+REGISTER_COLUMNS = [
+    "test_code",
+    "test_name",
+    "needs_abscissa",
+    "sector",
+    "section",
+    "subsection",
+    "branch",
+    "direction",
+    "participate_abscissa_m",
+    "participate_variant",
+    "anticipate_variant",
+    "anticipate_abscissa_m",
+    "location_name",
+    "event_name",
+    "remarks",
+    "source_row",
+    "review_status",
+]
+
+
+def event_text(row: pd.Series) -> str:
+    return " ".join(
+        [
+            safe_text(row.get("event_name")),
+            safe_text(row.get("remarks")),
+            safe_text(row.get("location_name")),
+            safe_text(row.get("participate_variant")),
+            safe_text(row.get("anticipate_variant")),
+        ]
     )
 
 
-def create_fallback_route_review_rows(
-    path: List[str],
-) -> pd.DataFrame:
+def match_tests_for_event(
+    row: pd.Series,
+    mapping: pd.DataFrame,
+    variant_index: Dict[str, List[pd.Series]],
+) -> List[Dict[str, Any]]:
     """
-    This prevents the application from generating zero sheets.
+    Match an event row against every TestMapping regex rule.
 
-    If the uploaded PDF has route connections but no searchable event labels
-    such as MTIB, STIB, Signal, T/C, PSD, ESZ, etc., the app creates a Route
-    Review Test Sheet for each branch in the selected path.
-
-    These are clearly marked as 'Engineering Review Required' and DO NOT claim
-    that LS03, LS04 or any other test applies automatically.
+    Multiple tests can be generated from one singularity if multiple
+    mapping rules match.
     """
+    output: List[Dict[str, Any]] = []
+    searchable_text = event_text(row)
+    source_kp = row.get("kp")
 
-    rows: List[Dict[str, Any]] = []
+    participate_variant = safe_text(row.get("participate_variant"))
+    anticipate_variant = safe_text(row.get("anticipate_variant"))
+    remarks = safe_text(row.get("remarks"))
 
-    for sequence, branch in enumerate(path, start=1):
-        rows.append(
+    if not participate_variant:
+        participate_variant = extract_variant_from_text(
+            remarks,
+            r"(?:associated|participate|participating)",
+        )
+
+    if not anticipate_variant:
+        anticipate_variant = extract_variant_from_text(
+            remarks,
+            r"anticipate(?:d)?",
+        )
+
+    for _, rule in mapping.iterrows():
+        pattern = safe_text(rule["event_pattern"])
+
+        try:
+            matched = re.search(
+                pattern,
+                searchable_text,
+                flags=re.IGNORECASE,
+            )
+        except re.error as exc:
+            raise ValueError(
+                f"Invalid TestMapping regex '{pattern}': {exc}"
+            ) from exc
+
+        if not matched:
+            continue
+
+        needs_abscissa = bool(rule["needs_abscissa"])
+        include_anticipate = bool(rule["include_anticipate"])
+
+        participate_abscissa: Optional[float]
+        anticipate_abscissa: Optional[float]
+
+        if needs_abscissa:
+            participate_abscissa = (
+                float(source_kp)
+                if pd.notna(source_kp)
+                else None
+            )
+        else:
+            participate_abscissa = None
+
+        if include_anticipate:
+            anticipate_abscissa = resolve_variant_abscissa(
+                variant_value=anticipate_variant,
+                variant_index=variant_index,
+                reference_kp=participate_abscissa,
+            )
+        else:
+            anticipate_abscissa = None
+
+        output.append(
             {
-                "test_code": GENERIC_ROUTE_REVIEW_CODE,
-                "test_id": "ROUTE-REVIEW",
-                "test_name": "Route Branch Engineering Review",
-                "branch": branch,
-                "sector": branch_sector(branch),
-                "section": branch_section(branch),
-                "subsection": branch_subsection(branch),
-                "abscissa_m": None,
-                "variant_number": "",
-                "event_description": (
-                    f"Route branch {sequence} of {len(path)}. "
-                    "No searchable singularity/test event was detected "
-                    "automatically in the uploaded PDF."
+                "test_code": safe_text(rule["test_code"]),
+                "test_name": safe_text(rule["test_name"]),
+                "needs_abscissa": needs_abscissa,
+                "sector": safe_text(row.get("sector")),
+                "section": safe_text(row.get("section")),
+                "subsection": safe_text(row.get("subsection")),
+                "branch": safe_text(row.get("branch")),
+                "direction": safe_text(row.get("direction")),
+                "participate_abscissa_m": participate_abscissa,
+                "participate_variant": participate_variant,
+                "anticipate_variant": (
+                    anticipate_variant
+                    if include_anticipate
+                    else ""
                 ),
-                "source_page": "",
-                "review_status": "Engineering review required",
-                "remarks": (
-                    "Confirm applicable LS01–LS14 test type using approved "
-                    "subdivision, invariant and signalling design data."
-                ),
+                "anticipate_abscissa_m": anticipate_abscissa,
+                "location_name": safe_text(row.get("location_name")),
+                "event_name": safe_text(row.get("event_name")),
+                "remarks": safe_text(row.get("remarks")),
+                "source_row": safe_text(row.get("source_row")),
+                "review_status": "To be reviewed",
+                "checks": safe_text(rule.get("checks")),
             }
         )
 
-    return pd.DataFrame(rows)
+    return output
 
 
-def create_test_plan(
-    path: List[str],
-    extracted_events: pd.DataFrame,
+def create_test_register(
+    subdivision: pd.DataFrame,
+    mapping: pd.DataFrame,
+    start_kp: float,
+    end_kp: float,
+    selected_branch: str = "",
 ) -> pd.DataFrame:
     """
-    Creates sheets for detected events on the selected path.
-
-    If none are detected, creates Route Review sheets instead of returning
-    an empty plan.
+    Find all events between selected start/end KPs and create test records.
     """
+    lower_kp = min(start_kp, end_kp)
+    upper_kp = max(start_kp, end_kp)
 
-    if extracted_events.empty:
-        return create_fallback_route_review_rows(path)
-
-    matches = extracted_events[
-        extracted_events["branch"]
-        .astype(str)
-        .apply(lambda value: event_matches_path(value, path))
+    selected = subdivision[
+        subdivision["kp"].notna()
+        & subdivision["kp"].between(lower_kp, upper_kp, inclusive="both")
     ].copy()
 
-    # If test text was found but branch could not be extracted, include those
-    # event rows as engineering-review items rather than returning zero sheets.
-    branchless_events = extracted_events[
-        extracted_events["branch"].astype(str).str.strip().eq("")
-    ].copy()
+    if selected_branch:
+        selected = selected[
+            selected["branch"].astype(str).eq(selected_branch)
+        ].copy()
 
-    if not branchless_events.empty:
-        branchless_events["branch"] = path[0]
-        branchless_events["sector"] = branch_sector(path[0])
-        branchless_events["section"] = branch_section(path[0])
-        branchless_events["subsection"] = branch_subsection(path[0])
-        branchless_events["review_status"] = (
-            "Engineering review required"
+    variant_index = build_variant_index(subdivision)
+
+    records: List[Dict[str, Any]] = []
+
+    for _, row in selected.iterrows():
+        records.extend(
+            match_tests_for_event(
+                row=row,
+                mapping=mapping,
+                variant_index=variant_index,
+            )
         )
 
-        matches = pd.concat(
-            [matches, branchless_events],
-            ignore_index=True,
-        )
+    if not records:
+        return pd.DataFrame(columns=REGISTER_COLUMNS + ["checks"])
 
-    if matches.empty:
-        return create_fallback_route_review_rows(path)
+    result = pd.DataFrame(records)
 
-    matches = matches.drop_duplicates(
+    result = result.drop_duplicates(
         subset=[
             "test_code",
             "branch",
-            "abscissa_m",
-            "event_description",
+            "participate_abscissa_m",
+            "participate_variant",
+            "anticipate_variant",
+            "event_name",
         ]
     ).reset_index(drop=True)
 
-    return matches
+    result = result.sort_values(
+        by=["branch", "participate_abscissa_m", "test_code"],
+        na_position="last",
+    ).reset_index(drop=True)
+
+    return result
 
 
 # =============================================================================
-# TEST SHEET CONTENT
+# DOCX GENERATION
 # =============================================================================
 
-def test_sheet_checks(
-    test_code: str,
-) -> List[Tuple[str, str]]:
-    """
-    Defines basic checks shown in generated DOCX test sheets.
-    """
+def set_cell_text(cell: Any, text: str, bold: bool = False) -> None:
+    cell.text = ""
+    paragraph = cell.paragraphs[0]
+    run = paragraph.add_run(safe_text(text))
+    run.bold = bold
 
-    common_checks = [
-        (
-            "Approved Design Confirmation",
-            "Confirm branch, abscissa, singularity and route against approved design.",
-        ),
-        (
-            "OMAP / Log Evidence",
-            "Record actual evidence reference.",
-        ),
-        (
-            "Engineering Result",
-            "Pass / Fail / Punchlist.",
-        ),
-    ]
-
-    check_map: Dict[str, List[Tuple[str, str]]] = {
-        "LS01": [
-            ("Selected Mode", "RM"),
-            ("Localisation Status", "Out Loc → Wait Loc → Total Loc"),
-            ("Beacon Code", "Record and compare with expected code."),
-            ("Calibration", "Record calibration value."),
-        ],
-        "LS02": [
-            ("Selected Mode", "RM"),
-            ("Localisation Status", "Out Loc → Wait Inv → Total Loc"),
-            ("Mode Availability", "CM/AM available where required."),
-            ("Emergency Brake", "No EB after first RB."),
-        ],
-        "LS03": [
-            ("Track Circuit Occupied", "Associated variant restrictive."),
-            ("Track Circuit Free", "Associated variant permissive."),
-            ("Target Distance", "Permissive distance ≥ restrictive distance."),
-        ],
-        "LS04": [
-            ("Signal Restrictive", "Associated variant restrictive."),
-            ("Signal Permissive", "Associated variant permissive."),
-            ("Target Distance", "Permissive distance ≥ restrictive distance."),
-        ],
-        "LS05": [
-            ("Signal / Overlap Occupied", "Associated variants restrictive."),
-            ("Signal / Overlap Free", "Associated variants permissive."),
-        ],
-        "LS06": [
-            ("Point Uncontrolled", "Associated variant restrictive."),
-            ("Point Controlled", "Associated variant permissive."),
-        ],
-        "LS07": [
-            ("Before End of SACEM", "CM/AM available where applicable."),
-            ("Beyond End of SACEM", "CM/AM unavailable."),
-        ],
-        "LS08": [
-            ("Localisation", "Total Loc."),
-            ("Door Enable Side", "Correct door side enabled."),
-            ("Door Enable Window", "Within ±0.35 m."),
-        ],
-        "LS09": [
-            ("Incorrect Door Side", "PSD/relay does not open."),
-            ("Correct Door Side", "PSD/relay opens."),
-            ("Door Closed Condition", "Expected mode and variant behaviour."),
-        ],
-        "LS10": [
-            ("ESZ Active", "Associated variant restrictive."),
-            ("Inside ESZ", "CM/AM unavailable."),
-            ("End of ESZ", "CM/AM becomes available."),
-        ],
-        "LS11": [
-            ("Cab 1", "Total Loc and CM/AM available."),
-            ("Cab 2", "CM/AM available within 20 seconds."),
-            ("Post Change of End", "No delocalization / no EB."),
-        ],
-        "LS12": [
-            ("Track Circuit", "Record selected track circuit."),
-            ("TSR Value", "Record TSR value."),
-            ("Train Behaviour", "Target speed follows TSR and no EB."),
-        ],
-        "LS13": [
-            ("Return Channel Loop", "Record location."),
-            ("Trackside Reception", "Train information received."),
-        ],
-        "LS14": [
-            ("Start of Shunt", "Record branch, Loc Max and target distance."),
-            ("End of Shunt", "Record recovery branch / Loc Max."),
-        ],
-        GENERIC_ROUTE_REVIEW_CODE: [
-            (
-                "Route Branch",
-                "Confirm this branch is included in selected route.",
-            ),
-            (
-                "Singularity Identification",
-                "Identify MTIB, STIB, T/C, signal, point, station, ESZ, CoE, TSR, return channel or End of Shunt if applicable.",
-            ),
-            (
-                "Applicable Procedure Test",
-                "Select applicable LS01–LS14 test sheet after engineering review.",
-            ),
-            (
-                "Approved Design Source",
-                "Record source drawing, Appendix J, invariant or route table reference.",
-            ),
-        ],
-    }
-
-    return check_map.get(
-        test_code,
-        [],
-    ) + common_checks
-
-
-# =============================================================================
-# DOCX EXPORT
-# =============================================================================
 
 def add_table_row(
     table: Any,
-    left: str,
-    right: str,
+    values: List[str],
+    bold: bool = False,
 ) -> None:
     cells = table.add_row().cells
-    cells[0].text = left
-    cells[1].text = right
+
+    for index, value in enumerate(values):
+        set_cell_text(cells[index], value, bold=bold)
+
+
+def checks_from_row(row: pd.Series) -> List[str]:
+    """
+    Checks are configured in TestMapping with | separators.
+
+    Example:
+        Track circuit occupied|Record Loc Max|Confirm target speed
+    """
+    configured_checks = safe_text(row.get("checks"))
+
+    if configured_checks:
+        return [
+            normalise_spaces(item)
+            for item in configured_checks.split("|")
+            if normalise_spaces(item)
+        ]
+
+    return [
+        "Confirm engineering source and approved design data.",
+        "Record OMAP / onboard / wayside evidence reference.",
+        "Confirm participating variant state.",
+    ]
 
 
 def create_docx_test_sheet(
     row: pd.Series,
-    project_info: Dict[str, str],
+    project: Dict[str, str],
     sheet_number: str,
-    start_branch: str,
-    end_branch: str,
 ) -> bytes:
+    """
+    Create a generic project-configurable DOCX test sheet.
+
+    The tests and checks are driven by TestMapping, not hard-coded
+    LS01–LS14 Python logic.
+    """
     try:
         from docx import Document
         from docx.enum.text import WD_ALIGN_PARAGRAPH
         from docx.shared import Inches, Pt
     except ImportError as exc:
         raise RuntimeError(
-            "Missing dependency: python-docx. "
-            "Install with: pip install python-docx"
+            "Missing python-docx. Install with: pip install python-docx"
         ) from exc
-
-    test_code = safe_text(row.get("test_code"))
-
-    if test_code in TEST_TYPES:
-        test_details = TEST_TYPES[test_code]
-        test_id = test_details["id"]
-        test_name = test_details["name"]
-        purpose = test_details["purpose"]
-    else:
-        test_id = "ROUTE-REVIEW"
-        test_name = "Route Branch Engineering Review"
-        purpose = (
-            "Review the route branch and identify the applicable low-speed "
-            "test(s) using the approved project design data."
-        )
 
     document = Document()
 
     section = document.sections[0]
     section.top_margin = Inches(0.35)
     section.bottom_margin = Inches(0.35)
-    section.left_margin = Inches(0.45)
-    section.right_margin = Inches(0.45)
+    section.left_margin = Inches(0.40)
+    section.right_margin = Inches(0.40)
 
-    title = document.add_paragraph()
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    title_run = title.add_run("ALSTOM\n")
-    title_run.bold = True
-    title_run.font.size = Pt(16)
+    document.styles["Normal"].font.name = "Arial"
+    document.styles["Normal"].font.size = Pt(8)
 
     heading = document.add_paragraph()
     heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     heading_run = heading.add_run(
-        f"{test_id} – {test_name}"
+        project["procedure_title"]
     )
     heading_run.bold = True
-    heading_run.font.size = Pt(12)
+    heading_run.font.size = Pt(13)
+
+    title = document.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    title_run = title.add_run(
+        f"{safe_text(row['test_code'])} – {safe_text(row['test_name'])}"
+    )
+    title_run.bold = True
+    title_run.font.size = Pt(11)
 
     document.add_paragraph()
 
-    info_table = document.add_table(rows=0, cols=2)
-    info_table.style = "Table Grid"
+    details_table = document.add_table(rows=0, cols=4)
+    details_table.style = "Table Grid"
 
-    details = [
-        ("Procedure Reference", project_info["procedure_reference"]),
-        ("Procedure Title", PROCEDURE_TITLE),
-        ("Test Sheet Number", sheet_number),
-        ("Project / Contract", project_info["project"]),
-        ("Trackside Version", project_info["trackside_version"]),
-        ("ATP Version", project_info["atp_version"]),
-        ("ATO Version", project_info["ato_version"]),
-        ("Selected Start Point", start_branch),
-        ("Selected End Point", end_branch),
-        ("Branch Number", safe_text(row.get("branch"))),
-        ("Sector", safe_text(row.get("sector"))),
-        ("Section", safe_text(row.get("section"))),
-        ("Sub-section", safe_text(row.get("subsection"))),
-        ("Abscissa", f"{safe_text(row.get('abscissa_m'))} m"),
-        ("Variant Number", safe_text(row.get("variant_number"))),
-        ("Source Page", safe_text(row.get("source_page"))),
+    add_table_row(
+        details_table,
+        [
+            "Procedure Reference",
+            project["procedure_reference"],
+            "Test Sheet Number",
+            sheet_number,
+        ],
+    )
+
+    add_table_row(
+        details_table,
+        [
+            "Project / Contract",
+            project["project"],
+            "Trackside Version",
+            project["trackside_version"],
+        ],
+    )
+
+    add_table_row(
+        details_table,
+        [
+            "ATP Version",
+            project["atp_version"],
+            "ATO Version",
+            project["ato_version"],
+        ],
+    )
+
+    document.add_paragraph()
+
+    location_table = document.add_table(rows=0, cols=4)
+    location_table.style = "Table Grid"
+
+    add_table_row(
+        location_table,
+        [
+            "Sector",
+            safe_text(row.get("sector")),
+            "Branch",
+            safe_text(row.get("branch")),
+        ],
+    )
+
+    add_table_row(
+        location_table,
+        [
+            "Section / Subsection",
+            (
+                f"{safe_text(row.get('section'))} / "
+                f"{safe_text(row.get('subsection'))}"
+            ),
+            "Direction",
+            safe_text(row.get("direction")),
+        ],
+    )
+
+    if bool(row.get("needs_abscissa")):
+        participate_abs = safe_text(
+            row.get("participate_abscissa_m")
+        )
+
+        if participate_abs:
+            participate_abs += " m"
+
+        add_table_row(
+            location_table,
+            [
+                "Participating Abscissa",
+                participate_abs,
+                "Participating Variant",
+                safe_text(row.get("participate_variant")),
+            ],
+        )
+    else:
+        add_table_row(
+            location_table,
+            [
+                "Participating Variant",
+                safe_text(row.get("participate_variant")),
+                "Abscissa Requirement",
+                "Not required for this test",
+            ],
+        )
+
+    anticipate_variant = safe_text(row.get("anticipate_variant"))
+
+    if anticipate_variant:
+        anticipated_abs = safe_text(
+            row.get("anticipate_abscissa_m")
+        )
+
+        if anticipated_abs:
+            anticipated_abs += " m"
+
+        add_table_row(
+            location_table,
+            [
+                "Anticipated Variant",
+                anticipate_variant,
+                "Anticipated Abscissa",
+                anticipated_abs or "To be confirmed",
+            ],
+        )
+
+    add_table_row(
+        location_table,
+        [
+            "Location / Asset",
+            safe_text(row.get("location_name")),
+            "Source Event",
+            safe_text(row.get("event_name")),
+        ],
+    )
+
+    document.add_paragraph()
+
+    test_table = document.add_table(rows=1, cols=4)
+    test_table.style = "Table Grid"
+
+    headers = [
+        "Test Action / Check",
+        "Expected Result",
+        "Actual Result / Evidence",
+        "OK?",
     ]
 
-    for label, value in details:
+    for index, text in enumerate(headers):
+        set_cell_text(test_table.rows[0].cells[index], text, bold=True)
+
+    for check in checks_from_row(row):
         add_table_row(
-            table=info_table,
-            left=label,
-            right=safe_text(value),
+            test_table,
+            [
+                check,
+                "Compliant with approved design and test procedure.",
+                "",
+                "☐ Y   ☐ N   ☐ N/A",
+            ],
         )
 
     document.add_paragraph()
 
-    purpose_heading = document.add_paragraph()
-    purpose_heading.add_run("Purpose of Test").bold = True
+    comments = document.add_paragraph()
+    comments.add_run("Engineering Notes / Source Evidence").bold = True
 
-    document.add_paragraph(purpose)
+    notes_table = document.add_table(rows=1, cols=1)
+    notes_table.style = "Table Grid"
 
-    document.add_paragraph()
-
-    record_heading = document.add_paragraph()
-    record_heading.add_run("Test Record").bold = True
-
-    record_table = document.add_table(rows=1, cols=4)
-    record_table.style = "Table Grid"
-
-    headers = [
-        "Check / Record",
-        "Expected Requirement",
-        "Actual Result",
-        "Pass / Fail",
-    ]
-
-    for index, header in enumerate(headers):
-        record_table.rows[0].cells[index].text = header
-
-    for check, expected in test_sheet_checks(test_code):
-        cells = record_table.add_row().cells
-        cells[0].text = check
-        cells[1].text = expected
-        cells[2].text = ""
-        cells[3].text = "☐ Pass  ☐ Fail  ☐ N/A"
-
-    document.add_paragraph()
-
-    notes_heading = document.add_paragraph()
-    notes_heading.add_run(
-        "Engineering Remarks / Source Evidence"
-    ).bold = True
-
-    notes = (
-        safe_text(row.get("remarks"))
-        or safe_text(row.get("event_description"))
-        or "No source evidence extracted."
+    note_text = (
+        f"Source row: {safe_text(row.get('source_row'))}\n"
+        f"Event: {safe_text(row.get('event_name'))}\n"
+        f"Remarks: {safe_text(row.get('remarks'))}\n\n"
+        "This sheet is automatically generated. The extracted data, "
+        "variants, abscissae, test applicability and acceptance criteria "
+        "must be reviewed against approved project documents before issue."
     )
 
-    document.add_paragraph(notes)
+    set_cell_text(notes_table.rows[0].cells[0], note_text)
 
     document.add_paragraph()
 
-    signature_table = document.add_table(rows=3, cols=3)
-    signature_table.style = "Table Grid"
+    approval_table = document.add_table(rows=0, cols=3)
+    approval_table.style = "Table Grid"
 
-    signature_table.rows[0].cells[0].text = "Result"
-    signature_table.rows[0].cells[1].text = (
-        "☐ Passed    ☐ Failed    ☐ Punchlist Raised"
+    add_table_row(
+        approval_table,
+        [
+            "Test Result",
+            "☐ Passed",
+            "☐ Failed",
+        ],
     )
-    signature_table.rows[0].cells[2].text = ""
 
-    signature_table.rows[1].cells[0].text = "Role"
-    signature_table.rows[1].cells[1].text = "Name / Signature"
-    signature_table.rows[1].cells[2].text = "Date"
+    add_table_row(
+        approval_table,
+        [
+            "Name",
+            "Contractor / Supplier",
+            "Client / Employer",
+        ],
+    )
 
-    signature_table.rows[2].cells[0].text = "Alstom Test Engineer"
-    signature_table.rows[2].cells[1].text = ""
-    signature_table.rows[2].cells[2].text = ""
+    add_table_row(
+        approval_table,
+        [
+            "Signature",
+            "",
+            "",
+        ],
+    )
 
-    witness_cells = signature_table.add_row().cells
-    witness_cells[0].text = "MTR Witness"
-    witness_cells[1].text = ""
-    witness_cells[2].text = ""
-
-    document.add_paragraph()
+    add_table_row(
+        approval_table,
+        [
+            "Date",
+            "",
+            "",
+        ],
+    )
 
     footer = document.add_paragraph()
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     footer_run = footer.add_run(
-        "UNCONTROLLED WHEN PRINTED – Verify approved document revision before use."
+        "UNCONTROLLED WHEN PRINTED – Verify approved design data before use."
     )
     footer_run.italic = True
-    footer_run.font.size = Pt(8)
+    footer_run.font.size = Pt(7)
 
     output = io.BytesIO()
     document.save(output)
@@ -1462,10 +912,8 @@ def create_docx_test_sheet(
 
 
 def create_docx_zip(
-    test_plan: pd.DataFrame,
-    project_info: Dict[str, str],
-    start_branch: str,
-    end_branch: str,
+    register: pd.DataFrame,
+    project: Dict[str, str],
 ) -> bytes:
     output = io.BytesIO()
 
@@ -1474,97 +922,65 @@ def create_docx_zip(
         "w",
         zipfile.ZIP_DEFLATED,
     ) as archive:
-        for index, (_, row) in enumerate(
-            test_plan.iterrows(),
-            start=1,
-        ):
-            test_code = (
-                safe_text(row.get("test_code"))
-                or GENERIC_ROUTE_REVIEW_CODE
-            )
-
-            branch = (
-                safe_text(row.get("branch"))
-                or "GENERAL"
-            )
-
+        for sequence, (_, row) in enumerate(register.iterrows(), start=1):
             sheet_number = (
-                f"{project_info['sheet_prefix']}-{index:03d}"
+                f"{project['sheet_prefix']}-{sequence:03d}"
             )
 
-            filename = (
-                f"{sheet_number}_{test_code}_{branch}.docx"
-            )
+            branch = safe_text(row.get("branch")) or "NO_BRANCH"
+            test_code = safe_text(row.get("test_code")) or "NO_CODE"
 
-            filename = re.sub(
-                r'[\\/:*?"<>|]',
-                "_",
-                filename,
+            abs_value = safe_text(
+                row.get("participate_abscissa_m")
+            ) or "NO_ABSCISSA"
+
+            filename = clean_filename(
+                f"{sheet_number}_{test_code}_{branch}_KP_{abs_value}.docx"
             )
 
             archive.writestr(
                 filename,
                 create_docx_test_sheet(
                     row=row,
-                    project_info=project_info,
+                    project=project,
                     sheet_number=sheet_number,
-                    start_branch=start_branch,
-                    end_branch=end_branch,
                 ),
             )
 
     return output.getvalue()
 
 
+# =============================================================================
+# EXCEL EXPORT
+# =============================================================================
+
 def create_excel_bytes(
-    test_plan: pd.DataFrame,
-    selected_path: List[str],
-    project_info: Dict[str, str],
+    register: pd.DataFrame,
+    selected_events: pd.DataFrame,
+    project: Dict[str, str],
 ) -> bytes:
     output = io.BytesIO()
 
-    with pd.ExcelWriter(
-        output,
-        engine="openpyxl",
-    ) as writer:
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
         cover = pd.DataFrame(
             [
-                ["Procedure Reference", project_info["procedure_reference"]],
-                ["Procedure Title", PROCEDURE_TITLE],
-                ["Project / Contract", project_info["project"]],
-                ["Trackside Version", project_info["trackside_version"]],
-                ["ATP Version", project_info["atp_version"]],
-                ["ATO Version", project_info["ato_version"]],
+                ["Procedure Reference", project["procedure_reference"]],
+                ["Procedure Title", project["procedure_title"]],
+                ["Project / Contract", project["project"]],
+                ["Trackside Version", project["trackside_version"]],
+                ["ATP Version", project["atp_version"]],
+                ["ATO Version", project["ato_version"]],
                 ["Generated Date", str(date.today())],
-                ["Selected Start Point", selected_path[0]],
-                ["Selected End Point", selected_path[-1]],
-                ["Selected Route", " → ".join(selected_path)],
+                ["Generated Test Sheets", len(register)],
             ],
             columns=["Field", "Value"],
         )
 
-        cover.to_excel(
+        cover.to_excel(writer, sheet_name="Cover", index=False)
+        register.to_excel(writer, sheet_name="Test Register", index=False)
+        selected_events.to_excel(
             writer,
-            sheet_name="Cover",
-            index=False,
-        )
-
-        pd.DataFrame(
-            {
-                "Route Sequence": list(
-                    range(1, len(selected_path) + 1)
-                ),
-                "Branch": selected_path,
-            }
-        ).to_excel(
-            writer,
-            sheet_name="Selected Route",
-            index=False,
-        )
-
-        test_plan.to_excel(
-            writer,
-            sheet_name="Test Register",
+            sheet_name="Selected Subdivision Events",
             index=False,
         )
 
@@ -1575,81 +991,241 @@ def create_excel_bytes(
             worksheet.auto_filter.ref = worksheet.dimensions
 
             for column_cells in worksheet.columns:
-                maximum_length = max(
+                max_length = max(
                     len(safe_text(cell.value))
                     for cell in column_cells
                 )
 
                 worksheet.column_dimensions[
                     column_cells[0].column_letter
-                ].width = min(
-                    max(maximum_length + 2, 12),
-                    60,
-                )
+                ].width = min(max(max_length + 2, 12), 65)
 
     return output.getvalue()
 
 
 # =============================================================================
-# BUTTON GRID
+# TEMPLATE DOWNLOAD
 # =============================================================================
 
-def render_branch_buttons(
-    branches: List[str],
-    selected_key: str,
-    button_prefix: str,
-    clear_keys_on_change: Optional[List[str]] = None,
-    columns_count: int = 4,
-) -> None:
+def create_input_template() -> bytes:
     """
-    Renders friendly selectable branch buttons.
-
-    clear_keys_on_change is important:
-    when Start Point changes, old End Point and old Path selection are removed.
+    Downloadable workbook template. This is only a starting structure;
+    project data must be imported from approved subdivision information.
     """
+    output = io.BytesIO()
 
-    columns = st.columns(columns_count)
+    subdivision_example = pd.DataFrame(
+        [
+            {
+                "kp": 1175.5,
+                "branch": "09-01-1-0",
+                "sector": "09",
+                "section": "01",
+                "subsection": "09-01-1",
+                "event_name": "Sub Section Heading",
+                "remarks": (
+                    "Associated variant: (TUC KP T/C); "
+                    "Anticipate variant: 14-07-1"
+                ),
+                "variant_number": "1",
+                "participate_variant": "TUC KP T/C",
+                "anticipate_variant": "14-07-1",
+                "location_name": "",
+                "direction": "Up",
+            },
+            {
+                "kp": 1198.0,
+                "branch": "09-01-1-0",
+                "sector": "09",
+                "section": "01",
+                "subsection": "09-01-1",
+                "event_name": "Spacing Stopping Point",
+                "remarks": "Associated variant: (TUC KP T/C)",
+                "variant_number": "5",
+                "participate_variant": "TUC KP T/C",
+                "anticipate_variant": "",
+                "location_name": "TC 2450",
+                "direction": "Up",
+            },
+        ]
+    )
 
-    for index, branch in enumerate(branches):
-        with columns[index % columns_count]:
-            selected = (
-                st.session_state.get(selected_key) == branch
-            )
+    mapping_example = pd.DataFrame(
+        [
+            {
+                "event_pattern": "SPACING STOPPING POINT",
+                "test_code": "LS03",
+                "test_name": (
+                    "Spacing Stopping Point Test – Track Circuit"
+                ),
+                "needs_abscissa": True,
+                "include_anticipate": True,
+                "checks": (
+                    "Track circuit occupied|"
+                    "Available mode CM/AUTO|"
+                    "Record Loc Max|"
+                    "Record target distance|"
+                    "Track circuit free"
+                ),
+            },
+            {
+                "event_pattern": "RETURN CHANNEL",
+                "test_code": "LS13",
+                "test_name": "Return Channel Test",
+                "needs_abscissa": False,
+                "include_anticipate": False,
+                "checks": (
+                    "Record return channel location|"
+                    "Confirm return-channel loop|"
+                    "Confirm trackside reception"
+                ),
+            },
+            {
+                "event_pattern": "END OF SHUNT",
+                "test_code": "LS14",
+                "test_name": "End of Shunt Test",
+                "needs_abscissa": False,
+                "include_anticipate": False,
+                "checks": (
+                    "Record shunt route name|"
+                    "Confirm RM operation|"
+                    "Confirm CM/AM resume"
+                ),
+            },
+        ]
+    )
 
-            label = (
-                f"✅ {branch}"
-                if selected
-                else f"🛤️ {branch}"
-            )
+    project_example = pd.DataFrame(
+        [
+            ["Procedure Reference", "C1252-TAC-XXXX"],
+            ["Procedure Title", "ATC Dynamic Test Procedure"],
+            ["Project / Contract", "Example Project"],
+            ["Trackside Version", ""],
+            ["ATP Version", ""],
+            ["ATO Version", ""],
+        ],
+        columns=["Field", "Value"],
+    )
 
-            if st.button(
-                label,
-                key=f"{button_prefix}_{branch}",
-                use_container_width=True,
-            ):
-                previous = st.session_state.get(selected_key)
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        subdivision_example.to_excel(
+            writer,
+            sheet_name="Subdivision",
+            index=False,
+        )
 
-                st.session_state[selected_key] = branch
+        mapping_example.to_excel(
+            writer,
+            sheet_name="TestMapping",
+            index=False,
+        )
 
-                if previous != branch and clear_keys_on_change:
-                    for key in clear_keys_on_change:
-                        st.session_state.pop(key, None)
+        project_example.to_excel(
+            writer,
+            sheet_name="Project",
+            index=False,
+        )
+
+    return output.getvalue()
 
 
 # =============================================================================
-# MAIN APP
+# STREAMLIT APPLICATION
 # =============================================================================
 
-def render_test_sheet_generator_app() -> None:
-    render_test_sheet_generator_styles()
+def render_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        .hero {
+            background: linear-gradient(135deg, #102A43, #164E72);
+            color: white;
+            padding: 24px 30px;
+            border-radius: 14px;
+            margin-bottom: 16px;
+        }
+        .hero h1 {
+            color: white !important;
+            margin: 0 !important;
+        }
+        .notice {
+            background: #FFF7E8;
+            border-left: 5px solid #E37400;
+            border-radius: 8px;
+            padding: 14px;
+            margin: 12px 0;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def read_project_sheet(
+    excel_file: Any,
+) -> Dict[str, str]:
+    defaults = {
+        "procedure_reference": "C1252-TAC-XXXX",
+        "procedure_title": "ATC Dynamic Test Procedure",
+        "project": "",
+        "trackside_version": "",
+        "atp_version": "",
+        "ato_version": "",
+        "sheet_prefix": "ATC-TEST",
+    }
+
+    try:
+        project_df = pd.read_excel(
+            excel_file,
+            sheet_name="Project",
+        )
+    except Exception:
+        return defaults
+
+    if "Field" not in project_df.columns or "Value" not in project_df.columns:
+        return defaults
+
+    for _, row in project_df.iterrows():
+        field = safe_text(row["Field"]).lower()
+        value = safe_text(row["Value"])
+
+        mapping = {
+            "procedure reference": "procedure_reference",
+            "procedure title": "procedure_title",
+            "project / contract": "project",
+            "project": "project",
+            "trackside version": "trackside_version",
+            "atp version": "atp_version",
+            "ato version": "ato_version",
+            "test sheet prefix": "sheet_prefix",
+        }
+
+        if field in mapping:
+            defaults[mapping[field]] = value
+
+    if not defaults["sheet_prefix"]:
+        defaults["sheet_prefix"] = defaults["procedure_reference"]
+
+    return defaults
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title="ATC Test Sheet Generator",
+        page_icon="🚆",
+        layout="wide",
+    )
+
+    render_styles()
 
     st.markdown(
         """
-        <div class="tsg-hero">
-            <h1>ATC Route-to-Test Sheet Generator</h1>
+        <div class="hero">
+            <h1>ATC Subdivision Test Sheet Generator</h1>
             <p>
-                Upload one route PDF, choose a starting point, choose an
-                available final destination, then generate low-speed test sheets.
+                Select a start and end KP, identify applicable ATC tests,
+                resolve participating and anticipated variants, and generate
+                a reviewable test-sheet register and DOCX test sheets.
             </p>
         </div>
         """,
@@ -1658,534 +1234,282 @@ def render_test_sheet_generator_app() -> None:
 
     st.markdown(
         """
-        <div class="tsg-warning">
-            <b>Engineering control:</b>
-            the route path and generated test sheets must be checked against
-            the approved sector subdivision, Appendix J, invariant data and
-            signalling design before issue or execution.
+        <div class="notice">
+            <b>Engineering warning:</b><br>
+            This application assists test planning. It does not approve
+            abscissae, variants, stopping points, safety conditions or test
+            applicability. All generated data must be checked against approved
+            subdivision, invariant, signalling, PAT and test documentation.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # -------------------------------------------------------------------------
-    # PROJECT INFORMATION
-    # -------------------------------------------------------------------------
-
-    with st.expander(
-        "Project and document information",
-        expanded=True,
-    ):
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            project_name = st.text_input(
-                "Project / Contract",
-                value="",
-                key="tsg_project_name",
-            )
-
-            trackside_version = st.text_input(
-                "Trackside Version",
-                value="",
-                key="tsg_trackside_version",
-            )
-
-        with col2:
-            atp_version = st.text_input(
-                "ATP Version",
-                value="",
-                key="tsg_atp_version",
-            )
-
-            ato_version = st.text_input(
-                "ATO Version",
-                value="",
-                key="tsg_ato_version",
-            )
-
-        with col3:
-            procedure_reference = st.text_input(
-                "Procedure Reference",
-                value=PROCEDURE_REFERENCE,
-                key="tsg_procedure_reference",
-            )
-
-            sheet_prefix = st.text_input(
-                "Test Sheet Prefix",
-                value=PROCEDURE_REFERENCE,
-                key="tsg_sheet_prefix",
-            )
-
-    project_info = {
-        "project": project_name,
-        "trackside_version": trackside_version,
-        "atp_version": atp_version,
-        "ato_version": ato_version,
-        "procedure_reference": procedure_reference,
-        "sheet_prefix": sheet_prefix,
-    }
-
-    # -------------------------------------------------------------------------
-    # SINGLE PDF UPLOAD
-    # -------------------------------------------------------------------------
-
-    st.markdown("## 1. Upload Route / Sector Subdivision PDF")
-
-    st.markdown(
-        """
-        <div class="tsg-info">
-            <b>One PDF only.</b><br>
-            Upload the approved Appendix J, ATC Sector Subdivision, route
-            transmission list, route diagram, or route-definition PDF.
-            <br><br>
-            The PDF should include ordered branch sequences, for example:
-            <br>
-            <code>09-01-1-0, 09-01-2-0, 09-01-3-0, 14-04-1-1</code>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    st.download_button(
+        "Download Input Workbook Template",
+        data=create_input_template(),
+        file_name="ATC_Test_Sheet_Generator_Template.xlsx",
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
     )
 
-    uploaded_pdf = st.file_uploader(
-        "Upload route-definition PDF",
-        type=["pdf"],
-        key="tsg_uploaded_route_pdf",
+    st.markdown("## 1. Upload One Project Workbook")
+
+    uploaded = st.file_uploader(
+        "Upload one Excel workbook containing Subdivision and TestMapping sheets",
+        type=["xlsx", "xlsm"],
     )
 
-    if uploaded_pdf is None:
+    if uploaded is None:
         st.info(
-            "Upload the route-definition PDF to begin."
+            "Upload an Excel workbook. Use the downloadable template if "
+            "needed."
         )
         return
 
     try:
-        with st.spinner(
-            "Reading PDF, extracting branch connections and finding test events..."
-        ):
-            page_texts = extract_pdf_text(
-                uploaded_pdf.getvalue()
-            )
+        raw_subdivision = pd.read_excel(
+            uploaded,
+            sheet_name="Subdivision",
+        )
 
-            graph, reverse_graph, evidence = extract_route_graph(
-                page_texts
-            )
+        uploaded.seek(0)
 
-            extracted_events = extract_test_events(
-                page_texts
-            )
+        raw_mapping = pd.read_excel(
+            uploaded,
+            sheet_name="TestMapping",
+        )
+
+        uploaded.seek(0)
+
+        project_defaults = read_project_sheet(uploaded)
+
+        subdivision = standardise_subdivision_dataframe(
+            raw_subdivision
+        )
+
+        test_mapping = standardise_mapping_dataframe(
+            raw_mapping
+        )
 
     except Exception as exc:
+        st.error(f"Cannot read uploaded workbook: {exc}")
+        return
+
+    if subdivision.empty:
+        st.error("Subdivision sheet contains no usable rows.")
+        return
+
+    if subdivision["kp"].notna().sum() == 0:
         st.error(
-            f"Unable to process the uploaded PDF: {exc}"
+            "No KP/Abscissa values were found. Add a kp, K.P., "
+            "Abscissa or Chainage column."
         )
         return
 
-    all_branches = sorted(
-        set(graph.keys())
-        | set(reverse_graph.keys())
+    st.success(
+        f"Loaded {len(subdivision)} subdivision rows and "
+        f"{len(test_mapping)} configurable test-mapping rules."
     )
 
-    if not all_branches:
-        st.error(
-            "No connected branch routes were found in the PDF. "
-            "The PDF must contain selectable/OCR text showing ordered branch "
-            "numbers in route sequences."
-        )
+    with st.expander("Project Information", expanded=True):
+        col1, col2, col3 = st.columns(3)
 
-        with st.expander(
-            "Show extracted PDF text for troubleshooting"
-        ):
-            for page_number, page_text in enumerate(
-                page_texts[:10],
-                start=1,
-            ):
-                st.text_area(
-                    f"Extracted text from PDF page {page_number}",
-                    value=page_text[:5000],
-                    height=220,
-                    disabled=True,
-                    key=f"debug_pdf_text_{page_number}",
-                )
-
-        return
-
-    # -------------------------------------------------------------------------
-    # NETWORK SUMMARY
-    # -------------------------------------------------------------------------
-
-    st.markdown("## 2. Route Network Found")
-
-    metric_col1, metric_col2, metric_col3 = st.columns(3)
-
-    metric_col1.metric(
-        "Connected Branches",
-        len(all_branches),
-    )
-
-    metric_col2.metric(
-        "Detected Connections",
-        len(evidence),
-    )
-
-    metric_col3.metric(
-        "Detected Test Events",
-        len(extracted_events),
-    )
-
-    with st.expander(
-        "Show extracted branch connections",
-        expanded=False,
-    ):
-        if evidence.empty:
-            st.info(
-                "No evidence rows are available."
-            )
-        else:
-            st.dataframe(
-                evidence,
-                use_container_width=True,
-                hide_index=True,
+        with col1:
+            project_defaults["project"] = st.text_input(
+                "Project / Contract",
+                value=project_defaults["project"],
             )
 
-    # -------------------------------------------------------------------------
-    # START POINT SELECTION
-    # -------------------------------------------------------------------------
+            project_defaults["trackside_version"] = st.text_input(
+                "Trackside Version",
+                value=project_defaults["trackside_version"],
+            )
 
-    st.markdown("## 3. Choose Starting Point")
+        with col2:
+            project_defaults["atp_version"] = st.text_input(
+                "ATP Version",
+                value=project_defaults["atp_version"],
+            )
 
-    st.markdown(
-        """
-        <div class="tsg-info">
-            Click the branch where the train begins.
-            <br><br>
-            After choosing a start point, the app will calculate only the
-            possible <b>final destinations</b>. Intermediate branches will not
-            be shown as End Point options.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+            project_defaults["ato_version"] = st.text_input(
+                "ATO Version",
+                value=project_defaults["ato_version"],
+            )
 
-    available_starts = starting_points(graph)
+        with col3:
+            project_defaults["procedure_reference"] = st.text_input(
+                "Procedure Reference",
+                value=project_defaults["procedure_reference"],
+            )
 
-    start_search = st.text_input(
-        "Search starting point",
-        placeholder="Example: 09-01",
-        key="tsg_start_search",
-    )
+            project_defaults["sheet_prefix"] = st.text_input(
+                "Test Sheet Prefix",
+                value=project_defaults["sheet_prefix"],
+            )
 
-    visible_starts = [
+            project_defaults["procedure_title"] = st.text_input(
+                "Procedure Title",
+                value=project_defaults["procedure_title"],
+            )
+
+    st.markdown("## 2. Select Start and End Point")
+
+    available_branches = sorted(
         branch
-        for branch in available_starts
-        if start_search.lower() in branch.lower()
-    ]
-
-    if not visible_starts:
-        st.warning(
-            "No starting point matches this search."
-        )
-        return
-
-    render_branch_buttons(
-        branches=visible_starts[:150],
-        selected_key="tsg_selected_start",
-        button_prefix="start",
-        clear_keys_on_change=[
-            "tsg_selected_end",
-            "tsg_path_choice",
-            "tsg_generated_plan",
-            "tsg_generated_path",
-        ],
+        for branch in subdivision["branch"].dropna().unique()
+        if safe_text(branch)
     )
 
-    selected_start = st.session_state.get(
-        "tsg_selected_start",
-        "",
+    branch_options = ["All branches"] + available_branches
+
+    selected_branch_display = st.selectbox(
+        "Branch Filter",
+        options=branch_options,
     )
 
-    if not selected_start:
-        st.info(
-            "Please choose one Starting Point."
-        )
-        return
-
-    st.markdown(
-        f"""
-        <div class="tsg-success">
-            <b>Selected Starting Point:</b> {selected_start}
-        </div>
-        """,
-        unsafe_allow_html=True,
+    selected_branch = (
+        ""
+        if selected_branch_display == "All branches"
+        else selected_branch_display
     )
 
-    # -------------------------------------------------------------------------
-    # END POINT SELECTION
-    # -------------------------------------------------------------------------
+    filtered_for_range = subdivision.copy()
 
-    st.markdown("## 4. Choose Available End Point")
+    if selected_branch:
+        filtered_for_range = filtered_for_range[
+            filtered_for_range["branch"] == selected_branch
+        ].copy()
 
-    available_ends = reachable_endpoints(
-        graph=graph,
-        start_branch=selected_start,
-    )
+    minimum_kp = float(filtered_for_range["kp"].min())
+    maximum_kp = float(filtered_for_range["kp"].max())
 
-    if not available_ends:
-        st.warning(
-            "No final End Point could be found from this Starting Point. "
-            "The route data may stop at an intermediate branch, or the PDF "
-            "does not include the full route sequence."
+    col1, col2 = st.columns(2)
+
+    with col1:
+        start_kp = st.number_input(
+            "Start KP / Abscissa",
+            min_value=minimum_kp,
+            max_value=maximum_kp,
+            value=minimum_kp,
+            step=0.1,
+            format="%.3f",
         )
 
-        with st.expander(
-            "Technical route information"
-        ):
-            st.write(
-                "Direct next branches from selected start:"
-            )
-            st.write(
-                sorted(graph.get(selected_start, set()))
-            )
-
-        return
-
-    st.markdown(
-        """
-        <div class="tsg-info">
-            <b>Only final destinations are shown below.</b><br>
-            The app hides middle/intermediate branches automatically.
-            Choose where the train finishes.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    end_search = st.text_input(
-        "Search available final end point",
-        placeholder="Example: 14-04",
-        key="tsg_end_search",
-    )
-
-    visible_ends = [
-        branch
-        for branch in available_ends
-        if end_search.lower() in branch.lower()
-    ]
-
-    if not visible_ends:
-        st.warning(
-            "No final End Point matches this search."
+    with col2:
+        end_kp = st.number_input(
+            "End KP / Abscissa",
+            min_value=minimum_kp,
+            max_value=maximum_kp,
+            value=maximum_kp,
+            step=0.1,
+            format="%.3f",
         )
-        return
-
-    render_branch_buttons(
-        branches=visible_ends[:150],
-        selected_key="tsg_selected_end",
-        button_prefix="end",
-        clear_keys_on_change=[
-            "tsg_path_choice",
-            "tsg_generated_plan",
-            "tsg_generated_path",
-        ],
-    )
-
-    selected_end = st.session_state.get(
-        "tsg_selected_end",
-        "",
-    )
-
-    if not selected_end:
-        st.info(
-            "Please choose one available End Point."
-        )
-        return
-
-    if selected_end not in available_ends:
-        st.error(
-            "Selected End Point is not reachable from selected Starting Point."
-        )
-        return
-
-    st.markdown(
-        f"""
-        <div class="tsg-success">
-            <b>Selected Route:</b> {selected_start} → {selected_end}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # -------------------------------------------------------------------------
-    # PATH IDENTIFICATION
-    # -------------------------------------------------------------------------
-
-    st.markdown("## 5. Confirm Route Path")
-
-    paths = find_paths(
-        graph=graph,
-        start_branch=selected_start,
-        end_branch=selected_end,
-    )
-
-    if not paths:
-        st.error(
-            "No complete path could be found between the selected start and "
-            "end point."
-        )
-        return
-
-    if len(paths) == 1:
-        selected_path = paths[0]
-
-        st.success(
-            "One valid route path was found automatically."
-        )
-
-    else:
-        path_labels = [
-            f"Route Option {index} — {len(path)} branches"
-            for index, path in enumerate(paths, start=1)
-        ]
-
-        selected_path_label = st.radio(
-            "More than one physical path is possible. Choose the correct route.",
-            options=path_labels,
-            key="tsg_path_choice",
-        )
-
-        selected_path = paths[
-            path_labels.index(selected_path_label)
-        ]
-
-    # IMPORTANT:
-    # components.html() renders SVG properly.
-    # st.markdown() may show raw SVG code instead.
-    components.html(
-        build_path_diagram(
-            path=selected_path,
-            start_branch=selected_start,
-            end_branch=selected_end,
-        ),
-        height=285,
-        scrolling=True,
-    )
-
-    st.caption(
-        f"Selected route contains {len(selected_path)} branch(es)."
-    )
-
-    with st.expander(
-        "Show technical branch sequence",
-        expanded=False,
-    ):
-        st.dataframe(
-            pd.DataFrame(
-                {
-                    "Route Sequence": list(
-                        range(1, len(selected_path) + 1)
-                    ),
-                    "Branch": selected_path,
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    # -------------------------------------------------------------------------
-    # TEST SHEET GENERATION
-    # -------------------------------------------------------------------------
-
-    st.markdown("## 6. Generate Test Sheets")
-
-    st.markdown(
-        """
-        <div class="tsg-info">
-            Click the button below to generate the test plan.
-            <br><br>
-            If the PDF contains searchable test labels such as MTIB, STIB,
-            signal, track circuit, point, station, PSD, ESZ, CoE, TSR,
-            return channel or End of Shunt, the app generates matching
-            LS01–LS14 test sheets.
-            <br><br>
-            If no test label can be found, the app generates Route Branch
-            Engineering Review sheets instead of showing zero test sheets.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
     if st.button(
-        "✨ Generate Test Sheets for Selected Route",
+        "Find Applicable Tests",
         type="primary",
         use_container_width=True,
-        key="tsg_generate_sheets",
     ):
-        generated_plan = create_test_plan(
-            path=selected_path,
-            extracted_events=extracted_events,
+        register = create_test_register(
+            subdivision=subdivision,
+            mapping=test_mapping,
+            start_kp=float(start_kp),
+            end_kp=float(end_kp),
+            selected_branch=selected_branch,
         )
 
-        st.session_state["tsg_generated_plan"] = generated_plan
-        st.session_state["tsg_generated_path"] = selected_path
-        st.session_state["tsg_generated_start"] = selected_start
-        st.session_state["tsg_generated_end"] = selected_end
+        lower_kp = min(float(start_kp), float(end_kp))
+        upper_kp = max(float(start_kp), float(end_kp))
 
-    generated_plan = st.session_state.get(
-        "tsg_generated_plan",
+        selected_events = subdivision[
+            subdivision["kp"].notna()
+            & subdivision["kp"].between(
+                lower_kp,
+                upper_kp,
+                inclusive="both",
+            )
+        ].copy()
+
+        if selected_branch:
+            selected_events = selected_events[
+                selected_events["branch"] == selected_branch
+            ].copy()
+
+        st.session_state["atc_register"] = register
+        st.session_state["atc_selected_events"] = selected_events
+
+    register = st.session_state.get(
+        "atc_register",
         pd.DataFrame(),
     )
 
-    generated_path = st.session_state.get(
-        "tsg_generated_path",
-        [],
+    selected_events = st.session_state.get(
+        "atc_selected_events",
+        pd.DataFrame(),
     )
 
-    generated_start = st.session_state.get(
-        "tsg_generated_start",
-        "",
-    )
-
-    generated_end = st.session_state.get(
-        "tsg_generated_end",
-        "",
-    )
-
-    if generated_plan.empty or not generated_path:
-        st.info(
-            "Click 'Generate Test Sheets for Selected Route' to continue."
+    if register.empty:
+        st.warning(
+            "No tests have been generated yet, or no TestMapping rules "
+            "matched events in the selected range."
         )
+
+        with st.expander("View TestMapping Rules"):
+            st.dataframe(test_mapping, use_container_width=True)
+
         return
 
-    # -------------------------------------------------------------------------
-    # PLAN REVIEW
-    # -------------------------------------------------------------------------
+    st.markdown("## 3. Review Generated Test Register")
 
-    st.markdown("## 7. Review Generated Test Sheets")
+    st.caption(
+        "Review every generated test. You may add, remove or edit rows before "
+        "generating DOCX test sheets."
+    )
 
-    if (
-        generated_plan["test_code"]
-        .astype(str)
-        .eq(GENERIC_ROUTE_REVIEW_CODE)
-        .all()
-    ):
-        st.warning(
-            "No searchable LS01–LS14 event labels were found in the selected "
-            "route PDF. Route Review sheets were created instead. "
-            "Please update the Test Code column after engineering review."
-        )
+    editable_columns = [
+        "test_code",
+        "test_name",
+        "needs_abscissa",
+        "sector",
+        "section",
+        "subsection",
+        "branch",
+        "direction",
+        "participate_abscissa_m",
+        "participate_variant",
+        "anticipate_variant",
+        "anticipate_abscissa_m",
+        "location_name",
+        "event_name",
+        "remarks",
+        "source_row",
+        "review_status",
+        "checks",
+    ]
 
-    reviewed_plan = st.data_editor(
-        generated_plan,
+    register = register[
+        [column for column in editable_columns if column in register.columns]
+    ].copy()
+
+    reviewed_register = st.data_editor(
+        register,
         use_container_width=True,
         hide_index=True,
         num_rows="dynamic",
-        key="tsg_plan_editor",
         column_config={
-            "test_code": st.column_config.SelectboxColumn(
-                "Test Code",
-                options=[
-                    GENERIC_ROUTE_REVIEW_CODE,
-                ] + list(TEST_TYPES.keys()),
+            "needs_abscissa": st.column_config.CheckboxColumn(
+                "Needs Abscissa"
+            ),
+            "participate_abscissa_m": st.column_config.NumberColumn(
+                "Participating Abscissa (m)",
+                format="%.3f",
+            ),
+            "anticipate_abscissa_m": st.column_config.NumberColumn(
+                "Anticipated Abscissa (m)",
+                format="%.3f",
             ),
             "review_status": st.column_config.SelectboxColumn(
                 "Review Status",
@@ -2197,94 +1521,60 @@ def render_test_sheet_generator_app() -> None:
                     "Not applicable",
                 ],
             ),
-            "abscissa_m": st.column_config.NumberColumn(
-                "Abscissa (m)",
-                format="%.3f",
+            "remarks": st.column_config.TextColumn(
+                "Remarks",
+                width="large",
+            ),
+            "checks": st.column_config.TextColumn(
+                "Checks (separate by |)",
+                width="large",
             ),
         },
     )
 
-    # Update test names after user changes the Test Code.
-    for row_index in reviewed_plan.index:
-        test_code = safe_text(
-            reviewed_plan.at[row_index, "test_code"]
-        )
+    st.session_state["atc_register"] = reviewed_register
 
-        if test_code in TEST_TYPES:
-            reviewed_plan.at[
-                row_index,
-                "test_id",
-            ] = TEST_TYPES[test_code]["id"]
+    metric1, metric2, metric3 = st.columns(3)
 
-            reviewed_plan.at[
-                row_index,
-                "test_name",
-            ] = TEST_TYPES[test_code]["name"]
+    metric1.metric("Generated Test Sheets", len(reviewed_register))
 
-        elif test_code == GENERIC_ROUTE_REVIEW_CODE:
-            reviewed_plan.at[
-                row_index,
-                "test_id",
-            ] = GENERIC_ROUTE_REVIEW_CODE
-
-            reviewed_plan.at[
-                row_index,
-                "test_name",
-            ] = "Route Branch Engineering Review"
-
-    total_sheets = len(reviewed_plan)
-
-    reviewed_sheets = (
-        reviewed_plan["review_status"]
-        .astype(str)
-        .str.contains(
-            "reviewed|approved",
-            case=False,
-            regex=True,
-            na=False,
-        )
-        .sum()
+    metric2.metric(
+        "Tests Requiring Abscissa",
+        int(
+            reviewed_register["needs_abscissa"]
+            .fillna(False)
+            .astype(bool)
+            .sum()
+        ),
     )
 
-    summary_col1, summary_col2, summary_col3 = st.columns(3)
-
-    summary_col1.metric(
-        "Generated Test Sheets",
-        total_sheets,
+    metric3.metric(
+        "Rows With Anticipated Variant",
+        int(
+            reviewed_register["anticipate_variant"]
+            .astype(str)
+            .str.strip()
+            .ne("")
+            .sum()
+        ),
     )
 
-    summary_col2.metric(
-        "Reviewed / Approved",
-        int(reviewed_sheets),
+    st.markdown("## 4. Download Outputs")
+
+    excel_bytes = create_excel_bytes(
+        register=reviewed_register,
+        selected_events=selected_events,
+        project=project_defaults,
     )
 
-    summary_col3.metric(
-        "Selected Route Length",
-        f"{len(generated_path)} branches",
-    )
+    col1, col2, col3 = st.columns(3)
 
-    # -------------------------------------------------------------------------
-    # DOWNLOADS
-    # -------------------------------------------------------------------------
-
-    st.markdown("## 8. Download Test Sheets")
-
-    download_col1, download_col2, download_col3 = st.columns(3)
-
-    with download_col1:
-        excel_bytes = create_excel_bytes(
-            test_plan=reviewed_plan,
-            selected_path=generated_path,
-            project_info=project_info,
-        )
-
+    with col1:
         st.download_button(
-            "⬇️ Download Excel Register",
+            "Download Excel Register",
             data=excel_bytes,
-            file_name=(
-                f"{sheet_prefix}_"
-                f"{generated_start}_TO_{generated_end}_"
-                f"Test_Register.xlsx"
+            file_name=clean_filename(
+                f"{project_defaults['sheet_prefix']}_Test_Register.xlsx"
             ),
             mime=(
                 "application/vnd.openxmlformats-officedocument."
@@ -2293,43 +1583,43 @@ def render_test_sheet_generator_app() -> None:
             use_container_width=True,
         )
 
-    with download_col2:
+    with col2:
         st.download_button(
-            "⬇️ Download Test Plan CSV",
-            data=reviewed_plan.to_csv(
-                index=False
-            ).encode("utf-8"),
-            file_name=(
-                f"{sheet_prefix}_"
-                f"{generated_start}_TO_{generated_end}_"
-                f"Test_Plan.csv"
+            "Download CSV Register",
+            data=reviewed_register.to_csv(index=False).encode("utf-8"),
+            file_name=clean_filename(
+                f"{project_defaults['sheet_prefix']}_Test_Register.csv"
             ),
             mime="text/csv",
             use_container_width=True,
         )
 
-    with download_col3:
+    with col3:
         try:
             docx_zip = create_docx_zip(
-                test_plan=reviewed_plan,
-                project_info=project_info,
-                start_branch=generated_start,
-                end_branch=generated_end,
+                register=reviewed_register,
+                project=project_defaults,
             )
 
             st.download_button(
-                "⬇️ Download DOCX Test Sheets",
+                "Download DOCX Test Sheets",
                 data=docx_zip,
-                file_name=(
-                    f"{sheet_prefix}_"
-                    f"{generated_start}_TO_{generated_end}_"
-                    f"Test_Sheets.zip"
+                file_name=clean_filename(
+                    f"{project_defaults['sheet_prefix']}_Test_Sheets.zip"
                 ),
                 mime="application/zip",
                 use_container_width=True,
             )
 
         except Exception as exc:
-            st.error(
-                f"DOCX generation failed: {exc}"
-            )
+            st.error(f"DOCX generation failed: {exc}")
+
+    with st.expander("Selected Source Events"):
+        st.dataframe(selected_events, use_container_width=True)
+
+    with st.expander("Configured TestMapping Rules"):
+        st.dataframe(test_mapping, use_container_width=True)
+
+
+if __name__ == "__main__":
+    main()
