@@ -530,29 +530,124 @@ def ocr_pdf_page(page: fitz.Page) -> str:
 
     return "\n".join(group_ocr_words_into_visual_lines(ocr_data))
 
+def create_pdf_text_log(
+    extracted_pages: List[Dict[str, Any]],
+) -> str:
+    """
+    Create a complete plain-text audit log of all text extracted from the PDF.
+
+    The log includes:
+    - PDF page number
+    - Native PDF text or OCR extraction method
+    - Character and word count
+    - Full text extracted from that page
+    """
+    lines = [
+        "=" * 110,
+        "PDF TEXT EXTRACTION / OCR AUDIT LOG",
+        "=" * 110,
+        "",
+        "This file contains all text extracted from the uploaded PDF.",
+        "Pages are marked as either:",
+        "  - Native PDF Text: selectable text obtained directly from the PDF",
+        "  - OCR: text recognised from a scanned/image-only PDF page",
+        "",
+    ]
+
+    for page_data in extracted_pages:
+        page_number = page_data["page_number"]
+        extraction_method = page_data["extraction_method"]
+        page_text = safe_text(page_data["text"])
+
+        lines.extend(
+            [
+                "=" * 110,
+                f"PDF PAGE {page_number}",
+                "=" * 110,
+                f"Extraction Method: {extraction_method}",
+                f"Character Count: {len(page_text)}",
+                f"Word Count: {len(page_text.split())}",
+                "",
+                "EXTRACTED TEXT",
+                "-" * 110,
+                page_text if page_text else "[NO TEXT EXTRACTED]",
+                "",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+def create_pdf_extraction_summary(
+    extracted_pages: List[Dict[str, Any]],
+) -> pd.DataFrame:
+    """Create a concise per-page extraction summary for Streamlit/Excel."""
+    records: List[Dict[str, Any]] = []
+
+    for page_data in extracted_pages:
+        page_text = safe_text(page_data["text"])
+
+        records.append(
+            {
+                "pdf_page": page_data["page_number"],
+                "extraction_method": page_data["extraction_method"],
+                "character_count": len(page_text),
+                "word_count": len(page_text.split()),
+                "text_preview": page_text[:500],
+            }
+        )
+
+    return pd.DataFrame(records)
 
 @st.cache_data(show_spinner=False, max_entries=4)
-def extract_pdf_text_pages(pdf_bytes: bytes) -> List[str]:
+@st.cache_data(show_spinner=False, max_entries=4)
+def extract_pdf_text_pages(
+    pdf_bytes: bytes,
+) -> Tuple[List[str], List[Dict[str, Any]]]:
     """
-    Use native PDF text where available.
+    Extract text from every PDF page.
 
-    When a page is image-only/scanned, OCR it automatically.
+    Native/selectable text is used where sufficient text exists.
+    OCR is used for image-only/scanned pages.
+
+    Returns:
+        pages:
+            List of text strings used by the test-point extraction logic.
+
+        extracted_pages:
+            Detailed audit data for each PDF page, including extraction method.
     """
     document = fitz.open(stream=pdf_bytes, filetype="pdf")
+
     pages: List[str] = []
+    extracted_pages: List[Dict[str, Any]] = []
 
     try:
-        for page in document:
+        for page_number, page in enumerate(document, start=1):
             native_text = page.get_text("text") or ""
 
             if page_has_meaningful_text(native_text):
-                pages.append(native_text)
+                extracted_text = native_text
+                extraction_method = "Native PDF Text"
+
             else:
-                pages.append(ocr_pdf_page(page))
+                extracted_text = ocr_pdf_page(page)
+                extraction_method = "OCR (image/scanned page)"
+
+            pages.append(extracted_text)
+
+            extracted_pages.append(
+                {
+                    "page_number": page_number,
+                    "extraction_method": extraction_method,
+                    "text": extracted_text,
+                }
+            )
+
     finally:
         document.close()
 
-    return pages
+    return pages, extracted_pages
 
 
 # =============================================================================
@@ -1397,6 +1492,7 @@ def create_docx_test_sheet(
 def create_export_zip(
     register: pd.DataFrame,
     project_info: Dict[str, str],
+    pdf_text_log: str,
     progress_bar: Any,
     progress_text: Any,
 ) -> bytes:
@@ -1411,6 +1507,10 @@ def create_export_zip(
     total = len(register)
 
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "PDF_Text_Extraction_Log.txt",
+            safe_text(pdf_text_log),
+        )
         archive.writestr(
             "ATC_Low_Speed_Test_Register.txt",
             create_register_text(register, project_info),
@@ -1545,6 +1645,20 @@ def initialise_test_sheet_state() -> None:
         "test_sheet_register": pd.DataFrame(columns=REGISTER_COLUMNS),
         "test_sheet_page_count": 0,
         "test_sheet_export_zip": None,
+
+        # Full native/OCR text extracted from every PDF page.
+        "test_sheet_pdf_text_log": "",
+
+        # Per-page extraction summary.
+        "test_sheet_pdf_extraction_summary": pd.DataFrame(
+            columns=[
+                "pdf_page",
+                "extraction_method",
+                "character_count",
+                "word_count",
+                "text_preview",
+            ]
+        ),
     }
 
     for key, value in defaults.items():
@@ -1633,11 +1747,24 @@ def render_test_sheet_generator_app() -> None:
 
     if current_pdf_hash != st.session_state["test_sheet_pdf_hash"]:
         st.session_state["test_sheet_pdf_hash"] = current_pdf_hash
+
         st.session_state["test_sheet_register"] = pd.DataFrame(
             columns=REGISTER_COLUMNS
         )
+
         st.session_state["test_sheet_page_count"] = 0
         st.session_state["test_sheet_export_zip"] = None
+        st.session_state["test_sheet_pdf_text_log"] = ""
+
+        st.session_state["test_sheet_pdf_extraction_summary"] = pd.DataFrame(
+            columns=[
+                "pdf_page",
+                "extraction_method",
+                "character_count",
+                "word_count",
+                "text_preview",
+            ]
+        )
 
     if st.button(
         "Extract Low-Speed Test Points",
@@ -1653,9 +1780,17 @@ def render_test_sheet_generator_app() -> None:
                 "Reading PDF pages. Scanned singularity pages will be OCR processed..."
             )
 
-            pages = extract_pdf_text_pages(pdf_bytes)
+            pages, extracted_pages = extract_pdf_text_pages(pdf_bytes)
 
             st.session_state["test_sheet_page_count"] = len(pages)
+
+            st.session_state["test_sheet_pdf_text_log"] = create_pdf_text_log(
+                extracted_pages
+            )
+
+            st.session_state["test_sheet_pdf_extraction_summary"] = (
+                create_pdf_extraction_summary(extracted_pages)
+            )
 
             progress_text.info(
                 f"PDF loaded: {len(pages)} page(s). "
@@ -1698,6 +1833,56 @@ def render_test_sheet_generator_app() -> None:
             return
 
     register = st.session_state["test_sheet_register"]
+
+    pdf_text_log = st.session_state.get(
+        "test_sheet_pdf_text_log",
+        "",
+    )
+
+    pdf_extraction_summary = st.session_state.get(
+        "test_sheet_pdf_extraction_summary",
+        pd.DataFrame(),
+    )
+
+    if pdf_text_log:
+        st.markdown("### PDF Text Extraction / OCR Log")
+
+        st.caption(
+            "This log shows exactly what text was exported from every "
+            "PDF page. It identifies whether each page used native PDF "
+            "text extraction or OCR."
+        )
+
+        if not pdf_extraction_summary.empty:
+            st.dataframe(
+                pdf_extraction_summary,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.download_button(
+            "Download Full PDF Text / OCR Log",
+            data=pdf_text_log.encode("utf-8"),
+            file_name=clean_filename(
+                f"{project_info['sheet_prefix']}_"
+                f"PDF_Text_Extraction_Log.txt"
+            ),
+            mime="text/plain",
+            use_container_width=True,
+            key="test_sheet_download_pdf_text_log",
+        )
+
+        with st.expander(
+            "Preview Extracted PDF Text",
+            expanded=False,
+        ):
+            st.text_area(
+                "Full extracted PDF text",
+                value=pdf_text_log,
+                height=500,
+                disabled=True,
+                key="test_sheet_pdf_text_preview",
+            )
 
     if register.empty:
         st.warning(
@@ -1871,6 +2056,10 @@ def render_test_sheet_generator_app() -> None:
                     export_zip = create_export_zip(
                         register=approved_register,
                         project_info=project_info,
+                        pdf_text_log=st.session_state.get(
+                            "test_sheet_pdf_text_log",
+                            "",
+                        ),
                         progress_bar=progress_bar,
                         progress_text=progress_text,
                     )
