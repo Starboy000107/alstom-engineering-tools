@@ -19,15 +19,15 @@ PROCEDURE_REFERENCE = "C1252-TAC-0274"
 PROCEDURE_TITLE = "Trackside ATC Low-Speed Dynamic Test Procedure"
 
 MAX_PDF_SIZE_MB = 80
-MAX_SOURCE_EVIDENCE_LENGTH = 1500
+MAX_SOURCE_EVIDENCE_LENGTH = 1800
 
 
 # =============================================================================
-# FIXED TEST DEFINITIONS
+# TEST DEFINITIONS
 #
-# These originate from C1252-TAC-0274.
+# These are fixed rules from C1252-TAC-0274.
 #
-# Station-specific information is NOT hard-coded:
+# Station-specific data is NEVER hard-coded:
 # - sector
 # - section
 # - branch
@@ -35,7 +35,7 @@ MAX_SOURCE_EVIDENCE_LENGTH = 1500
 # - abscissa
 # - participating variant
 # - anticipated variant
-# - anticipation distance
+# - anticipated distance
 # =============================================================================
 
 TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
@@ -44,6 +44,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "MTIB Initialization Test",
         "short_name": "MTIB",
         "needs_abscissa": False,
+        "requires_variant_link": False,
         "patterns": [
             r"MOVING\s+TRAIN\s+INITIALISATION",
             r"MOVING\s+TRAIN\s+INITIALIZATION",
@@ -63,6 +64,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "STIB Initialization Test",
         "short_name": "STIB",
         "needs_abscissa": False,
+        "requires_variant_link": False,
         "patterns": [
             r"STATIONARY\s+TRAIN\s+INITIALISATION",
             r"STATIONARY\s+TRAIN\s+INITIALIZATION",
@@ -74,7 +76,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
             ("Stop on STIB", "Localisation becomes Wait Inv", "Y / N"),
             ("Beacon Codes", "Record and compare with approved design", "Record"),
             ("Localisation Status", "Total Loc", "Y / N"),
-            ("Mode Available", "CM/AM available where required", "Y / N"),
+            ("Mode Available", "CM/AM available as applicable", "Y / N"),
             ("First RB / MTIB", "No Emergency Brake", "Y / N"),
         ],
     },
@@ -83,6 +85,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Spacing Stopping Point Test – Track Circuit",
         "short_name": "Spacing Stopping Point",
         "needs_abscissa": True,
+        "requires_variant_link": True,
         "patterns": [
             r"SPACING\s+STOPPING\s+POINT",
         ],
@@ -102,6 +105,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Special Stopping Point Test – Signal Without Overlap",
         "short_name": "Special Stopping Point",
         "needs_abscissa": True,
+        "requires_variant_link": True,
         "patterns": [
             r"SPECIAL\s+STOPPING\s+POINT",
         ],
@@ -119,14 +123,15 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Complex Stopping Point Test – Signal With Overlap",
         "short_name": "Complex Stopping Point",
         "needs_abscissa": True,
+        "requires_variant_link": True,
         "patterns": [
             r"COMPLEX\s+STOPPING\s+POINT",
             r"SIGNAL.*OVERLAP",
         ],
         "checks": [
-            ("Signal Red / Overlap Occupied", "Signal and overlap variants restrictive", "Y / N"),
+            ("Signal Red / Overlap Occupied", "Variants restrictive", "Y / N"),
             ("Signal Red / Overlap Free", "Record stopping behaviour", "Record"),
-            ("Signal Blue / Overlap Free", "Signal and overlap variants permissive", "Y / N"),
+            ("Signal Blue / Overlap Free", "Variants permissive", "Y / N"),
             ("Target Comparison", "Permissive target >= restrictive", "Y / N"),
         ],
     },
@@ -135,6 +140,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Stopping Point Test – Point",
         "short_name": "Convergence / Divergence",
         "needs_abscissa": True,
+        "requires_variant_link": True,
         "patterns": [
             r"\bCONVERGENCE\b",
             r"\bDIVERGENCE\b",
@@ -145,7 +151,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
             ("Available Mode", "CM/AM", "Y / N"),
             ("Loc Max / Target Distance / Abscissa", "Record", "m"),
             ("Point Controlled", "Associated variant permissive", "Y / N"),
-            ("Target Comparison", "Controlled target >= uncontrolled target", "Y / N"),
+            ("Target Comparison", "Controlled >= uncontrolled", "Y / N"),
         ],
     },
     "LS07": {
@@ -153,6 +159,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Stopping Point Test – End of SACEM",
         "short_name": "End of SACEM",
         "needs_abscissa": True,
+        "requires_variant_link": False,
         "patterns": [
             r"END\s+OF\s+SACEM",
             r"EXIT\s+SACEM",
@@ -170,6 +177,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Station Stopping Point and Door Side Verification",
         "short_name": "Station Stopping Point / Door Side",
         "needs_abscissa": True,
+        "requires_variant_link": True,
         "patterns": [
             r"STATION\s+CHARACTERISTICS",
             r"STATION\s+STOPPING",
@@ -189,6 +197,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "PSD Operation Pre-Test",
         "short_name": "PSD Opening Pre-Test",
         "needs_abscissa": False,
+        "requires_variant_link": True,
         "patterns": [
             r"\bPSD\b",
             r"ALL\s+DOOR\s+CLOSED",
@@ -198,7 +207,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
             ("Open Wrong-Side Doors", "PSD / relay not activated", "Y / N"),
             ("Open Correct-Side Doors", "PSD / relay activated", "Y / N"),
             ("All Doors Closed Lost", "Variants restrictive; RM only", "Y / N"),
-            ("PIOS / Override Active", "CM/AM available then timeout checked", "Y / N"),
+            ("PIOS / Override Active", "CM/AM and timeout checked", "Y / N"),
             ("Close Correct-Side Doors", "PSD closed and variants permissive", "Y / N"),
         ],
     },
@@ -207,6 +216,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Emergency Stop Zone Test",
         "short_name": "Emergency Stop Zone",
         "needs_abscissa": True,
+        "requires_variant_link": True,
         "patterns": [
             r"EMERGENCY\s+ZONE",
             r"EMERGENCY\s+STOP\s+ZONE",
@@ -226,6 +236,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Change of End Test",
         "short_name": "Change of End Zone",
         "needs_abscissa": True,
+        "requires_variant_link": True,
         "patterns": [
             r"CHANGE\s+OF\s+END",
             r"CHANGE\s+ENDS",
@@ -236,7 +247,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
             ("Cab 1 Loc Max / Loc Min", "Record", "m"),
             ("Cab 2 Before CoE", "Shutdown and distance to signal < 12m", "Y / N"),
             ("Cab 2 After CoE", "Total Loc and CM/AM available", "Y / N"),
-            ("First RB / MTIB", "No delocalisation and no EB", "Y / N"),
+            ("First RB / MTIB", "No delocalisation / no EB", "Y / N"),
         ],
     },
     "LS12": {
@@ -244,6 +255,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Temporary Speed Restriction Test",
         "short_name": "Temporary Speed Restriction",
         "needs_abscissa": False,
+        "requires_variant_link": False,
         "patterns": [
             r"TEMPORARY\s+SPEED\s+RESTRICTION",
             r"\bTSR\b",
@@ -260,12 +272,13 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Return Channel Test",
         "short_name": "Return Channel Test",
         "needs_abscissa": False,
+        "requires_variant_link": False,
         "patterns": [
             r"RETURN\s+CHANNEL",
         ],
         "checks": [
             ("Return Channel Location", "Record location", "Record"),
-            ("Return Channel Loop", "Record equipment / loop reference", "Record"),
+            ("Return Channel Loop", "Record loop / equipment reference", "Record"),
             ("Trackside Reception", "Train information received", "Y / N"),
         ],
     },
@@ -274,6 +287,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "End of Shunt Test",
         "short_name": "End of Shunt Test",
         "needs_abscissa": False,
+        "requires_variant_link": False,
         "patterns": [
             r"END\s+OF\s+SHUNT",
             r"SHUNT\s+ROUTE",
@@ -289,7 +303,7 @@ TEST_DEFINITIONS: Dict[str, Dict[str, Any]] = {
 }
 
 
-EXTRACTED_COLUMNS = [
+EXTRACTED_EVENT_COLUMNS = [
     "row_number",
     "sector",
     "section",
@@ -299,6 +313,7 @@ EXTRACTED_COLUMNS = [
     "abscissa_m",
     "inter_singularity_m",
     "code",
+    "rank",
     "event_name",
     "location_name",
     "participate_variant",
@@ -306,6 +321,18 @@ EXTRACTED_COLUMNS = [
     "source_page",
     "source_evidence",
     "remarks",
+]
+
+VARIANT_MAP_COLUMNS = [
+    "source_page",
+    "sector",
+    "section",
+    "variant_rank_p",
+    "variant_rank_a",
+    "variant_subsection",
+    "variant_composition",
+    "anticipation_distance_m",
+    "source_evidence",
 ]
 
 REGISTER_COLUMNS = [
@@ -320,6 +347,8 @@ REGISTER_COLUMNS = [
     "direction",
     "abscissa_m",
     "participate_variant",
+    "variant_map_composition",
+    "variant_map_rank_p",
     "anticipate_variant",
     "anticipate_rank",
     "anticipate_distance_m",
@@ -338,6 +367,7 @@ REGISTER_COLUMNS = [
 # =============================================================================
 
 def safe_text(value: Any) -> str:
+    """Safely return text."""
     if value is None:
         return ""
 
@@ -351,20 +381,25 @@ def safe_text(value: Any) -> str:
 
 
 def normalise_spaces(value: Any) -> str:
+    """Collapse multiple spaces/newlines."""
     return re.sub(r"\s+", " ", safe_text(value)).strip()
 
 
 def clean_filename(value: str) -> str:
+    """Make a safe filename."""
     value = re.sub(r'[\\/:*?"<>|]', "_", safe_text(value))
     value = re.sub(r"\s+", "_", value)
+
     return value[:150] or "ATC_Test_Sheet"
 
 
 def get_file_hash(data: bytes) -> str:
+    """Create hash used to identify changed uploads."""
     return hashlib.sha256(data).hexdigest()
 
 
 def to_float(value: Any) -> Optional[float]:
+    """Convert text such as 2,191.0 m to float."""
     text = safe_text(value)
 
     if not text:
@@ -384,6 +419,14 @@ def to_float(value: Any) -> Optional[float]:
 
 
 def normalise_branch(value: Any) -> str:
+    """
+    Normalise a branch number.
+
+    Examples:
+        09-01-2-0 -> 09-01-2-0
+        9-1-2-0   -> 09-01-2-0
+        09 01 2 0 -> 09-01-2-0
+    """
     text = safe_text(value)
 
     match = re.search(
@@ -408,6 +451,7 @@ def normalise_branch(value: Any) -> str:
 
 
 def branch_parts(branch: str) -> Tuple[str, str, str]:
+    """Return sector, section and subsection from a branch."""
     parts = safe_text(branch).split("-")
 
     sector = parts[0] if len(parts) >= 1 else ""
@@ -418,6 +462,7 @@ def branch_parts(branch: str) -> Tuple[str, str, str]:
 
 
 def format_distance(value: Any) -> str:
+    """Format number as metres."""
     numeric = to_float(value)
 
     if numeric is None:
@@ -427,19 +472,17 @@ def format_distance(value: Any) -> str:
 
 
 # =============================================================================
-# PDF EXTRACTION
-#
-# Optimised:
-# - pypdf selectable text only.
-# - no OCR.
-# - no image rendering.
-# - no pdfplumber table detection.
-# - cache PDF text after first extraction.
+# PDF TEXT EXTRACTION
 # =============================================================================
 
 @st.cache_data(show_spinner=False, max_entries=3)
 def extract_pdf_text_pages(pdf_bytes: bytes) -> List[str]:
-    """Read selectable text from PDF pages and cache the result."""
+    """
+    Extract selectable text from PDF pages.
+
+    The result is cached by Streamlit, reducing CPU and memory consumption
+    after the initial upload/extraction.
+    """
     try:
         from pypdf import PdfReader
     except ImportError as exc:
@@ -455,7 +498,7 @@ def extract_pdf_text_pages(pdf_bytes: bytes) -> List[str]:
             reader.decrypt("")
         except Exception as exc:
             raise RuntimeError(
-                "The PDF is encrypted and cannot be read."
+                "The uploaded PDF is encrypted."
             ) from exc
 
     return [
@@ -463,6 +506,10 @@ def extract_pdf_text_pages(pdf_bytes: bytes) -> List[str]:
         for page in reader.pages
     ]
 
+
+# =============================================================================
+# PAGE CLASSIFICATION / METADATA
+# =============================================================================
 
 def page_metadata(page_text: str) -> Dict[str, str]:
     """Extract sector, section and direction from a page."""
@@ -506,8 +553,38 @@ def page_metadata(page_text: str) -> Dict[str, str]:
     }
 
 
+def variant_map_metadata(page_text: str) -> Dict[str, str]:
+    """
+    Extract sector and section from Safety Variants Message pages.
+
+    Supports:
+        SECTION 09 - 01
+        SECTION 14 - 04
+    """
+    text = normalise_spaces(page_text)
+
+    section_match = re.search(
+        r"\bSECTION\s+(\d{1,2})\s*-\s*(\d{1,2})",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if section_match:
+        return {
+            "sector": f"{int(section_match.group(1)):02d}",
+            "section": f"{int(section_match.group(2)):02d}",
+        }
+
+    generic = page_metadata(page_text)
+
+    return {
+        "sector": generic["sector"],
+        "section": generic["section"],
+    }
+
+
 def is_subdivision_page(page_text: str) -> bool:
-    """Determine if page is a singularities/subdivision page."""
+    """Identify Appendix J singularities pages."""
     upper = page_text.upper()
 
     return any(
@@ -523,23 +600,77 @@ def is_subdivision_page(page_text: str) -> bool:
     )
 
 
+def is_variant_map_page(page_text: str) -> bool:
+    """Identify Safety Variants Message pages."""
+    upper = page_text.upper()
+
+    return (
+        "VARIANTS COMPOSITION" in upper
+        and "ANTIC" in upper
+        and (
+            "SAFETY VARIANTS" in upper
+            or "SAFETY VARIANTS MESSAGE" in upper
+        )
+    )
+
+
+# =============================================================================
+# SOURCE EXTRACTION HELPERS
+# =============================================================================
+
+def extract_branch_from_text(text: str) -> str:
+    """Extract last branch-like value from source text."""
+    hyphen_matches = re.findall(
+        r"\b\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,3}\b",
+        text,
+    )
+
+    if hyphen_matches:
+        return normalise_branch(hyphen_matches[-1])
+
+    spaced_matches = re.findall(
+        r"\b\d{1,2}\s+\d{1,2}\s+\d{1,2}\s+\d{1,3}\b",
+        text,
+    )
+
+    if spaced_matches:
+        return normalise_branch(spaced_matches[-1])
+
+    return ""
+
+
 def extract_associated_variant(text: str) -> str:
-    """Extract associated/participating variant wording."""
+    """
+    Extract variant from source wording such as:
+
+        Associated variant : (TUC KF T/C)
+        Associated variants : (THW 222 RP) & (THW 222 NP)
+    """
     match = re.search(
         r"ASSOCIATED\s+VARIANTS?"
         r"(?:\s+NUMBER)?\s*[:=]?\s*"
-        r"\(?([^()\n;]+?)\)?"
-        r"(?=$|;|,?\s+(?:RANK|NUMBER|ANTICIPATE|SUB\s*SECTION|"
-        r"NORMAL\s+BRANCH))",
+        r"(.+?)"
+        r"(?=$|/\s*NORMAL\s+BRANCH|"
+        r"/\s*RANK\s+OF|"
+        r";\s*RANK\s+OF|"
+        r"\s+SPACING\s+STOPPING|"
+        r"\s+SPECIAL\s+STOPPING|"
+        r"\s+CONVERGENCE|"
+        r"\s+DIVERGENCE)",
         safe_text(text),
         flags=re.IGNORECASE,
     )
 
-    return normalise_spaces(match.group(1)) if match else ""
+    if not match:
+        return ""
+
+    value = normalise_spaces(match.group(1))
+
+    return value.strip("() ")
 
 
 def extract_anticipate_rank(text: str) -> str:
-    """Extract first anticipated rank from subsection end text."""
+    """Extract rank of first anticipated variant."""
     match = re.search(
         r"RANK\s+OF\s+FIRST\s+ANTICIPATED\s+VARIANT\s*:\s*(\d+)",
         safe_text(text),
@@ -550,7 +681,7 @@ def extract_anticipate_rank(text: str) -> str:
 
 
 def extract_location_name(text: str) -> str:
-    """Extract useful equipment/location name if present."""
+    """Extract useful location/equipment label."""
     patterns = [
         r"RETURN\s+CHANNEL\s*(?:NUMBER)?\s*[:=]?\s*([A-Z0-9/_-]+)",
         r"(?:SIGNAL|SIG)\s*(?:NO\.?|NUMBER)?\s*[:=]?\s*([A-Z0-9/_-]+)",
@@ -571,41 +702,14 @@ def extract_location_name(text: str) -> str:
     return ""
 
 
-def extract_branch_from_text(text: str) -> str:
-    """
-    Extract a branch reference from table text.
-
-    Supports:
-        14-04-1-0
-        14 04 1 0
-        09-01-1-0
-    """
-    values = re.findall(
-        r"\b\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,3}\b",
-        text,
-    )
-
-    if values:
-        return normalise_branch(values[-1])
-
-    values = re.findall(
-        r"\b\d{1,2}\s+\d{1,2}\s+\d{1,2}\s+\d{1,3}\b",
-        text,
-    )
-
-    if values:
-        return normalise_branch(values[-1])
-
-    return ""
-
-
 def infer_event_name(text: str) -> str:
-    """Create an engineering-friendly event label."""
+    """Create a useful event-name label from source text."""
     upper = safe_text(text).upper()
 
     labels = [
         ("SPACING STOPPING POINT", "Spacing Stopping Point"),
         ("SPECIAL STOPPING POINT", "Special Stopping Point"),
+        ("COMPLEX STOPPING POINT", "Complex Stopping Point"),
         ("PERMANENT SPEED RESTRICTION", "Permanent Speed Restriction"),
         ("RETURN CHANNEL", "Return Channel"),
         ("MOVING TRAIN INITIALISATION", "Moving Train Initialisation"),
@@ -631,15 +735,118 @@ def infer_event_name(text: str) -> str:
     return "Subdivision Event"
 
 
+# =============================================================================
+# VARIANT COMPARISON
+# =============================================================================
+
+def normalise_variant_name(value: Any) -> str:
+    """
+    Create comparison-safe variant text.
+
+    Examples:
+        TUC KF T/C                    -> TUCKFTC
+        TUC-KF-T/C                    -> TUCKFTC
+        THW 20 SIG & THW SU T/C       -> THW20SIGTHWSUTC
+    """
+    text = safe_text(value).upper()
+
+    text = text.replace("(", " ")
+    text = text.replace(")", " ")
+    text = text.replace("&", " ")
+    text = text.replace("/", " ")
+    text = text.replace("-", " ")
+
+    return re.sub(r"[^A-Z0-9]+", "", text)
+
+
+def split_variant_composition(value: Any) -> List[str]:
+    """
+    Split multi-part variant compositions.
+
+    Example:
+        THW 20 SIG & THW SU T/C
+        -> THW 20 SIG
+        -> THW SU T/C
+    """
+    text = safe_text(value)
+
+    if not text:
+        return []
+
+    parts = re.split(
+        r"\s*(?:&|\+|/|\band\b)\s*",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    return [
+        normalise_spaces(part)
+        for part in parts
+        if normalise_spaces(part)
+    ]
+
+
+def variant_composition_matches(
+    subdivision_variant: str,
+    variant_composition: str,
+) -> bool:
+    """
+    Compare an associated variant in a singularity row against a Variant Map
+    composition.
+
+    Supports exact and multi-component matching.
+    """
+    event_value = normalise_variant_name(subdivision_variant)
+    map_value = normalise_variant_name(variant_composition)
+
+    if not event_value or not map_value:
+        return False
+
+    if event_value == map_value:
+        return True
+
+    if event_value in map_value or map_value in event_value:
+        return True
+
+    event_parts = split_variant_composition(subdivision_variant)
+    map_parts = split_variant_composition(variant_composition)
+
+    for event_part in event_parts:
+        event_key = normalise_variant_name(event_part)
+
+        if not event_key:
+            continue
+
+        for map_part in map_parts:
+            map_key = normalise_variant_name(map_part)
+
+            if not map_key:
+                continue
+
+            if event_key == map_key:
+                return True
+
+            if event_key in map_key or map_key in event_key:
+                return True
+
+    return False
+
+
+# =============================================================================
+# SUBDIVISION EVENT EXTRACTION
+# =============================================================================
+
 def parse_subdivision_page(
     page_text: str,
     page_number: int,
 ) -> List[Dict[str, Any]]:
     """
-    Parse one selectable-text singularities table page.
+    Parse a standard Appendix J singularities page.
 
-    The parser is generic for Appendix J SACEM Subdivision PDF format.
-    It does not assume a specific station or sector.
+    Typical row format after selectable text extraction:
+
+        45 ! 4.8 m 2,191.0 11 Associated variant : (TUC KF T/C)
+        Spacing Stopping Point ... 09 01 2 0
     """
     metadata = page_metadata(page_text)
 
@@ -699,7 +906,7 @@ def parse_subdivision_page(
         context = " ".join(
             lines[
                 max(0, line_index - 1):
-                min(len(lines), line_index + 2)
+                min(len(lines), line_index + 3)
             ]
         )
 
@@ -728,12 +935,27 @@ def parse_subdivision_page(
         if not subsection:
             subsection = current_subsection
 
-        # Ignore subsection heading rows.
+        # Subsection headings are not test events.
         if (
             "SUB SECTION" in source_text.upper()
             and "HEADING" in source_text.upper()
         ):
             continue
+
+        # Rank is normally near branch/reference in extracted table text.
+        rank = ""
+
+        rank_match = re.search(
+            r"\b(\d{1,2})\s+"
+            r"\d{1,2}\s*[- ]\s*"
+            r"\d{1,2}\s*[- ]\s*"
+            r"\d{1,2}\s*[- ]\s*"
+            r"\d{1,3}\b",
+            source_text,
+        )
+
+        if rank_match:
+            rank = rank_match.group(1)
 
         output.append(
             {
@@ -746,6 +968,7 @@ def parse_subdivision_page(
                 "abscissa_m": abscissa,
                 "inter_singularity_m": inter_singularity,
                 "code": code,
+                "rank": rank,
                 "event_name": infer_event_name(source_text),
                 "location_name": extract_location_name(source_text),
                 "participate_variant": extract_associated_variant(
@@ -770,7 +993,7 @@ def extract_subdivision_events(
     progress_bar: Any,
     progress_text: Any,
 ) -> Tuple[pd.DataFrame, List[str]]:
-    """Extract all subdivision events from relevant PDF pages."""
+    """Extract all Appendix J subdivision event rows."""
     records: List[Dict[str, Any]] = []
     warnings: List[str] = []
 
@@ -778,7 +1001,7 @@ def extract_subdivision_events(
 
     for page_number, page_text in enumerate(pages, start=1):
         progress_text.info(
-            f"Analysing PDF page {page_number} of {total_pages}..."
+            f"Reading subdivision page {page_number} of {total_pages}..."
         )
 
         progress_bar.progress(
@@ -789,29 +1012,28 @@ def extract_subdivision_events(
             continue
 
         try:
-            page_records = parse_subdivision_page(
-                page_text=page_text,
-                page_number=page_number,
+            records.extend(
+                parse_subdivision_page(
+                    page_text=page_text,
+                    page_number=page_number,
+                )
             )
-
-            records.extend(page_records)
-
         except Exception as exc:
             warnings.append(
-                f"Page {page_number} could not be parsed: {exc}"
+                f"Subdivision page {page_number} skipped: {exc}"
             )
 
     progress_bar.progress(100)
 
     if not records:
         return (
-            pd.DataFrame(columns=EXTRACTED_COLUMNS),
+            pd.DataFrame(columns=EXTRACTED_EVENT_COLUMNS),
             warnings,
         )
 
     dataframe = pd.DataFrame(records)
 
-    for column in EXTRACTED_COLUMNS:
+    for column in EXTRACTED_EVENT_COLUMNS:
         if column not in dataframe.columns:
             dataframe[column] = ""
 
@@ -834,18 +1056,203 @@ def extract_subdivision_events(
     )
 
     dataframe = dataframe[
-        EXTRACTED_COLUMNS
+        EXTRACTED_EVENT_COLUMNS
     ].sort_values(
-        by=[
-            "sector",
-            "section",
-            "branch",
-            "abscissa_m",
-        ],
+        by=["sector", "section", "branch", "abscissa_m"],
         na_position="last",
     ).reset_index(drop=True)
 
     return dataframe, warnings
+
+
+# =============================================================================
+# SAFETY VARIANT MAP EXTRACTION
+# =============================================================================
+
+def parse_variant_map_page(
+    page_text: str,
+    page_number: int,
+) -> List[Dict[str, Any]]:
+    """
+    Parse Safety Variants Message pages.
+
+    Typical text examples:
+
+        0 14-04-0 THW SL T/C
+        1 THW ESA Temp Point 282
+        12 4 14-06-0 THW SS T/C 481 m
+        13 5 14-06-1 THW ST T/C 720 m
+
+    The parser supports:
+      Rank P
+      Rank P / Rank A
+      optional Subsection
+      Variant Composition
+      optional Anticipation Distance
+    """
+    metadata = variant_map_metadata(page_text)
+
+    lines = [
+        normalise_spaces(line)
+        for line in page_text.splitlines()
+        if normalise_spaces(line)
+    ]
+
+    records: List[Dict[str, Any]] = []
+
+    current_subsection = ""
+
+    row_pattern = re.compile(
+        r"^\s*(\d{1,2})"
+        r"(?:\s+(\d{1,2}))?"
+        r"(?:\s+(\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,2}))?"
+        r"\s+(.+?)"
+        r"(?:\s+(\d{1,4}(?:[.,]\d{1,3})?)\s*m)?\s*$",
+        flags=re.IGNORECASE,
+    )
+
+    ignore_words = [
+        "VARIANTS COMPOSITION",
+        "SAFETY VARIANTS",
+        "SAFETY VARIANTS MESSAGE",
+        "ANTIC. DIST",
+        "ANTIC DIST",
+        "NOTA",
+        "RANK",
+        "MTR CONTRACT",
+        "APPENDIX",
+        "SECTION",
+        "SECTOR",
+        "POINT NORMAL POSITION",
+        "POINT REVERSE POSITION",
+    ]
+
+    for line in lines:
+        upper = line.upper()
+
+        if any(word in upper for word in ignore_words):
+            continue
+
+        if len(line) < 4:
+            continue
+
+        match = row_pattern.match(line)
+
+        if not match:
+            continue
+
+        rank_p = safe_text(match.group(1))
+        rank_a = safe_text(match.group(2))
+
+        subsection = safe_text(match.group(3))
+        if subsection:
+            subsection = subsection.replace(" ", "")
+            current_subsection = subsection
+
+        composition = normalise_spaces(match.group(4))
+        anticipation_distance = to_float(match.group(5))
+
+        if not composition:
+            continue
+
+        if composition.upper().startswith("SWITCH"):
+            continue
+
+        if composition.upper().startswith("SPARE"):
+            continue
+
+        if composition.upper().startswith("CHANNEL"):
+            continue
+
+        if len(composition) < 3:
+            continue
+
+        records.append(
+            {
+                "source_page": page_number,
+                "sector": metadata["sector"],
+                "section": metadata["section"],
+                "variant_rank_p": rank_p,
+                "variant_rank_a": rank_a,
+                "variant_subsection": (
+                    subsection or current_subsection
+                ),
+                "variant_composition": composition,
+                "anticipation_distance_m": anticipation_distance,
+                "source_evidence": line[
+                    :MAX_SOURCE_EVIDENCE_LENGTH
+                ],
+            }
+        )
+
+    return records
+
+
+def extract_variant_maps(
+    pages: List[str],
+    progress_bar: Any,
+    progress_text: Any,
+) -> Tuple[pd.DataFrame, List[str]]:
+    """Extract all Safety Variant Map records."""
+    records: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+
+    total_pages = len(pages)
+
+    for page_number, page_text in enumerate(pages, start=1):
+        progress_text.info(
+            f"Reading variant map page {page_number} of {total_pages}..."
+        )
+
+        progress_bar.progress(
+            int(page_number / total_pages * 100)
+        )
+
+        if not is_variant_map_page(page_text):
+            continue
+
+        try:
+            records.extend(
+                parse_variant_map_page(
+                    page_text=page_text,
+                    page_number=page_number,
+                )
+            )
+        except Exception as exc:
+            warnings.append(
+                f"Variant map page {page_number} skipped: {exc}"
+            )
+
+    progress_bar.progress(100)
+
+    if not records:
+        return (
+            pd.DataFrame(columns=VARIANT_MAP_COLUMNS),
+            warnings,
+        )
+
+    dataframe = pd.DataFrame(records)
+
+    for column in VARIANT_MAP_COLUMNS:
+        if column not in dataframe.columns:
+            dataframe[column] = ""
+
+    dataframe["anticipation_distance_m"] = pd.to_numeric(
+        dataframe["anticipation_distance_m"],
+        errors="coerce",
+    )
+
+    dataframe = dataframe.drop_duplicates(
+        subset=[
+            "source_page",
+            "variant_rank_p",
+            "variant_rank_a",
+            "variant_subsection",
+            "variant_composition",
+        ]
+    )
+
+    return dataframe[VARIANT_MAP_COLUMNS].reset_index(drop=True), warnings
 
 
 # =============================================================================
@@ -854,10 +1261,10 @@ def extract_subdivision_events(
 
 def identify_tests(source_text: str) -> List[str]:
     """
-    Identify tests based on Appendix J singularity wording.
+    Find low-speed test types from the singularity/event source wording.
 
-    The station data is extracted dynamically.
-    The fixed test logic comes from the approved test procedure.
+    Test type comes from fixed C1252-TAC-0274 procedure logic.
+    Station data comes from the PDF.
     """
     matches: List[str] = []
 
@@ -874,18 +1281,22 @@ def identify_tests(source_text: str) -> List[str]:
     return list(dict.fromkeys(matches))
 
 
-def candidate_anticipated_abscissa(
+def candidate_anticipate_abscissa(
     abscissa_m: Optional[float],
     anticipation_distance_m: Optional[float],
     direction: str,
 ) -> Optional[float]:
     """
-    Calculate candidate anticipated abscissa only.
+    Calculate draft anticipated KP.
 
-    Up direction:   event KP + anticipation distance
-    Down direction: event KP - anticipation distance
+    Up direction:
+        event abscissa + anticipation distance
 
-    This must be reviewed because branches may chain or change.
+    Down direction:
+        event abscissa - anticipation distance
+
+    Must be reviewed because chained/reverse branches can invalidate
+    simple arithmetic.
     """
     if abscissa_m is None or anticipation_distance_m is None:
         return None
@@ -899,17 +1310,108 @@ def candidate_anticipated_abscissa(
     return None
 
 
+# =============================================================================
+# VARIANT MAP / EVENT LINKING
+# =============================================================================
+
+def find_matching_variant_rows(
+    event: pd.Series,
+    variant_map: pd.DataFrame,
+) -> List[pd.Series]:
+    """
+    Match a singularity event against Variant Map rows.
+
+    Match sequence:
+
+    1. Same sector and section where available.
+    2. Compare Associated Variant with Variant Composition.
+    3. If variant text extraction is poor, use subsection + rank fallback.
+
+    This creates the required relationship:
+
+        Safety Variant Map
+            -> Variant Composition
+            -> Subdivision Associated Variant
+            -> Singularity Event
+            -> Low-Speed Test Sheet
+    """
+    if variant_map.empty:
+        return []
+
+    event_variant = safe_text(event.get("participate_variant"))
+    event_sector = safe_text(event.get("sector"))
+    event_section = safe_text(event.get("section"))
+    event_subsection = safe_text(event.get("subsection"))
+    event_rank = safe_text(event.get("rank"))
+
+    candidates = variant_map.copy()
+
+    if event_sector:
+        candidates = candidates[
+            candidates["sector"].astype(str).eq(event_sector)
+        ].copy()
+
+    if event_section:
+        candidates = candidates[
+            candidates["section"].astype(str).eq(event_section)
+        ].copy()
+
+    matches: List[pd.Series] = []
+
+    for _, map_row in candidates.iterrows():
+        map_variant = safe_text(
+            map_row.get("variant_composition")
+        )
+
+        same_subsection = (
+            event_subsection
+            and event_subsection
+            == safe_text(map_row.get("variant_subsection"))
+        )
+
+        same_rank = (
+            event_rank
+            and event_rank
+            == safe_text(map_row.get("variant_rank_p"))
+        )
+
+        text_match = variant_composition_matches(
+            subdivision_variant=event_variant,
+            variant_composition=map_variant,
+        )
+
+        # Preferred match: exact/partial variant composition match.
+        if text_match:
+            matches.append(map_row)
+            continue
+
+        # Secondary match: subsection and rank match.
+        if same_subsection and same_rank:
+            matches.append(map_row)
+
+    return matches
+
+
 def create_test_register(
     events: pd.DataFrame,
+    variant_map: pd.DataFrame,
     start_kp: float,
     end_kp: float,
     selected_branch: str,
 ) -> pd.DataFrame:
-    """Create draft test register from selected event range."""
+    """
+    Build draft test register.
+
+    Variant-dependent tests are only created if their associated variant
+    links to the Safety Variant Map.
+
+    Non-variant tests such as MTIB, STIB and Return Channel may be generated
+    directly from the singularity event.
+    """
     lower_kp = min(start_kp, end_kp)
     upper_kp = max(start_kp, end_kp)
 
-    selected = events[
+    selected_events = events[
         events["abscissa_m"].between(
             lower_kp,
             upper_kp,
@@ -918,13 +1420,13 @@ def create_test_register(
     ].copy()
 
     if selected_branch != "All branches":
-        selected = selected[
-            selected["branch"].eq(selected_branch)
+        selected_events = selected_events[
+            selected_events["branch"].eq(selected_branch)
         ].copy()
 
     rows: List[Dict[str, Any]] = []
 
-    for _, event in selected.iterrows():
+    for _, event in selected_events.iterrows():
         source_text = " ".join(
             [
                 safe_text(event.get("event_name")),
@@ -936,70 +1438,130 @@ def create_test_register(
 
         test_codes = identify_tests(source_text)
 
+        if not test_codes:
+            continue
+
+        linked_variant_rows = find_matching_variant_rows(
+            event=event,
+            variant_map=variant_map,
+        )
+
         for test_code in test_codes:
             definition = TEST_DEFINITIONS[test_code]
 
-            abscissa = (
-                float(event["abscissa_m"])
-                if definition["needs_abscissa"]
-                and pd.notna(event["abscissa_m"])
-                else None
-            )
+            # A test which requires variants should normally only be created
+            # when variant map matching has been found.
+            if (
+                definition["requires_variant_link"]
+                and not linked_variant_rows
+            ):
+                continue
 
-            rows.append(
-                {
-                    "test_code": test_code,
-                    "test_id": definition["id"],
-                    "test_name": definition["name"],
-                    "needs_abscissa": definition["needs_abscissa"],
-                    "sector": safe_text(event.get("sector")),
-                    "section": safe_text(event.get("section")),
-                    "subsection": safe_text(event.get("subsection")),
-                    "branch": safe_text(event.get("branch")),
-                    "direction": safe_text(event.get("direction")),
-                    "abscissa_m": abscissa,
-                    "participate_variant": safe_text(
-                        event.get("participate_variant")
-                    ),
-                    "anticipate_variant": "",
-                    "anticipate_rank": safe_text(
-                        event.get("anticipate_rank")
-                    ),
-                    "anticipate_distance_m": None,
-                    "anticipate_abscissa_m": None,
-                    "event_name": safe_text(event.get("event_name")),
-                    "location_name": safe_text(
-                        event.get("location_name")
-                    ),
-                    "source_page": safe_text(event.get("source_page")),
-                    "source_evidence": safe_text(
-                        event.get("source_evidence")
-                    ),
-                    "review_status": "To be reviewed",
-                    "remarks": (
-                        "Automatically extracted from Appendix J. "
-                        "Verify participating variant, anticipated variant, "
-                        "anticipated abscissa and project test scope."
-                    ),
-                }
-            )
+            # For direct/non-variant tests, create one default record.
+            working_variant_rows: List[pd.Series]
+
+            if linked_variant_rows:
+                working_variant_rows = linked_variant_rows
+            else:
+                working_variant_rows = [
+                    pd.Series(
+                        {
+                            "variant_composition": "",
+                            "variant_rank_p": "",
+                            "variant_rank_a": "",
+                            "anticipation_distance_m": None,
+                            "variant_subsection": "",
+                        }
+                    )
+                ]
+
+            for variant_row in working_variant_rows:
+                participate_abscissa: Optional[float]
+
+                if definition["needs_abscissa"]:
+                    participate_abscissa = to_float(
+                        event.get("abscissa_m")
+                    )
+                else:
+                    participate_abscissa = None
+
+                anticipation_distance = to_float(
+                    variant_row.get("anticipation_distance_m")
+                )
+
+                anticipated_abscissa = candidate_anticipate_abscissa(
+                    abscissa_m=participate_abscissa,
+                    anticipation_distance_m=anticipation_distance,
+                    direction=safe_text(event.get("direction")),
+                )
+
+                rows.append(
+                    {
+                        "test_code": test_code,
+                        "test_id": definition["id"],
+                        "test_name": definition["name"],
+                        "needs_abscissa": definition["needs_abscissa"],
+                        "sector": safe_text(event.get("sector")),
+                        "section": safe_text(event.get("section")),
+                        "subsection": safe_text(event.get("subsection")),
+                        "branch": safe_text(event.get("branch")),
+                        "direction": safe_text(event.get("direction")),
+                        "abscissa_m": participate_abscissa,
+                        "participate_variant": safe_text(
+                            event.get("participate_variant")
+                        ),
+                        "variant_map_composition": safe_text(
+                            variant_row.get("variant_composition")
+                        ),
+                        "variant_map_rank_p": safe_text(
+                            variant_row.get("variant_rank_p")
+                        ),
+                        "anticipate_variant": "",
+                        "anticipate_rank": safe_text(
+                            variant_row.get("variant_rank_a")
+                        ),
+                        "anticipate_distance_m": anticipation_distance,
+                        "anticipate_abscissa_m": anticipated_abscissa,
+                        "event_name": safe_text(
+                            event.get("event_name")
+                        ),
+                        "location_name": safe_text(
+                            event.get("location_name")
+                        ),
+                        "source_page": safe_text(
+                            event.get("source_page")
+                        ),
+                        "source_evidence": safe_text(
+                            event.get("source_evidence")
+                        ),
+                        "review_status": "To be reviewed",
+                        "remarks": (
+                            "Automatically linked between Appendix J "
+                            "Subdivision Event and Safety Variant Map. "
+                            "Verify participating/anticipated rank, "
+                            "anticipated branch, anticipation distance "
+                            "and candidate anticipated abscissa."
+                        ),
+                    }
+                )
 
     if not rows:
         return pd.DataFrame(columns=REGISTER_COLUMNS)
 
-    register = pd.DataFrame(rows)
+    dataframe = pd.DataFrame(rows)
 
-    register = register.drop_duplicates(
+    dataframe = dataframe.drop_duplicates(
         subset=[
             "test_code",
             "branch",
             "abscissa_m",
-            "event_name",
+            "participate_variant",
+            "variant_map_composition",
             "source_page",
         ]
     )
 
-    return register.sort_values(
+    return dataframe.sort_values(
         by=[
             "branch",
             "abscissa_m",
@@ -1009,24 +1571,20 @@ def create_test_register(
     ).reset_index(drop=True)
 
 
-def apply_test_details(
-    register: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Update test name, ID and needs-abscissa after a manual test-code edit.
-    """
+def apply_test_details(register: pd.DataFrame) -> pd.DataFrame:
+    """Update test ID/name/abscissa flag after manual test-code editing."""
     output = register.copy()
 
     for index in output.index:
         test_code = safe_text(output.at[index, "test_code"])
 
         if test_code in TEST_DEFINITIONS:
-            definition = TEST_DEFINITIONS[test_code]
+            details = TEST_DEFINITIONS[test_code]
 
-            output.at[index, "test_id"] = definition["id"]
-            output.at[index, "test_name"] = definition["name"]
+            output.at[index, "test_id"] = details["id"]
+            output.at[index, "test_name"] = details["name"]
             output.at[index, "needs_abscissa"] = (
-                definition["needs_abscissa"]
+                details["needs_abscissa"]
             )
         else:
             output.at[index, "test_id"] = ""
@@ -1045,6 +1603,7 @@ def set_cell_text(
     value: Any,
     bold: bool = False,
 ) -> None:
+    """Set a Word table cell value."""
     cell.text = ""
 
     paragraph = cell.paragraphs[0]
@@ -1057,6 +1616,7 @@ def add_docx_row(
     values: List[Any],
     bold: bool = False,
 ) -> None:
+    """Add one row to a DOCX table."""
     cells = table.add_row().cells
 
     for index, value in enumerate(values):
@@ -1072,7 +1632,9 @@ def create_docx_test_sheet(
     project_info: Dict[str, str],
     sheet_number: str,
 ) -> bytes:
-    """Generate one DOCX test sheet in Appendix-A-inspired format."""
+    """
+    Create a C1252-TAC-0274 Appendix-A-style draft test sheet.
+    """
     try:
         from docx import Document
         from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -1086,7 +1648,7 @@ def create_docx_test_sheet(
 
     if test_code not in TEST_DEFINITIONS:
         raise ValueError(
-            f"Unknown test code '{test_code}'."
+            f"Unknown Test Code '{test_code}'."
         )
 
     definition = TEST_DEFINITIONS[test_code]
@@ -1109,9 +1671,9 @@ def create_docx_test_sheet(
     alstom.bold = True
     alstom.font.size = Pt(16)
 
-    title_heading = header.add_run(PROCEDURE_TITLE)
-    title_heading.bold = True
-    title_heading.font.size = Pt(10)
+    procedure_title = header.add_run(PROCEDURE_TITLE)
+    procedure_title.bold = True
+    procedure_title.font.size = Pt(10)
 
     title = document.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1185,15 +1747,15 @@ def create_docx_test_sheet(
     )
 
     if bool(row.get("needs_abscissa")):
-        abscissa_text = format_distance(row.get("abscissa_m"))
+        abscissa = format_distance(row.get("abscissa_m"))
     else:
-        abscissa_text = "Not required for this test"
+        abscissa = "Not required for this test"
 
     add_docx_row(
         location_table,
         [
             "Abscissa:",
-            abscissa_text,
+            abscissa,
             "Location / Asset:",
             safe_text(row.get("location_name")),
         ],
@@ -1204,17 +1766,27 @@ def create_docx_test_sheet(
         [
             "Participate Variant:",
             safe_text(row.get("participate_variant")),
-            "Anticipate Variant:",
-            safe_text(row.get("anticipate_variant")),
+            "Variant Map Composition:",
+            safe_text(row.get("variant_map_composition")),
         ],
     )
 
     add_docx_row(
         location_table,
         [
+            "Variant Map Rank:",
+            safe_text(row.get("variant_map_rank_p")),
             "Anticipate Rank:",
             safe_text(row.get("anticipate_rank")),
-            "Anticipate Abscissa:",
+        ],
+    )
+
+    add_docx_row(
+        location_table,
+        [
+            "Anticipation Distance:",
+            format_distance(row.get("anticipate_distance_m")),
+            "Candidate Anticipate Abs.:",
             (
                 format_distance(row.get("anticipate_abscissa_m"))
                 or "To be reviewed"
@@ -1262,14 +1834,14 @@ def create_docx_test_sheet(
     notes_table = document.add_table(rows=1, cols=1)
     notes_table.style = "Table Grid"
 
-    notes = (
+    note_text = (
         f"Source Page: {safe_text(row.get('source_page'))}\n"
         f"Source Event: {safe_text(row.get('event_name'))}\n"
         f"Source Evidence: {safe_text(row.get('source_evidence'))}\n\n"
         f"Engineering Remarks: {safe_text(row.get('remarks'))}"
     )
 
-    set_cell_text(notes_table.rows[0].cells[0], notes)
+    set_cell_text(notes_table.rows[0].cells[0], note_text)
 
     document.add_paragraph()
 
@@ -1312,7 +1884,7 @@ def create_docx_zip(
     progress_bar: Any,
     progress_text: Any,
 ) -> bytes:
-    """Create ZIP containing generated DOCX sheets."""
+    """Create ZIP file containing DOCX test sheets."""
     output = io.BytesIO()
     total = len(register)
 
@@ -1325,22 +1897,20 @@ def create_docx_zip(
             register.iterrows(),
             start=1,
         ):
-            sheet_number = (
-                f"{project_info['sheet_prefix']}-{sequence:03d}"
-            )
-
             test_code = safe_text(row.get("test_code"))
             branch = safe_text(row.get("branch")) or "NO_BRANCH"
 
             progress_text.info(
-                f"Generating DOCX {sequence} of {total}: "
+                f"Generating DOCX test sheet {sequence} of {total}: "
                 f"{test_code} / {branch}"
             )
 
+            sheet_number = (
+                f"{project_info['sheet_prefix']}-{sequence:03d}"
+            )
+
             filename = clean_filename(
-                f"{sheet_number}_"
-                f"{test_code}_"
-                f"{branch}_"
+                f"{sheet_number}_{test_code}_{branch}_"
                 f"KP_{safe_text(row.get('abscissa_m'))}.docx"
             )
 
@@ -1373,8 +1943,10 @@ def create_docx_zip(
 def create_excel_bytes(
     register: pd.DataFrame,
     extracted_events: pd.DataFrame,
+    variant_map: pd.DataFrame,
     project_info: Dict[str, str],
 ) -> bytes:
+    """Create Excel register including source events and variant map."""
     output = io.BytesIO()
 
     with pd.ExcelWriter(
@@ -1390,7 +1962,9 @@ def create_excel_bytes(
                 ["ATP Version", project_info["atp_version"]],
                 ["ATO Version", project_info["ato_version"]],
                 ["Generated Date", str(date.today())],
-                ["Total Test Register Rows", len(register)],
+                ["Test Register Rows", len(register)],
+                ["Extracted Event Rows", len(extracted_events)],
+                ["Variant Map Rows", len(variant_map)],
             ],
             columns=["Field", "Value"],
         )
@@ -1413,12 +1987,18 @@ def create_excel_bytes(
             index=False,
         )
 
+        variant_map.to_excel(
+            writer,
+            sheet_name="Safety Variant Map",
+            index=False,
+        )
+
         for worksheet in writer.book.worksheets:
             worksheet.freeze_panes = "A2"
             worksheet.auto_filter.ref = worksheet.dimensions
 
             for column_cells in worksheet.columns:
-                max_length = max(
+                maximum_length = max(
                     len(safe_text(cell.value))
                     for cell in column_cells
                 )
@@ -1426,7 +2006,7 @@ def create_excel_bytes(
                 worksheet.column_dimensions[
                     column_cells[0].column_letter
                 ].width = min(
-                    max(max_length + 2, 12),
+                    max(maximum_length + 2, 12),
                     70,
                 )
 
@@ -1438,6 +2018,7 @@ def create_excel_bytes(
 # =============================================================================
 
 def render_styles() -> None:
+    """Render local CSS."""
     st.markdown(
         """
         <style>
@@ -1474,10 +2055,10 @@ def render_styles() -> None:
 
 def render_test_sheet_generator_app() -> None:
     """
-    Main Test Sheet Generator page.
+    Render Test Sheet Generator.
 
-    app.py imports and calls this function.
-    Do not use st.set_page_config() in this file.
+    This is called by app.py.
+    Do not use st.set_page_config() in this module.
     """
     render_styles()
 
@@ -1486,9 +2067,10 @@ def render_test_sheet_generator_app() -> None:
         <div class="generator-hero">
             <h1>ATC Low-Speed Dynamic Test Sheet Generator</h1>
             <p>
-                Upload an Appendix J Station SACEM Subdivision PDF, select
-                start and end abscissa, review extracted events, and generate
-                C1252-TAC-0274-style DOCX test sheets.
+                Upload an Appendix J Station SACEM Subdivision PDF. The tool
+                links Safety Variant Map data to Subdivision associated
+                variants and generates reviewable low-speed dynamic test
+                sheets.
             </p>
         </div>
         """,
@@ -1498,16 +2080,19 @@ def render_test_sheet_generator_app() -> None:
     st.markdown(
         """
         <div class="generator-warning">
-            <b>Engineering warning:</b><br>
-            This tool produces draft test sheets. All extracted branch,
-            abscissa, variant, anticipated data and test applicability must
-            be checked against approved design, PAT, invariant and
-            subdivision documents before issue.
+            <b>Engineering control:</b><br>
+            This application creates a draft test register. All linked
+            variants, anticipated information, branches, abscissae and
+            applicable tests must be verified against approved project
+            subdivision, safety-variant, invariant, PAT and test documents.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+    # -------------------------------------------------------------------------
+    # Project information
+    # -------------------------------------------------------------------------
     with st.expander("Project Information", expanded=True):
         col1, col2, col3 = st.columns(3)
 
@@ -1555,6 +2140,9 @@ def render_test_sheet_generator_app() -> None:
         "sheet_prefix": sheet_prefix or PROCEDURE_REFERENCE,
     }
 
+    # -------------------------------------------------------------------------
+    # PDF input
+    # -------------------------------------------------------------------------
     st.markdown("## 1. Upload Station SACEM Subdivision PDF")
 
     uploaded_file = st.file_uploader(
@@ -1565,8 +2153,8 @@ def render_test_sheet_generator_app() -> None:
 
     if uploaded_file is None:
         st.info(
-            "Upload one station SACEM Subdivision PDF. "
-            "The document should contain selectable text."
+            "Upload one station SACEM Subdivision PDF containing "
+            "singularity tables and Safety Variants Message pages."
         )
         return
 
@@ -1575,9 +2163,8 @@ def render_test_sheet_generator_app() -> None:
 
     if pdf_size_mb > MAX_PDF_SIZE_MB:
         st.error(
-            f"PDF size is {pdf_size_mb:.1f} MB. "
-            f"Maximum supported size is {MAX_PDF_SIZE_MB} MB. "
-            "Use an optimised selectable-text PDF."
+            f"PDF size is {pdf_size_mb:.1f} MB. Maximum supported "
+            f"size is {MAX_PDF_SIZE_MB} MB."
         )
         return
 
@@ -1585,12 +2172,16 @@ def render_test_sheet_generator_app() -> None:
 
     if current_hash != st.session_state.get("generator_pdf_hash"):
         st.session_state.pop("generator_events", None)
+        st.session_state.pop("generator_variant_map", None)
         st.session_state.pop("generator_warnings", None)
         st.session_state.pop("generator_register", None)
         st.session_state.pop("generator_docx_zip", None)
 
+    # -------------------------------------------------------------------------
+    # PDF extraction
+    # -------------------------------------------------------------------------
     if st.button(
-        "🔎 Extract Subdivision Events",
+        "🔎 Extract Events and Variant Maps",
         type="primary",
         use_container_width=True,
         key="generator_extract_pdf_button",
@@ -1600,40 +2191,50 @@ def render_test_sheet_generator_app() -> None:
 
         try:
             progress_text.info(
-                "Reading PDF selectable text. "
-                "The result is cached after first extraction."
+                "Reading selectable text from PDF. "
+                "Extraction will be cached after this first run."
             )
 
             pages = extract_pdf_text_pages(pdf_bytes)
 
             progress_text.info(
-                f"PDF loaded: {len(pages)} page(s). "
-                "Extracting subdivision events..."
+                f"PDF loaded: {len(pages)} pages. "
+                "Extracting singularity events..."
             )
 
-            events, warnings = extract_subdivision_events(
+            events, event_warnings = extract_subdivision_events(
                 pages=pages,
                 progress_bar=progress_bar,
                 progress_text=progress_text,
             )
 
+            progress_text.info(
+                "Extracting Safety Variant Map records..."
+            )
+
+            variant_map, variant_warnings = extract_variant_maps(
+                pages=pages,
+                progress_bar=progress_bar,
+                progress_text=progress_text,
+            )
+
+            warnings = event_warnings + variant_warnings
+
             st.session_state["generator_pdf_hash"] = current_hash
             st.session_state["generator_events"] = events
+            st.session_state["generator_variant_map"] = variant_map
             st.session_state["generator_warnings"] = warnings
             st.session_state["generator_page_count"] = len(pages)
+
             st.session_state.pop("generator_register", None)
             st.session_state.pop("generator_docx_zip", None)
 
-            if events.empty:
-                progress_text.warning(
-                    "Extraction completed but no usable subdivision "
-                    "event rows were found."
-                )
-            else:
-                progress_text.success(
-                    f"Extraction completed: {len(events)} "
-                    f"source event row(s) found."
-                )
+            progress_bar.progress(100)
+
+            progress_text.success(
+                f"Extraction completed: {len(events)} subdivision "
+                f"event(s) and {len(variant_map)} variant-map row(s)."
+            )
 
         except Exception as exc:
             progress_bar.empty()
@@ -1648,12 +2249,17 @@ def render_test_sheet_generator_app() -> None:
 
     events = st.session_state.get(
         "generator_events",
-        pd.DataFrame(columns=EXTRACTED_COLUMNS),
+        pd.DataFrame(columns=EXTRACTED_EVENT_COLUMNS),
+    )
+
+    variant_map = st.session_state.get(
+        "generator_variant_map",
+        pd.DataFrame(columns=VARIANT_MAP_COLUMNS),
     )
 
     if events.empty:
         st.warning(
-            "Click 'Extract Subdivision Events' to extract source data."
+            "Click 'Extract Events and Variant Maps' to begin."
         )
         return
 
@@ -1670,8 +2276,25 @@ def render_test_sheet_generator_app() -> None:
             for warning in warnings:
                 st.write(f"• {warning}")
 
+    metric1, metric2, metric3 = st.columns(3)
+
+    metric1.metric(
+        "Subdivision Events",
+        len(events),
+    )
+
+    metric2.metric(
+        "Safety Variant Rows",
+        len(variant_map),
+    )
+
+    metric3.metric(
+        "PDF Pages",
+        st.session_state.get("generator_page_count", 0),
+    )
+
     with st.expander(
-        "Review Extracted Source Events",
+        "Review Extracted Subdivision Events",
         expanded=False,
     ):
         st.dataframe(
@@ -1680,9 +2303,29 @@ def render_test_sheet_generator_app() -> None:
             hide_index=True,
         )
 
-    st.markdown("## 2. Select Start and End Abscissa")
+    with st.expander(
+        "Review Extracted Safety Variant Map",
+        expanded=False,
+    ):
+        if variant_map.empty:
+            st.warning(
+                "No Variant Map rows were extracted. The PDF may not "
+                "contain selectable Variant Map text, or extraction "
+                "format may require review."
+            )
+        else:
+            st.dataframe(
+                variant_map,
+                use_container_width=True,
+                hide_index=True,
+            )
 
-    branches = sorted(
+    # -------------------------------------------------------------------------
+    # KP selection
+    # -------------------------------------------------------------------------
+    st.markdown("## 2. Select Start and End Point")
+
+    available_branches = sorted(
         branch
         for branch in events["branch"].dropna().unique()
         if safe_text(branch)
@@ -1690,7 +2333,7 @@ def render_test_sheet_generator_app() -> None:
 
     selected_branch = st.selectbox(
         "Branch Filter",
-        options=["All branches"] + branches,
+        options=["All branches"] + available_branches,
         key="generator_branch_filter",
     )
 
@@ -1707,7 +2350,7 @@ def render_test_sheet_generator_app() -> None:
 
     if range_events.empty:
         st.error(
-            "No valid abscissa values exist for selected branch."
+            "No valid abscissa values found for selected branch."
         )
         return
 
@@ -1738,20 +2381,23 @@ def render_test_sheet_generator_app() -> None:
             key="generator_end_kp",
         )
 
+    # -------------------------------------------------------------------------
+    # Register generation
+    # -------------------------------------------------------------------------
     if st.button(
-        "Create Draft Test Register",
+        "Create Variant-Linked Draft Test Register",
         type="primary",
         use_container_width=True,
         key="generator_create_register_button",
     ):
-        register = create_test_register(
+        st.session_state["generator_register"] = create_test_register(
             events=events,
+            variant_map=variant_map,
             start_kp=float(start_kp),
             end_kp=float(end_kp),
             selected_branch=selected_branch,
         )
 
-        st.session_state["generator_register"] = register
         st.session_state.pop("generator_docx_zip", None)
 
     register = st.session_state.get(
@@ -1761,12 +2407,21 @@ def render_test_sheet_generator_app() -> None:
 
     if register.empty:
         st.warning(
-            "No automatic test matches were found in selected range. "
-            "You may review source events or add rows manually."
+            "No variant-linked low-speed test points were created in "
+            "the selected range."
         )
         return
 
-    st.markdown("## 3. Review Generated Test Register")
+    # -------------------------------------------------------------------------
+    # Review register
+    # -------------------------------------------------------------------------
+    st.markdown("## 3. Review Variant-Linked Test Register")
+
+    st.caption(
+        "The generator linked Safety Variant Map composition to the "
+        "Subdivision associated variant. Verify and approve before "
+        "generating DOCX test sheets."
+    )
 
     reviewed_register = st.data_editor(
         register,
@@ -1783,7 +2438,7 @@ def render_test_sheet_generator_app() -> None:
                 "Needs Abscissa"
             ),
             "abscissa_m": st.column_config.NumberColumn(
-                "Abscissa (m)",
+                "Participating Abscissa (m)",
                 format="%.3f",
             ),
             "anticipate_distance_m": st.column_config.NumberColumn(
@@ -1791,7 +2446,7 @@ def render_test_sheet_generator_app() -> None:
                 format="%.3f",
             ),
             "anticipate_abscissa_m": st.column_config.NumberColumn(
-                "Anticipated Abscissa (m)",
+                "Candidate Anticipated Abscissa (m)",
                 format="%.3f",
             ),
             "review_status": st.column_config.SelectboxColumn(
@@ -1819,11 +2474,14 @@ def render_test_sheet_generator_app() -> None:
 
     st.session_state["generator_register"] = reviewed_register
 
-    metric1, metric2, metric3, metric4 = st.columns(4)
+    review_col1, review_col2, review_col3, review_col4 = st.columns(4)
 
-    metric1.metric("Draft Test Sheets", len(reviewed_register))
+    review_col1.metric(
+        "Draft Test Sheets",
+        len(reviewed_register),
+    )
 
-    metric2.metric(
+    review_col2.metric(
         "Assigned Tests",
         int(
             reviewed_register["test_code"]
@@ -1834,8 +2492,8 @@ def render_test_sheet_generator_app() -> None:
         ),
     )
 
-    metric3.metric(
-        "Abscissa Required",
+    review_col3.metric(
+        "Rows Requiring Abscissa",
         int(
             reviewed_register["needs_abscissa"]
             .fillna(False)
@@ -1844,7 +2502,7 @@ def render_test_sheet_generator_app() -> None:
         ),
     )
 
-    metric4.metric(
+    review_col4.metric(
         "Approved for Generation",
         int(
             reviewed_register["review_status"]
@@ -1853,11 +2511,15 @@ def render_test_sheet_generator_app() -> None:
         ),
     )
 
+    # -------------------------------------------------------------------------
+    # Downloads
+    # -------------------------------------------------------------------------
     st.markdown("## 4. Generate and Download")
 
     excel_bytes = create_excel_bytes(
         register=reviewed_register,
         extracted_events=events,
+        variant_map=variant_map,
         project_info=project_info,
     )
 
@@ -1878,7 +2540,7 @@ def render_test_sheet_generator_app() -> None:
             data=excel_bytes,
             file_name=clean_filename(
                 f"{project_info['sheet_prefix']}_"
-                f"Abscissa_Test_Register.xlsx"
+                f"Variant_Linked_Test_Register.xlsx"
             ),
             mime=(
                 "application/vnd.openxmlformats-officedocument."
@@ -1895,7 +2557,7 @@ def render_test_sheet_generator_app() -> None:
             ).encode("utf-8"),
             file_name=clean_filename(
                 f"{project_info['sheet_prefix']}_"
-                f"Abscissa_Test_Register.csv"
+                f"Variant_Linked_Test_Register.csv"
             ),
             mime="text/csv",
             use_container_width=True,
@@ -1910,8 +2572,8 @@ def render_test_sheet_generator_app() -> None:
             )
 
             st.caption(
-                "Assign a test code and set Review Status to "
-                "'Approved for generation'."
+                "Set Review Status to 'Approved for generation' for "
+                "one or more valid test rows."
             )
 
         else:
