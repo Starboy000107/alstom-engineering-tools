@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import re
 import zipfile
@@ -17,7 +18,13 @@ import streamlit as st
 PROCEDURE_REFERENCE_DEFAULT = "C1252-TAC-0274"
 PROCEDURE_TITLE_DEFAULT = "Trackside ATC Low-Speed Dynamic Test Procedure"
 
+MAX_PDF_SIZE_MB = 80
+MAX_SOURCE_EVIDENCE_LENGTH = 1800
+MAX_CHECKLIST_ITEMS = 18
+
+
 EXTRACTED_EVENT_COLUMNS = [
+    "row_number",
     "sector",
     "section",
     "subsection",
@@ -29,14 +36,22 @@ EXTRACTED_EVENT_COLUMNS = [
     "event_name",
     "location_name",
     "participate_variant",
-    "anticipate_variant",
     "anticipate_rank",
-    "anticipate_distance_m",
-    "anticipate_abscissa_m",
     "source_page",
     "source_evidence",
     "remarks",
 ]
+
+
+TEST_LIBRARY_COLUMNS = [
+    "test_code",
+    "test_id",
+    "test_name",
+    "short_name",
+    "needs_abscissa",
+    "checklist",
+]
+
 
 REGISTER_COLUMNS = [
     "test_code",
@@ -64,271 +79,11 @@ REGISTER_COLUMNS = [
 
 
 # =============================================================================
-# GENERIC PROCEDURE RULES
-#
-# These are procedure-level test definitions.
-# There is no station, sector, branch, KP or variant hard-coding here.
-# =============================================================================
-
-TEST_RULES: Dict[str, Dict[str, Any]] = {
-    "LS01": {
-        "id": "ATC-TNC-TRA-LS01",
-        "name": "MTIB Initialization Test",
-        "short_name": "MTIB",
-        "needs_abscissa": False,
-        "patterns": [
-            r"\bMTIB\b",
-            r"MOVING\s+TRAIN\s+INITIALISATION",
-            r"MOVING\s+TRAIN\s+INITIALIZATION",
-        ],
-        "checks": [
-            ("Selected Mode", "RM", "Y / N"),
-            ("Localisation Status", "Out Loc", "Y / N"),
-            ("Cross MTIB", "Localisation becomes Wait Loc", "Y / N"),
-            ("Beacon Codes", "Record and compare with design", "Record"),
-            ("Calibration", "Record calibration value", "mm"),
-            ("Localisation Status", "Total Loc", "Y / N"),
-        ],
-    },
-    "LS02": {
-        "id": "ATC-TNC-TRA-LS02",
-        "name": "STIB Initialization Test",
-        "short_name": "STIB",
-        "needs_abscissa": False,
-        "patterns": [
-            r"\bSTIB\b",
-            r"STATIONARY\s+TRAIN\s+INITIALISATION",
-            r"STATIONARY\s+TRAIN\s+INITIALIZATION",
-        ],
-        "checks": [
-            ("Selected Mode", "RM", "Y / N"),
-            ("Localisation Status", "Out Loc", "Y / N"),
-            ("Stop on STIB", "Localisation becomes Wait Inv", "Y / N"),
-            ("Beacon Codes", "Record and compare with design", "Record"),
-            ("Localisation Status", "Total Loc", "Y / N"),
-            ("Mode Available", "CM/AM available as applicable", "Y / N"),
-            ("First RB / MTIB", "No Emergency Brake", "Y / N"),
-        ],
-    },
-    "LS03": {
-        "id": "ATC-TNC-TRA-LS03",
-        "name": "Spacing Stopping Point Test – Track Circuit",
-        "short_name": "Spacing Stopping Point",
-        "needs_abscissa": True,
-        "patterns": [
-            r"SPACING\s+STOPPING\s+POINT",
-            r"TRACK\s+CIRCUIT.*STOPPING",
-        ],
-        "checks": [
-            ("Track circuit occupied", "Associated variant restrictive", "Y / N"),
-            ("Available mode", "CM/AUTO", "Y / N"),
-            ("Loc Max", "Record", "m"),
-            ("Target Distance", "Record", "m"),
-            ("Singularity Abscissa", "Record", "m"),
-            ("OMAP Target Speed", "Equal 0 where applicable", "Y / N"),
-            ("Track circuit free", "Associated variant permissive", "Y / N"),
-            ("Target comparison", "Free target >= occupied target", "Y / N"),
-        ],
-    },
-    "LS04": {
-        "id": "ATC-TNC-TRA-LS04",
-        "name": "Special Stopping Point Test – Signal Without Overlap",
-        "short_name": "Special Stopping Point",
-        "needs_abscissa": True,
-        "patterns": [
-            r"SPECIAL\s+STOPPING\s+POINT",
-            r"SIGNAL.*WITHOUT\s+OVERLAP",
-        ],
-        "checks": [
-            ("Restrictive signal", "Associated variant restrictive", "Y / N"),
-            ("Available mode", "CM/AUTO", "Y / N"),
-            ("Loc Max / Target Distance / Abscissa", "Record", "m"),
-            ("Permissive signal", "Associated variant permissive", "Y / N"),
-            ("Target comparison", "Permissive target >= restrictive", "Y / N"),
-        ],
-    },
-    "LS05": {
-        "id": "ATC-TNC-TRA-LS05",
-        "name": "Complex Stopping Point Test – Signal With Overlap",
-        "short_name": "Complex Stopping Point",
-        "needs_abscissa": True,
-        "patterns": [
-            r"COMPLEX\s+STOPPING\s+POINT",
-            r"SIGNAL.*OVERLAP",
-            r"\bO/L\b",
-        ],
-        "checks": [
-            ("Signal red / overlap occupied", "Variants restrictive", "Y / N"),
-            ("Signal red / overlap free", "Record stopping behaviour", "Record"),
-            ("Signal blue / overlap free", "Variants permissive", "Y / N"),
-            ("Target comparison", "Permissive target >= restrictive", "Y / N"),
-        ],
-    },
-    "LS06": {
-        "id": "ATC-TNC-TRA-LS06",
-        "name": "Stopping Point Test – Point",
-        "short_name": "Convergence / Divergence",
-        "needs_abscissa": True,
-        "patterns": [
-            r"\bCONVERGENCE\b",
-            r"\bDIVERGENCE\b",
-            r"\bPOINT\b",
-            r"\bTURNOUT\b",
-        ],
-        "checks": [
-            ("Point uncontrolled", "Associated variant restrictive", "Y / N"),
-            ("Available mode", "CM/AM", "Y / N"),
-            ("Loc Max / Target Distance / Abscissa", "Record", "m"),
-            ("Point controlled", "Associated variant permissive", "Y / N"),
-            ("Target comparison", "Controlled >= uncontrolled", "Y / N"),
-        ],
-    },
-    "LS07": {
-        "id": "ATC-TNC-TRA-LS07",
-        "name": "Stopping Point Test – End of SACEM",
-        "short_name": "End of SACEM",
-        "needs_abscissa": True,
-        "patterns": [
-            r"END\s+OF\s+SACEM",
-            r"END\s+SACEM",
-        ],
-        "checks": [
-            ("Available mode before End of SACEM", "CM/AUTO", "Y / N"),
-            ("Loc Max / Target Distance / Abscissa", "Record", "m"),
-            ("OMAP Target Speed", "Equal 0 where applicable", "Y / N"),
-            ("Beyond End of SACEM", "CM/AM unavailable", "Y / N"),
-        ],
-    },
-    "LS08": {
-        "id": "ATC-TNC-TRA-LS08",
-        "name": "Station Stopping Point and Door Side Verification",
-        "short_name": "Station Stopping Point / Door Side",
-        "needs_abscissa": True,
-        "patterns": [
-            r"STATION\s+CHARACTERISTICS",
-            r"STATION\s+STOPPING",
-            r"PLATFORM\s+STOPPING",
-        ],
-        "checks": [
-            ("Localisation Status", "Total Loc", "Y / N"),
-            ("Available Mode", "CM/AM", "Y / N"),
-            ("Selected Mode", "CM", "Y / N"),
-            ("Precise Stop", "Record Loc Max and measured distance", "m"),
-            ("Door Side", "Correct side enabled", "A / B"),
-            ("Stop Short / Overrun", "Door enabled within ±0.35 m", "Y / N"),
-        ],
-    },
-    "LS09": {
-        "id": "ATC-TNC-TRA-LS09",
-        "name": "PSD Operation Pre-Test",
-        "short_name": "PSD Opening Pre-Test",
-        "needs_abscissa": False,
-        "patterns": [
-            r"\bPSD\b",
-            r"ALL\s+DOOR\s+CLOSED",
-        ],
-        "checks": [
-            ("Correct platform side", "Door side enabled", "Y / N"),
-            ("Open wrong-side doors", "PSD / relay not activated", "Y / N"),
-            ("Open correct-side doors", "PSD / relay activated", "Y / N"),
-            ("All doors closed lost", "Variants restrictive; RM only", "Y / N"),
-            ("PIOS / override", "CM/AM then timeout behaviour checked", "Y / N"),
-            ("Close correct-side doors", "PSD closed and variants permissive", "Y / N"),
-        ],
-    },
-    "LS10": {
-        "id": "ATC-TNC-TRA-LS10",
-        "name": "Emergency Stop Zone Test",
-        "short_name": "Emergency Stop Zone",
-        "needs_abscissa": True,
-        "patterns": [
-            r"EMERGENCY\s+ZONE",
-            r"EMERGENCY\s+STOP\s+ZONE",
-            r"\bESZ\b",
-        ],
-        "checks": [
-            ("ESZ condition active", "Associated variant restrictive", "Y / N"),
-            ("Loc Max / Target Distance / Abscissa", "Record", "m"),
-            ("ESZ condition resumed", "Associated variant permissive", "Y / N"),
-            ("Inside restrictive zone", "CM/AM unavailable", "Y / N"),
-            ("End of ESZ", "CM becomes available", "Y / N"),
-        ],
-    },
-    "LS11": {
-        "id": "ATC-TNC-TRA-LS11",
-        "name": "Change of End Test",
-        "short_name": "Change of End Zone",
-        "needs_abscissa": True,
-        "patterns": [
-            r"CHANGE\s+OF\s+END",
-            r"CHANGE\s+ENDS",
-            r"REVERSE\s+SUB-?SECTION",
-            r"\bCOE\b",
-        ],
-        "checks": [
-            ("Cab 1 arrival", "Total Loc and CM/AM available", "Y / N"),
-            ("Cab 1 Loc Max / Loc Min", "Record", "m"),
-            ("Cab 2 before CoE", "Shutdown; distance to signal < 12 m", "Y / N"),
-            ("Cab 2 after CoE", "Total Loc and CM/AM available", "Y / N"),
-            ("First RB / MTIB", "No delocalisation / no EB", "Y / N"),
-        ],
-    },
-    "LS12": {
-        "id": "ATC-TNC-TRA-LS12",
-        "name": "Temporary Speed Restriction Test",
-        "short_name": "Temporary Speed Restriction",
-        "needs_abscissa": False,
-        "patterns": [
-            r"\bTSR\b",
-            r"TEMPORARY\s+SPEED\s+RESTRICTION",
-        ],
-        "checks": [
-            ("Track Circuit", "Record selected TC", "Record"),
-            ("Section", "Record selected section", "Record"),
-            ("TSR Value", "Record TSR value", "kph"),
-            ("Train Behaviour", "Target speed follows TSR; no EB", "Y / N"),
-        ],
-    },
-    "LS13": {
-        "id": "ATC-TNC-TRA-LS13",
-        "name": "Return Channel Test",
-        "short_name": "Return Channel Test",
-        "needs_abscissa": False,
-        "patterns": [
-            r"RETURN\s+CHANNEL",
-            r"R/C\s+LOOP",
-        ],
-        "checks": [
-            ("Return channel location", "Record location", "Record"),
-            ("Return channel loop", "Record equipment reference", "Record"),
-            ("Trackside reception", "Train information received", "Y / N"),
-        ],
-    },
-    "LS14": {
-        "id": "ATC-TNC-TRA-LS14",
-        "name": "End of Shunt Test",
-        "short_name": "End of Shunt Test",
-        "needs_abscissa": False,
-        "patterns": [
-            r"END\s+OF\s+SHUNT",
-            r"SHUNT\s+ROUTE",
-        ],
-        "checks": [
-            ("Shunt Route Name", "Record", "Record"),
-            ("Step 1 – Begin", "Record Branch, Loc Max and Target Distance", "Record"),
-            ("Step 2", "Train in RM", "Y / N"),
-            ("Step 3 – End", "Record CM resume Branch and Loc Max", "Record"),
-            ("Acceptance", "CM/AM resumes at approved location", "Y / N"),
-        ],
-    },
-}
-
-
-# =============================================================================
 # BASIC HELPERS
 # =============================================================================
 
 def safe_text(value: Any) -> str:
+    """Safely return stripped text."""
     if value is None:
         return ""
 
@@ -342,16 +97,26 @@ def safe_text(value: Any) -> str:
 
 
 def normalise_spaces(value: Any) -> str:
+    """Normalise repeated whitespace."""
     return re.sub(r"\s+", " ", safe_text(value)).strip()
 
 
 def clean_filename(value: str) -> str:
-    value = re.sub(r'[\\/:*?"<>|]', "_", safe_text(value))
+    """Create a safe filename."""
+    value = safe_text(value)
+    value = re.sub(r'[\\/:*?"<>|]', "_", value)
     value = re.sub(r"\s+", "_", value)
+
     return value[:150] or "ATC_Test_Sheet"
 
 
+def file_hash(file_bytes: bytes) -> str:
+    """Create stable file hash for session tracking."""
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
 def to_float(value: Any) -> Optional[float]:
+    """Convert number-like values to float."""
     text = safe_text(value)
 
     if not text:
@@ -370,14 +135,39 @@ def to_float(value: Any) -> Optional[float]:
         return None
 
 
+def to_bool(value: Any) -> bool:
+    """Convert spreadsheet values to bool."""
+    return safe_text(value).upper() in {
+        "Y",
+        "YES",
+        "TRUE",
+        "T",
+        "1",
+        "REQUIRED",
+    }
+
+
 def normalise_branch(value: Any) -> str:
+    """
+    Normalise branch strings.
+
+    Examples:
+        14-04-1-0       -> 14-04-1-0
+        14 04 1 0       -> 14-04-1-0
+        14 - 4 - 1 - 0  -> 14-04-1-0
+    """
+    text = safe_text(value)
+
     match = re.search(
-        r"(\d{1,2})\s*-\s*(\d{1,2})\s*-\s*(\d{1,2})\s*-\s*(\d{1,3})",
-        safe_text(value),
+        r"(\d{1,2})\s*[- ]\s*"
+        r"(\d{1,2})\s*[- ]\s*"
+        r"(\d{1,2})\s*[- ]\s*"
+        r"(\d{1,3})",
+        text,
     )
 
     if not match:
-        return safe_text(value)
+        return text
 
     sector, section, subsection, branch = match.groups()
 
@@ -390,16 +180,18 @@ def normalise_branch(value: Any) -> str:
 
 
 def branch_parts(branch: str) -> Tuple[str, str, str]:
+    """Return sector, section and subsection from branch."""
     parts = safe_text(branch).split("-")
 
-    return (
-        parts[0] if len(parts) > 0 else "",
-        parts[1] if len(parts) > 1 else "",
-        "-".join(parts[:3]) if len(parts) > 2 else "",
-    )
+    sector = parts[0] if len(parts) >= 1 else ""
+    section = parts[1] if len(parts) >= 2 else ""
+    subsection = "-".join(parts[:3]) if len(parts) >= 3 else ""
+
+    return sector, section, subsection
 
 
 def format_distance(value: Any) -> str:
+    """Format a distance in metres."""
     numeric = to_float(value)
 
     if numeric is None:
@@ -408,12 +200,77 @@ def format_distance(value: Any) -> str:
     return f"{numeric:.3f} m"
 
 
+def split_checklist(value: str) -> List[str]:
+    """
+    Split pipe-separated checklist items.
+
+    Example:
+        Confirm RM mode|Record beacon code|Confirm Total Loc
+    """
+    items = [
+        normalise_spaces(item)
+        for item in safe_text(value).split("|")
+        if normalise_spaces(item)
+    ]
+
+    return items[:MAX_CHECKLIST_ITEMS]
+
+
 # =============================================================================
-# PDF INTERPRETATION
+# PDF TEXT EXTRACTION
+#
+# Optimised: uses pypdf selectable text only.
+# It does NOT use pdfplumber table extraction and does NOT render PDF pages.
 # =============================================================================
 
+@st.cache_data(show_spinner=False, max_entries=4)
+def extract_pdf_pages_cached(
+    pdf_bytes: bytes,
+) -> List[str]:
+    """
+    Extract selectable text from every PDF page.
+
+    Cached by Streamlit. The same uploaded PDF will not be parsed again
+    after normal Streamlit reruns.
+    """
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing dependency 'pypdf'. "
+            "Add pypdf>=4.0.0 to requirements.txt."
+        ) from exc
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    if reader.is_encrypted:
+        try:
+            reader.decrypt("")
+        except Exception as exc:
+            raise RuntimeError(
+                "The PDF is encrypted and cannot be read."
+            ) from exc
+
+    return [
+        page.extract_text() or ""
+        for page in reader.pages
+    ]
+
+
 def extract_page_metadata(page_text: str) -> Dict[str, str]:
+    """
+    Extract general page metadata.
+
+    This works for different station PDFs because sector and section are
+    read from page text.
+    """
     text = normalise_spaces(page_text)
+
+    line_match = re.search(
+        r"\bLINE\s*:\s*([A-Z0-9 _/-]+?)(?=\s+SECTOR|\s+SECTION|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
 
     sector_match = re.search(
         r"\bSECTOR\s*:\s*(\d{1,2})",
@@ -435,7 +292,11 @@ def extract_page_metadata(page_text: str) -> Dict[str, str]:
     elif re.search(r"\bDN\s+TRACK\b", text, re.IGNORECASE):
         direction = "Down"
 
+    elif re.search(r"\bDOWN\s+TRACK\b", text, re.IGNORECASE):
+        direction = "Down"
+
     return {
+        "line": safe_text(line_match.group(1)) if line_match else "",
         "sector": (
             f"{int(sector_match.group(1)):02d}"
             if sector_match
@@ -450,19 +311,48 @@ def extract_page_metadata(page_text: str) -> Dict[str, str]:
     }
 
 
+def looks_like_subdivision_page(page_text: str) -> bool:
+    """
+    Identify subdivision singularity-table pages.
+
+    This is format detection, not station-specific logic.
+    """
+    upper = page_text.upper()
+
+    markers = [
+        "SINGULARITIES",
+        "TEST ABSC",
+        "INTER SINGUL",
+        "SUB SECTION",
+        "SUB-SECTION",
+        "UP TRACK NORMAL DIRECTION",
+        "DN TRACK NORMAL DIRECTION",
+        "DOWN TRACK NORMAL DIRECTION",
+    ]
+
+    return any(marker in upper for marker in markers)
+
+
 def extract_associated_variant(text: str) -> str:
+    """Extract associated/participating variant text."""
     match = re.search(
-        r"(?:ASSOCIATED|PARTICIPATE|PARTICIPATING)\s+VARIANT"
-        r"(?:\s+NUMBER)?\s*[:=]?\s*\(?([^()\n;]+?)\)?"
-        r"(?=$|;|,?\s+(?:RANK|NUMBER|ANTICIPATE|SUB\s*SECTION))",
+        r"(?:ASSOCIATED|PARTICIPATE|PARTICIPATING)\s+VARIANTS?"
+        r"(?:\s+NUMBER)?\s*[:=]?\s*"
+        r"\(?([^()\n;]+?)\)?"
+        r"(?=$|;|,?\s+(?:RANK|NUMBER|ANTICIPATE|SUB\s*SECTION|"
+        r"NORMAL\s+BRANCH))",
         safe_text(text),
         flags=re.IGNORECASE,
     )
 
-    return normalise_spaces(match.group(1)) if match else ""
+    if match:
+        return normalise_spaces(match.group(1))
+
+    return ""
 
 
 def extract_anticipate_rank(text: str) -> str:
+    """Extract rank of first anticipated variant."""
     match = re.search(
         r"RANK\s+OF\s+FIRST\s+ANTICIPATED\s+VARIANT\s*:\s*(\d+)",
         safe_text(text),
@@ -473,11 +363,17 @@ def extract_anticipate_rank(text: str) -> str:
 
 
 def extract_location_name(text: str) -> str:
+    """
+    Extract useful location labels.
+
+    The entire event/remarks source text remains available separately.
+    """
     patterns = [
-        r"(?:SIGNAL|SIG)\s*(?:NO\.?)?\s*[:=]?\s*([A-Z0-9/_-]+)",
-        r"(?:TRACK\s*CIRCUIT|T/C)\s*(?:NO\.?)?\s*[:=]?\s*([A-Z0-9/_-]+)",
-        r"(?:POINT|TURNOUT)\s*(?:NO\.?)?\s*[:=]?\s*([A-Z0-9/_-]+)",
         r"(?:RETURN\s+CHANNEL)\s*(?:NUMBER)?\s*[:=]?\s*([A-Z0-9/_-]+)",
+        r"(?:SIGNAL|SIG)\s*(?:NO\.?|NUMBER)?\s*[:=]?\s*([A-Z0-9/_-]+)",
+        r"(?:TRACK\s*CIRCUIT|T/C)\s*(?:NO\.?|NUMBER)?\s*[:=]?\s*([A-Z0-9/_-]+)",
+        r"(?:POINT|TURNOUT)\s*(?:NO\.?|NUMBER)?\s*[:=]?\s*([A-Z0-9/_-]+)",
+        r"(?:PSR)\s*([0-9]+(?:\s*KPH)?)",
     ]
 
     for pattern in patterns:
@@ -489,61 +385,86 @@ def extract_location_name(text: str) -> str:
     return ""
 
 
-def classify_event_name(text: str) -> str:
-    upper = safe_text(text).upper()
+def infer_event_name(source_text: str) -> str:
+    """
+    Produce a descriptive event label from source text.
 
-    options = [
+    This is not a test mapping. It only helps users review rows.
+    """
+    text = safe_text(source_text)
+    upper = text.upper()
+
+    labels = [
+        ("SPACING STOPPING POINT", "Spacing Stopping Point"),
+        ("SPECIAL STOPPING POINT", "Special Stopping Point"),
+        ("PERMANENT SPEED RESTRICTION", "Permanent Speed Restriction"),
+        ("RETURN CHANNEL", "Return Channel"),
         ("MOVING TRAIN INITIALISATION", "Moving Train Initialisation"),
         ("MOVING TRAIN INITIALIZATION", "Moving Train Initialisation"),
         ("STATIONARY TRAIN INITIALISATION", "Stationary Train Initialisation"),
-        ("SPACING STOPPING POINT", "Spacing Stopping Point"),
-        ("SPECIAL STOPPING POINT", "Special Stopping Point"),
-        ("RETURN CHANNEL", "Return Channel"),
-        ("EMERGENCY ZONE", "Emergency Stop Zone"),
+        ("STATIONARY TRAIN INITIALIZATION", "Stationary Train Initialisation"),
+        ("EMERGENCY ZONE", "Emergency Zone"),
         ("CHANGE OF END", "Change of End"),
-        ("STATION CHARACTERISTICS", "Station Stopping Point"),
-        ("END OF SHUNT", "End of Shunt"),
-        ("END OF SACEM", "End of SACEM"),
-        ("DIVERGENCE", "Divergence"),
         ("CONVERGENCE", "Convergence"),
+        ("DIVERGENCE", "Divergence"),
+        ("INTERMEDIATE LINK", "Intermediate Link"),
+        ("CHAINED END", "Chained End"),
+        ("SIMPLE END", "Simple End"),
+        ("END OF SACEM", "End of SACEM"),
+        ("BEACON TYPE", "Beacon"),
+        ("BEACON", "Beacon"),
     ]
 
-    for phrase, name in options:
+    for phrase, label in labels:
         if phrase in upper:
-            return name
+            return label
+
+    # Do not make test applicability assumptions.
+    return "Subdivision Event"
+
+
+def extract_branch_from_source(
+    source_text: str,
+) -> str:
+    """
+    Extract the last branch/reference-like value from a source line.
+
+    Supports:
+        14-04-1-0
+        14 04 1 0
+    """
+    hyphen_matches = re.findall(
+        r"\b\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,3}\b",
+        source_text,
+    )
+
+    if hyphen_matches:
+        return normalise_branch(hyphen_matches[-1])
+
+    spaced_matches = re.findall(
+        r"\b\d{1,2}\s+\d{1,2}\s+\d{1,2}\s+\d{1,3}\b",
+        source_text,
+    )
+
+    if spaced_matches:
+        return normalise_branch(spaced_matches[-1])
 
     return ""
 
 
-def looks_like_subdivision_page(page_text: str) -> bool:
-    text = page_text.upper()
-
-    return any(
-        phrase in text
-        for phrase in [
-            "SINGULARITIES",
-            "TEST ABS",
-            "INTER SINGUL",
-            "SUB SECTION",
-            "SUB-SECTION",
-            "UP TRACK NORMAL DIRECTION",
-            "DN TRACK NORMAL DIRECTION",
-        ]
-    )
-
-
-def extract_events_from_text(
+def parse_subdivision_page(
     page_text: str,
     page_number: int,
-    metadata: Dict[str, str],
 ) -> List[Dict[str, Any]]:
     """
-    Safe line-based extraction fallback.
+    Parse selectable text from a subdivision page.
 
-    It intentionally does not assume PDF table cells are perfect.
-    It searches for K.P. values and associates surrounding text.
+    The source PDF table format is common across stations:
+      N | Test Abs. | Inter singularity | KP | Code | Remarks | Name | ...
+
+    Parsing does not depend on station number, section number or branch.
     """
-    output: List[Dict[str, Any]] = []
+    metadata = extract_page_metadata(page_text)
 
     lines = [
         normalise_spaces(line)
@@ -551,319 +472,169 @@ def extract_events_from_text(
         if normalise_spaces(line)
     ]
 
+    output: List[Dict[str, Any]] = []
+
     current_subsection = ""
     current_branch = ""
 
-    kp_pattern = re.compile(
-        r"(?:\bK\.?\s*P\.?\b|INSTALLATION\s+KP)"
-        r"\s*[:=]?\s*(-?\d{1,7}(?:[.,]\d{1,3})?)",
-        re.IGNORECASE,
+    row_pattern = re.compile(
+        r"^\s*(\d{1,3})\s+"
+        r"(?:!\s+)?"
+        r"(?:(-?\d{1,7}(?:[.,]\d{1,3})?)\s*m\s+)?"
+        r"(-?\d{1,7}(?:[.,]\d{1,3})?)\s+"
+        r"(\d+(?:_\d+)?)\s+"
+        r"(.*)$",
+        flags=re.IGNORECASE,
     )
 
-    loose_kp_pattern = re.compile(
-        r"\b(-?\d{1,5}[.,]\d{1,3})\b"
+    subsection_pattern = re.compile(
+        r"SUB\s*-?\s*SECTION\s*:\s*"
+        r"(\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,2})",
+        flags=re.IGNORECASE,
     )
 
     for line_index, line in enumerate(lines):
-        subsection_match = re.search(
-            r"SUB\s*-?\s*SECTION\s*:\s*"
-            r"(\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,2})",
-            line,
-            flags=re.IGNORECASE,
-        )
+        subsection_match = subsection_pattern.search(line)
 
         if subsection_match:
-            current_subsection = subsection_match.group(1).replace(" ", "")
-            current_branch = f"{current_subsection}-0"
+            current_subsection = (
+                subsection_match.group(1)
+                .replace(" ", "")
+            )
 
-        branch_match = re.search(
-            r"\b\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,3}\b",
-            line,
-        )
+        row_match = row_pattern.match(line)
 
-        if branch_match:
-            current_branch = normalise_branch(branch_match.group(0))
-
-        kp_match = kp_pattern.search(line)
-
-        # Some PDF extraction formats contain KP values without "KP".
-        if not kp_match and (
-            "BEACON" in line.upper()
-            or "STOPPING" in line.upper()
-            or "VARIANT" in line.upper()
-            or "RETURN CHANNEL" in line.upper()
-            or "STATION" in line.upper()
-            or "PSR" in line.upper()
-        ):
-            kp_match = loose_kp_pattern.search(line)
-
-        if not kp_match:
+        if not row_match:
             continue
 
-        kp = to_float(kp_match.group(1))
+        row_number = safe_text(row_match.group(1))
+        inter_singularity = to_float(row_match.group(2))
+        abscissa = to_float(row_match.group(3))
+        code = safe_text(row_match.group(4))
+        remaining_text = normalise_spaces(row_match.group(5))
 
-        if kp is None:
+        if abscissa is None:
             continue
 
-        context = " ".join(
-            lines[max(0, line_index - 2):min(len(lines), line_index + 3)]
-        )
-
-        sector, section, subsection = branch_parts(current_branch)
-
-        output.append(
-            {
-                "sector": sector or metadata["sector"],
-                "section": section or metadata["section"],
-                "subsection": subsection or current_subsection,
-                "branch": current_branch,
-                "direction": metadata["direction"],
-                "abscissa_m": kp,
-                "inter_singularity_m": None,
-                "code": "",
-                "event_name": classify_event_name(context),
-                "location_name": extract_location_name(context),
-                "participate_variant": extract_associated_variant(context),
-                "anticipate_variant": "",
-                "anticipate_rank": extract_anticipate_rank(context),
-                "anticipate_distance_m": None,
-                "anticipate_abscissa_m": None,
-                "source_page": page_number,
-                "source_evidence": context[:1200],
-                "remarks": context[:1200],
-            }
-        )
-
-    return output
-
-
-def extract_events_from_table(
-    table: List[List[Any]],
-    page_number: int,
-    metadata: Dict[str, str],
-) -> List[Dict[str, Any]]:
-    """
-    Extract records from table output where pdfplumber finds grid cells.
-
-    The function is deliberately defensive. If a page has unexpected
-    merged cells it returns no rows rather than failing the app.
-    """
-    output: List[Dict[str, Any]] = []
-
-    if not table:
-        return output
-
-    current_subsection = ""
-    current_branch = ""
-
-    for raw_row in table:
-        if not raw_row:
+        # Exclude obvious page labels, element numbers and corrupted records.
+        if abscissa < -10000 or abscissa > 100000:
             continue
 
-        cells = [
-            normalise_spaces(cell)
-            for cell in raw_row
-        ]
-
-        combined = normalise_spaces(" ".join(cells))
-
-        if not combined:
-            continue
-
-        subsection_match = re.search(
-            r"SUB\s*-?\s*SECTION\s*:\s*"
-            r"(\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,2})",
-            combined,
-            flags=re.IGNORECASE,
-        )
-
-        if subsection_match:
-            current_subsection = subsection_match.group(1).replace(" ", "")
-            current_branch = f"{current_subsection}-0"
-
-        branch_match = re.search(
-            r"\b\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,3}\b",
-            combined,
-        )
-
-        if branch_match:
-            current_branch = normalise_branch(branch_match.group(0))
-
-        # In the standard drawing KP is usually one of the early numeric cells.
-        possible_numbers = []
-
-        for cell in cells[:8]:
-            value = to_float(cell)
-
-            if value is not None:
-                possible_numbers.append(value)
-
-        if not possible_numbers:
-            continue
-
-        # Typical KP is generally the largest number in left-side cells.
-        kp = max(possible_numbers)
-
-        # Ignore row numbers, element counts and clearly implausible values.
-        if kp < -1000 or kp > 100000:
-            continue
-
-        event_name = classify_event_name(combined)
-
-        if not event_name and not any(
-            keyword in combined.upper()
-            for keyword in [
-                "BEACON",
-                "VARIANT",
-                "PSR",
-                "FIXED CHARACTERISTICS",
-                "COMPENSATED",
+        source_context = " ".join(
+            lines[
+                max(0, line_index - 1):
+                min(len(lines), line_index + 2)
             ]
-        ):
+        )
+
+        combined_text = normalise_spaces(
+            f"{line} {source_context}"
+        )
+
+        branch = extract_branch_from_source(combined_text)
+
+        if not branch and current_subsection:
+            branch = f"{current_subsection}-0"
+
+        sector, section, subsection = branch_parts(branch)
+
+        if not sector:
+            sector = metadata["sector"]
+
+        if not section:
+            section = metadata["section"]
+
+        if not subsection:
+            subsection = current_subsection
+
+        is_subsection_heading = (
+            "SUB SECTION" in combined_text.upper()
+            and "HEADING" in combined_text.upper()
+        )
+
+        if is_subsection_heading:
             continue
 
-        sector, section, subsection = branch_parts(current_branch)
+        event_name = infer_event_name(combined_text)
 
         output.append(
             {
-                "sector": sector or metadata["sector"],
-                "section": section or metadata["section"],
-                "subsection": subsection or current_subsection,
-                "branch": current_branch,
+                "row_number": row_number,
+                "sector": sector,
+                "section": section,
+                "subsection": subsection,
+                "branch": branch,
                 "direction": metadata["direction"],
-                "abscissa_m": kp,
-                "inter_singularity_m": None,
-                "code": "",
+                "abscissa_m": abscissa,
+                "inter_singularity_m": inter_singularity,
+                "code": code,
                 "event_name": event_name,
-                "location_name": extract_location_name(combined),
-                "participate_variant": extract_associated_variant(combined),
-                "anticipate_variant": "",
-                "anticipate_rank": extract_anticipate_rank(combined),
-                "anticipate_distance_m": None,
-                "anticipate_abscissa_m": None,
+                "location_name": extract_location_name(combined_text),
+                "participate_variant": extract_associated_variant(
+                    combined_text
+                ),
+                "anticipate_rank": extract_anticipate_rank(combined_text),
                 "source_page": page_number,
-                "source_evidence": combined[:1200],
-                "remarks": combined[:1200],
+                "source_evidence": combined_text[
+                    :MAX_SOURCE_EVIDENCE_LENGTH
+                ],
+                "remarks": remaining_text[
+                    :MAX_SOURCE_EVIDENCE_LENGTH
+                ],
             }
         )
 
     return output
 
 
-def extract_pdf_content(
-    pdf_bytes: bytes,
+def build_events_from_pages(
+    page_texts: List[str],
     progress_bar: Any,
     progress_message: Any,
-) -> Tuple[pd.DataFrame, List[str], List[str]]:
+) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Extract pages safely.
+    Build extracted source-event register from cached PDF page text.
 
-    A single damaged, rotated or complex page will not crash the application.
+    Page text extraction is cached separately. This parsing stage is light.
     """
-    try:
-        import pdfplumber
-    except ImportError as exc:
-        raise RuntimeError(
-            "Missing dependency: pdfplumber. "
-            "Add pdfplumber>=0.11.0 to requirements.txt."
-        ) from exc
-
     rows: List[Dict[str, Any]] = []
-    page_texts: List[str] = []
     warnings: List[str] = []
 
-    try:
-        pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
-    except Exception as exc:
-        raise RuntimeError(f"Cannot open PDF: {exc}") from exc
+    total_pages = len(page_texts)
 
-    with pdf:
-        total_pages = len(pdf.pages)
+    for page_number, page_text in enumerate(page_texts, start=1):
+        progress_message.info(
+            f"Analysing page {page_number} of {total_pages}..."
+        )
 
-        if total_pages == 0:
-            raise RuntimeError("Uploaded PDF has no pages.")
+        progress_bar.progress(
+            int(page_number / total_pages * 100)
+        )
 
-        for page_number, page in enumerate(pdf.pages, start=1):
-            progress_message.info(
-                f"Reading page {page_number} of {total_pages}..."
-            )
+        if not looks_like_subdivision_page(page_text):
+            continue
 
-            try:
-                page_text = page.extract_text() or ""
-            except Exception as exc:
-                page_text = ""
-                warnings.append(
-                    f"Page {page_number}: text extraction failed: {exc}"
+        try:
+            rows.extend(
+                parse_subdivision_page(
+                    page_text=page_text,
+                    page_number=page_number,
                 )
-
-            page_texts.append(page_text)
-
-            progress_bar.progress(
-                int(page_number / total_pages * 100)
             )
-
-            if not looks_like_subdivision_page(page_text):
-                continue
-
-            metadata = extract_page_metadata(page_text)
-            page_rows: List[Dict[str, Any]] = []
-
-            try:
-                tables = page.extract_tables(
-                    table_settings={
-                        "vertical_strategy": "lines",
-                        "horizontal_strategy": "lines",
-                        "intersection_tolerance": 5,
-                        "snap_tolerance": 4,
-                        "join_tolerance": 4,
-                    }
-                ) or []
-
-                for table in tables:
-                    try:
-                        page_rows.extend(
-                            extract_events_from_table(
-                                table=table,
-                                page_number=page_number,
-                                metadata=metadata,
-                            )
-                        )
-                    except Exception as exc:
-                        warnings.append(
-                            f"Page {page_number}: table row extraction "
-                            f"skipped: {exc}"
-                        )
-
-            except Exception as exc:
-                warnings.append(
-                    f"Page {page_number}: table extraction skipped: {exc}"
-                )
-
-            # Text fallback is always attempted if no useful table rows.
-            if not page_rows:
-                try:
-                    page_rows = extract_events_from_text(
-                        page_text=page_text,
-                        page_number=page_number,
-                        metadata=metadata,
-                    )
-                except Exception as exc:
-                    warnings.append(
-                        f"Page {page_number}: text fallback skipped: {exc}"
-                    )
-
-            rows.extend(page_rows)
+        except Exception as exc:
+            warnings.append(
+                f"Page {page_number} was skipped during parsing: {exc}"
+            )
 
     progress_bar.progress(100)
 
-    dataframe = pd.DataFrame(rows)
-
-    if dataframe.empty:
+    if not rows:
         return (
             pd.DataFrame(columns=EXTRACTED_EVENT_COLUMNS),
-            page_texts,
             warnings,
         )
+
+    dataframe = pd.DataFrame(rows)
 
     for column in EXTRACTED_EVENT_COLUMNS:
         if column not in dataframe.columns:
@@ -874,68 +645,240 @@ def extract_pdf_content(
         errors="coerce",
     )
 
-    dataframe = dataframe.dropna(subset=["abscissa_m"]).copy()
+    dataframe = dataframe.dropna(
+        subset=["abscissa_m"]
+    ).copy()
 
     dataframe = dataframe.drop_duplicates(
         subset=[
             "source_page",
+            "row_number",
             "abscissa_m",
-            "event_name",
             "source_evidence",
         ]
     )
 
     dataframe = dataframe[
         EXTRACTED_EVENT_COLUMNS
-    ].reset_index(drop=True)
+    ].sort_values(
+        by=["sector", "section", "branch", "abscissa_m"],
+        na_position="last",
+    ).reset_index(drop=True)
 
-    return dataframe, page_texts, warnings
+    return dataframe, warnings
 
 
 # =============================================================================
-# TEST REGISTER
+# PROCEDURE DOCX EXTRACTION
+#
+# The uploaded procedure defines test codes, test IDs, names and checklist.
+# There is no LS01-LS14 Python dictionary.
 # =============================================================================
 
-def identify_test_codes(text: str) -> List[str]:
-    matched: List[str] = []
+@st.cache_data(show_spinner=False, max_entries=4)
+def extract_procedure_library_cached(
+    docx_bytes: bytes,
+) -> pd.DataFrame:
+    """
+    Extract available ATC-TNC-TRA-LSxx tests from a procedure DOCX.
 
-    for test_code, rule in TEST_RULES.items():
-        for pattern in rule["patterns"]:
-            if re.search(pattern, safe_text(text), re.IGNORECASE):
-                matched.append(test_code)
+    Test definitions are read from the uploaded procedure.
+    """
+    try:
+        from docx import Document
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing dependency 'python-docx'. "
+            "Add python-docx>=1.1.0 to requirements.txt."
+        ) from exc
+
+    document = Document(io.BytesIO(docx_bytes))
+
+    paragraphs = [
+        normalise_spaces(paragraph.text)
+        for paragraph in document.paragraphs
+        if normalise_spaces(paragraph.text)
+    ]
+
+    rows: List[Dict[str, Any]] = []
+
+    test_pattern = re.compile(
+        r"(ATC\s*[- ]?\s*TNC\s*[- ]?\s*TRA\s*[- ]?"
+        r"LS\s*(\d{2}))",
+        flags=re.IGNORECASE,
+    )
+
+    for index, text in enumerate(paragraphs):
+        matches = list(test_pattern.finditer(text))
+
+        if not matches:
+            continue
+
+        for match in matches:
+            raw_test_id = match.group(1)
+            test_code = f"LS{match.group(2)}"
+
+            test_id = re.sub(
+                r"\s+",
+                "-",
+                raw_test_id.upper(),
+            )
+
+            test_id = test_id.replace("--", "-")
+
+            test_name = re.sub(
+                r"\(?\s*ID\s*:?\s*"
+                r"ATC\s*[- ]?\s*TNC\s*[- ]?\s*TRA\s*[- ]?"
+                r"LS\s*\d{2}\s*\)?",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            ).strip(" -–:")
+
+            if len(test_name) < 4 and index > 0:
+                test_name = paragraphs[index - 1]
+
+            rows.append(
+                {
+                    "test_code": test_code,
+                    "test_id": test_id,
+                    "test_name": test_name,
+                    "short_name": test_name,
+                    "needs_abscissa": False,
+                    "checklist": "",
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame(columns=TEST_LIBRARY_COLUMNS)
+
+    library = pd.DataFrame(rows)
+
+    library = library.drop_duplicates(
+        subset=["test_code"]
+    ).sort_values(
+        by="test_code"
+    ).reset_index(drop=True)
+
+    # Extract procedure text blocks between one test heading and next test heading.
+    for row_index in library.index:
+        test_code = safe_text(library.at[row_index, "test_code"])
+
+        start_index = None
+
+        for index, text in enumerate(paragraphs):
+            if test_code.upper() in text.upper():
+                start_index = index
                 break
 
-    return list(dict.fromkeys(matched))
+        if start_index is None:
+            continue
+
+        block: List[str] = []
+
+        for text in paragraphs[start_index + 1:]:
+            other_match = test_pattern.search(text)
+
+            if other_match:
+                other_code = f"LS{other_match.group(2)}"
+
+                if other_code != test_code:
+                    break
+
+            if len(text) >= 8:
+                block.append(text)
+
+            if len(block) >= MAX_CHECKLIST_ITEMS:
+                break
+
+        # Stored pipe separated. User may edit this in UI.
+        checklist_items = [
+            item
+            for item in block
+            if not item.upper().startswith("PURPOSE")
+            and not item.upper().startswith("ACCEPTANCE")
+        ]
+
+        library.at[row_index, "checklist"] = "|".join(
+            checklist_items[:MAX_CHECKLIST_ITEMS]
+        )
+
+    for column in TEST_LIBRARY_COLUMNS:
+        if column not in library.columns:
+            library[column] = ""
+
+    return library[TEST_LIBRARY_COLUMNS]
 
 
-def calculate_candidate_anticipate_abscissa(
-    abscissa_m: Optional[float],
-    anticipation_distance_m: Optional[float],
-    direction: str,
-) -> Optional[float]:
-    if abscissa_m is None or anticipation_distance_m is None:
-        return None
+def apply_test_library_to_register(
+    register: pd.DataFrame,
+    test_library: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Update Test ID, Name and Abscissa Requirement after user selects test code.
+    """
+    output = register.copy()
 
-    if safe_text(direction).lower().startswith("up"):
-        return abscissa_m + anticipation_distance_m
+    lookup = (
+        test_library
+        .fillna("")
+        .set_index("test_code")
+        .to_dict("index")
+    )
 
-    if safe_text(direction).lower().startswith("down"):
-        return abscissa_m - anticipation_distance_m
+    for index in output.index:
+        test_code = safe_text(output.at[index, "test_code"])
 
-    return None
+        if test_code not in lookup:
+            output.at[index, "test_id"] = ""
+            output.at[index, "test_name"] = ""
+            output.at[index, "needs_abscissa"] = False
+            continue
+
+        details = lookup[test_code]
+
+        output.at[index, "test_id"] = safe_text(
+            details.get("test_id")
+        )
+
+        output.at[index, "test_name"] = safe_text(
+            details.get("test_name")
+        )
+
+        output.at[index, "needs_abscissa"] = bool(
+            details.get("needs_abscissa")
+        )
+
+    return output
 
 
-def create_test_register(
+# =============================================================================
+# REGISTER CREATION
+#
+# No automatic test assignment. The engineer selects the test from procedure.
+# =============================================================================
+
+def create_draft_register(
     extracted_events: pd.DataFrame,
     start_kp: float,
     end_kp: float,
     selected_branch: str,
 ) -> pd.DataFrame:
-    lower = min(start_kp, end_kp)
-    upper = max(start_kp, end_kp)
+    """
+    Create source-event review register for the selected KP range.
+
+    Applicable Test is intentionally blank.
+    Engineering user selects applicable test code after review.
+    """
+    lower_kp = min(start_kp, end_kp)
+    upper_kp = max(start_kp, end_kp)
 
     selected = extracted_events[
-        extracted_events["abscissa_m"].between(lower, upper)
+        extracted_events["abscissa_m"].between(
+            lower_kp,
+            upper_kp,
+            inclusive="both",
+        )
     ].copy()
 
     if selected_branch != "All branches":
@@ -946,99 +889,59 @@ def create_test_register(
     rows: List[Dict[str, Any]] = []
 
     for _, event in selected.iterrows():
-        source_text = " ".join(
-            [
-                safe_text(event.get("event_name")),
-                safe_text(event.get("remarks")),
-                safe_text(event.get("source_evidence")),
-                safe_text(event.get("location_name")),
-            ]
+        rows.append(
+            {
+                "test_code": "",
+                "test_id": "",
+                "test_name": "",
+                "needs_abscissa": False,
+                "sector": safe_text(event.get("sector")),
+                "section": safe_text(event.get("section")),
+                "subsection": safe_text(event.get("subsection")),
+                "branch": safe_text(event.get("branch")),
+                "direction": safe_text(event.get("direction")),
+                "abscissa_m": event.get("abscissa_m"),
+                "participate_variant": safe_text(
+                    event.get("participate_variant")
+                ),
+                "anticipate_variant": "",
+                "anticipate_rank": safe_text(
+                    event.get("anticipate_rank")
+                ),
+                "anticipate_distance_m": None,
+                "anticipate_abscissa_m": None,
+                "event_name": safe_text(event.get("event_name")),
+                "location_name": safe_text(
+                    event.get("location_name")
+                ),
+                "source_page": safe_text(event.get("source_page")),
+                "source_evidence": safe_text(
+                    event.get("source_evidence")
+                ),
+                "review_status": "To be reviewed",
+                "remarks": (
+                    "Select applicable test from procedure. Verify branch, "
+                    "abscissa, participating variant, anticipated variant "
+                    "and project test scope."
+                ),
+            }
         )
 
-        test_codes = identify_test_codes(source_text)
-
-        for test_code in test_codes:
-            rule = TEST_RULES[test_code]
-
-            abscissa = (
-                float(event["abscissa_m"])
-                if rule["needs_abscissa"]
-                and pd.notna(event["abscissa_m"])
-                else None
-            )
-
-            anticipated = calculate_candidate_anticipate_abscissa(
-                abscissa_m=abscissa,
-                anticipation_distance_m=to_float(
-                    event.get("anticipate_distance_m")
-                ),
-                direction=safe_text(event.get("direction")),
-            )
-
-            rows.append(
-                {
-                    "test_code": test_code,
-                    "test_id": rule["id"],
-                    "test_name": rule["name"],
-                    "needs_abscissa": rule["needs_abscissa"],
-                    "sector": safe_text(event.get("sector")),
-                    "section": safe_text(event.get("section")),
-                    "subsection": safe_text(event.get("subsection")),
-                    "branch": safe_text(event.get("branch")),
-                    "direction": safe_text(event.get("direction")),
-                    "abscissa_m": abscissa,
-                    "participate_variant": safe_text(
-                        event.get("participate_variant")
-                    ),
-                    "anticipate_variant": safe_text(
-                        event.get("anticipate_variant")
-                    ),
-                    "anticipate_rank": safe_text(
-                        event.get("anticipate_rank")
-                    ),
-                    "anticipate_distance_m": event.get(
-                        "anticipate_distance_m"
-                    ),
-                    "anticipate_abscissa_m": anticipated,
-                    "event_name": safe_text(event.get("event_name")),
-                    "location_name": safe_text(event.get("location_name")),
-                    "source_page": safe_text(event.get("source_page")),
-                    "source_evidence": safe_text(
-                        event.get("source_evidence")
-                    ),
-                    "review_status": "To be reviewed",
-                    "remarks": (
-                        "Automatically extracted. Verify source event, "
-                        "branch, variant, anticipation and abscissa."
-                    ),
-                }
-            )
-
-    if not rows:
-        return pd.DataFrame(columns=REGISTER_COLUMNS)
-
-    register = pd.DataFrame(rows)
-
-    return register.drop_duplicates(
-        subset=[
-            "test_code",
-            "branch",
-            "abscissa_m",
-            "source_page",
-            "event_name",
-        ]
-    ).sort_values(
-        by=["branch", "abscissa_m", "test_code"],
-        na_position="last",
-    ).reset_index(drop=True)
+    return pd.DataFrame(rows, columns=REGISTER_COLUMNS)
 
 
 # =============================================================================
-# DOCX GENERATION
+# DOCX TEST SHEET GENERATION
 # =============================================================================
 
-def set_cell_text(cell: Any, text: Any, bold: bool = False) -> None:
+def set_cell_text(
+    cell: Any,
+    text: Any,
+    bold: bool = False,
+) -> None:
+    """Set DOCX table cell text."""
     cell.text = ""
+
     paragraph = cell.paragraphs[0]
     run = paragraph.add_run(safe_text(text))
     run.bold = bold
@@ -1049,17 +952,41 @@ def add_docx_row(
     values: List[Any],
     bold: bool = False,
 ) -> None:
+    """Add row to DOCX table."""
     cells = table.add_row().cells
 
     for index, value in enumerate(values):
         set_cell_text(cells[index], value, bold)
 
 
+def get_checklist_for_test(
+    test_code: str,
+    test_library: pd.DataFrame,
+) -> List[str]:
+    """Get checklist text from the user-uploaded procedure DOCX."""
+    selected = test_library[
+        test_library["test_code"].astype(str).eq(test_code)
+    ]
+
+    if selected.empty:
+        return []
+
+    checklist_text = safe_text(selected.iloc[0].get("checklist"))
+
+    return split_checklist(checklist_text)
+
+
 def create_docx_test_sheet(
     row: pd.Series,
     project_info: Dict[str, str],
+    test_library: pd.DataFrame,
     sheet_number: str,
 ) -> bytes:
+    """
+    Create a generic Appendix-A-style DOCX test sheet.
+
+    Test name and checklist are taken from user-uploaded procedure DOCX.
+    """
     try:
         from docx import Document
         from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -1070,11 +997,21 @@ def create_docx_test_sheet(
         ) from exc
 
     test_code = safe_text(row.get("test_code"))
+    test_name = safe_text(row.get("test_name"))
+    test_id = safe_text(row.get("test_id"))
 
-    if test_code not in TEST_RULES:
-        raise ValueError(f"Unknown test code: {test_code}")
+    checklist = get_checklist_for_test(
+        test_code=test_code,
+        test_library=test_library,
+    )
 
-    rule = TEST_RULES[test_code]
+    if not checklist:
+        checklist = [
+            "Confirm approved engineering source and project scope.",
+            "Confirm participating variant condition.",
+            "Record OMAP / wayside / log evidence.",
+            "Confirm acceptance criterion in approved procedure.",
+        ]
 
     document = Document()
 
@@ -1087,25 +1024,29 @@ def create_docx_test_sheet(
     document.styles["Normal"].font.name = "Arial"
     document.styles["Normal"].font.size = Pt(8)
 
-    heading = document.add_paragraph()
-    heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    header = document.add_paragraph()
+    header.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    logo = heading.add_run("ALSTOM\n")
+    logo = header.add_run("ALSTOM\n")
     logo.bold = True
     logo.font.size = Pt(16)
 
-    procedure = heading.add_run(project_info["procedure_title"])
-    procedure.bold = True
-    procedure.font.size = Pt(10)
+    title_heading = header.add_run(
+        project_info["procedure_title"]
+    )
+    title_heading.bold = True
+    title_heading.font.size = Pt(10)
 
     title = document.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    test_title = title.add_run(
-        f"{rule['name']} ({rule['id']})"
+    title_run = title.add_run(
+        f"{test_name} ({test_id})"
     )
-    test_title.bold = True
-    test_title.font.size = Pt(12)
+    title_run.bold = True
+    title_run.font.size = Pt(12)
+
+    document.add_paragraph()
 
     info_table = document.add_table(rows=0, cols=6)
     info_table.style = "Table Grid"
@@ -1162,14 +1103,16 @@ def create_docx_test_sheet(
         ],
     )
 
+    needs_abscissa = bool(row.get("needs_abscissa"))
+
     add_docx_row(
         location_table,
         [
             "Abscissa:",
             (
                 format_distance(row.get("abscissa_m"))
-                if rule["needs_abscissa"]
-                else "Not required for this test"
+                if needs_abscissa
+                else "Not required / verify procedure"
             ),
             "Location / Asset:",
             safe_text(row.get("location_name")),
@@ -1191,16 +1134,18 @@ def create_docx_test_sheet(
         [
             "Anticipate Rank:",
             safe_text(row.get("anticipate_rank")),
-            "Candidate Anticipate Abs.:",
-            format_distance(row.get("anticipate_abscissa_m"))
-            or "To be reviewed",
+            "Anticipate Abscissa:",
+            (
+                format_distance(row.get("anticipate_abscissa_m"))
+                or "To be reviewed"
+            ),
         ],
     )
 
     document.add_paragraph()
 
-    test_table = document.add_table(rows=1, cols=4)
-    test_table.style = "Table Grid"
+    record_table = document.add_table(rows=1, cols=4)
+    record_table.style = "Table Grid"
 
     headers = [
         "Check / Test Action",
@@ -1209,44 +1154,50 @@ def create_docx_test_sheet(
         "OK?",
     ]
 
-    for index, text in enumerate(headers):
-        set_cell_text(test_table.rows[0].cells[index], text, True)
+    for index, header_text in enumerate(headers):
+        set_cell_text(
+            record_table.rows[0].cells[index],
+            header_text,
+            bold=True,
+        )
 
-    for action, expected, unit in rule["checks"]:
+    for checklist_item in checklist:
         add_docx_row(
-            test_table,
+            record_table,
             [
-                action,
-                expected,
-                f"{unit}: ",
+                checklist_item,
+                "As required by approved procedure/design.",
+                "",
                 "☐ Y   ☐ N   ☐ N/A",
             ],
         )
 
     document.add_paragraph()
 
-    comments = document.add_paragraph()
-    comments.add_run("Comments / Engineering Remarks").bold = True
+    notes_heading = document.add_paragraph()
+    notes_heading.add_run(
+        "Comments / Engineering Remarks"
+    ).bold = True
 
-    evidence_table = document.add_table(rows=1, cols=1)
-    evidence_table.style = "Table Grid"
+    notes_table = document.add_table(rows=1, cols=1)
+    notes_table.style = "Table Grid"
 
-    evidence_text = (
+    source_notes = (
         f"Source Page: {safe_text(row.get('source_page'))}\n"
         f"Source Event: {safe_text(row.get('event_name'))}\n"
-        f"Evidence: {safe_text(row.get('source_evidence'))}\n\n"
-        f"Remarks: {safe_text(row.get('remarks'))}"
+        f"Source Evidence: {safe_text(row.get('source_evidence'))}\n\n"
+        f"Engineering Remarks: {safe_text(row.get('remarks'))}"
     )
 
-    set_cell_text(evidence_table.rows[0].cells[0], evidence_text)
+    set_cell_text(notes_table.rows[0].cells[0], source_notes)
 
     document.add_paragraph()
 
-    approval = document.add_table(rows=0, cols=3)
-    approval.style = "Table Grid"
+    approval_table = document.add_table(rows=0, cols=3)
+    approval_table.style = "Table Grid"
 
     add_docx_row(
-        approval,
+        approval_table,
         [
             "The test covered by this Test Sheet is considered:",
             "☐ Passed",
@@ -1254,16 +1205,17 @@ def create_docx_test_sheet(
         ],
     )
 
-    add_docx_row(approval, ["", "Alstom", "MTR"])
-    add_docx_row(approval, ["Name:", "", ""])
-    add_docx_row(approval, ["Signature:", "", ""])
-    add_docx_row(approval, ["Date:", "", ""])
+    add_docx_row(approval_table, ["", "Alstom", "MTR"])
+    add_docx_row(approval_table, ["Name:", "", ""])
+    add_docx_row(approval_table, ["Signature:", "", ""])
+    add_docx_row(approval_table, ["Date:", "", ""])
 
     footer = document.add_paragraph()
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     footer_run = footer.add_run(
-        "UNCONTROLLED WHEN PRINTED – Verify approved project data before use."
+        "UNCONTROLLED WHEN PRINTED – "
+        "Verify approved project-specific data before use."
     )
     footer_run.italic = True
     footer_run.font.size = Pt(7)
@@ -1277,9 +1229,11 @@ def create_docx_test_sheet(
 def create_docx_zip(
     register: pd.DataFrame,
     project_info: Dict[str, str],
+    test_library: pd.DataFrame,
     progress_bar: Any,
     progress_message: Any,
 ) -> bytes:
+    """Generate ZIP containing DOCX test sheets."""
     output = io.BytesIO()
     total = len(register)
 
@@ -1288,20 +1242,24 @@ def create_docx_zip(
         "w",
         zipfile.ZIP_DEFLATED,
     ) as archive:
-        for sequence, (_, row) in enumerate(register.iterrows(), start=1):
+        for sequence, (_, row) in enumerate(
+            register.iterrows(),
+            start=1,
+        ):
+            test_code = safe_text(row.get("test_code"))
+            branch = safe_text(row.get("branch")) or "NO_BRANCH"
+
+            progress_message.info(
+                f"Generating DOCX test sheet {sequence} of {total}: "
+                f"{test_code} / {branch}"
+            )
+
             sheet_number = (
                 f"{project_info['sheet_prefix']}-{sequence:03d}"
             )
 
-            progress_message.info(
-                f"Generating DOCX {sequence} of {total}: "
-                f"{safe_text(row.get('test_code'))}"
-            )
-
             filename = clean_filename(
-                f"{sheet_number}_"
-                f"{safe_text(row.get('test_code'))}_"
-                f"{safe_text(row.get('branch'))}_"
+                f"{sheet_number}_{test_code}_{branch}_"
                 f"KP_{safe_text(row.get('abscissa_m'))}.docx"
             )
 
@@ -1310,13 +1268,17 @@ def create_docx_zip(
                 create_docx_test_sheet(
                     row=row,
                     project_info=project_info,
+                    test_library=test_library,
                     sheet_number=sheet_number,
                 ),
             )
 
-            progress_bar.progress(int(sequence / total * 100))
+            progress_bar.progress(
+                int(sequence / total * 100)
+            )
 
     progress_bar.progress(100)
+
     progress_message.success(
         f"DOCX generation complete: {total} test sheet(s)."
     )
@@ -1331,11 +1293,16 @@ def create_docx_zip(
 def create_excel_bytes(
     register: pd.DataFrame,
     events: pd.DataFrame,
+    test_library: pd.DataFrame,
     project_info: Dict[str, str],
 ) -> bytes:
+    """Create register workbook."""
     output = io.BytesIO()
 
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl",
+    ) as writer:
         cover = pd.DataFrame(
             [
                 ["Procedure Reference", project_info["procedure_reference"]],
@@ -1345,34 +1312,46 @@ def create_excel_bytes(
                 ["ATP Version", project_info["atp_version"]],
                 ["ATO Version", project_info["ato_version"]],
                 ["Generated Date", str(date.today())],
-                ["Generated Test Sheets", len(register)],
+                ["Generated Register Rows", len(register)],
             ],
             columns=["Field", "Value"],
         )
 
         cover.to_excel(writer, sheet_name="Cover", index=False)
         register.to_excel(writer, sheet_name="Test Register", index=False)
-        events.to_excel(writer, sheet_name="Extracted Events", index=False)
+        events.to_excel(
+            writer,
+            sheet_name="Extracted Events",
+            index=False,
+        )
+        test_library.to_excel(
+            writer,
+            sheet_name="Procedure Test Library",
+            index=False,
+        )
 
         for worksheet in writer.book.worksheets:
             worksheet.freeze_panes = "A2"
             worksheet.auto_filter.ref = worksheet.dimensions
 
-            for cells in worksheet.columns:
-                length = max(
+            for column_cells in worksheet.columns:
+                maximum_length = max(
                     len(safe_text(cell.value))
-                    for cell in cells
+                    for cell in column_cells
                 )
 
                 worksheet.column_dimensions[
-                    cells[0].column_letter
-                ].width = min(max(length + 2, 12), 65)
+                    column_cells[0].column_letter
+                ].width = min(
+                    max(maximum_length + 2, 12),
+                    70,
+                )
 
     return output.getvalue()
 
 
 # =============================================================================
-# USER INTERFACE
+# UI STYLES
 # =============================================================================
 
 def render_styles() -> None:
@@ -1386,16 +1365,23 @@ def render_styles() -> None:
             border-radius: 14px;
             margin-bottom: 16px;
         }
+
         .generator-hero h1 {
             color: white !important;
             margin: 0 !important;
         }
+
+        .generator-hero p {
+            color: #EAF4FB !important;
+            margin: 8px 0 0 0 !important;
+        }
+
         .generator-warning {
             background: #FFF7E8;
             border-left: 5px solid #E37400;
-            padding: 14px 16px;
             border-radius: 8px;
-            margin: 12px 0 18px 0;
+            padding: 14px 16px;
+            margin: 10px 0 18px 0;
         }
         </style>
         """,
@@ -1403,10 +1389,15 @@ def render_styles() -> None:
     )
 
 
+# =============================================================================
+# MAIN STREAMLIT TOOL
+# =============================================================================
+
 def render_test_sheet_generator_app() -> None:
     """
-    This function is imported by app.py.
-    Do not add st.set_page_config() in this module.
+    Called by app.py.
+
+    Do not call st.set_page_config() here.
     """
     render_styles()
 
@@ -1415,8 +1406,9 @@ def render_test_sheet_generator_app() -> None:
         <div class="generator-hero">
             <h1>ATC Low-Speed Dynamic Test Sheet Generator</h1>
             <p>
-                Upload SACEM Subdivision PDF, select a KP range, review
-                extracted data and generate DOCX test sheets.
+                Upload a station SACEM Subdivision PDF and the applicable
+                Low-Speed Test Procedure DOCX. Review source data, select
+                applicable tests and generate DOCX test sheets.
             </p>
         </div>
         """,
@@ -1426,44 +1418,51 @@ def render_test_sheet_generator_app() -> None:
     st.markdown(
         """
         <div class="generator-warning">
-            <b>Engineering warning:</b><br>
-            PDF extraction provides draft data only. Confirm branches,
-            variants, anticipated information, abscissae and test
-            applicability against approved project documents before issue.
+            <b>Engineering control:</b><br>
+            This tool extracts draft information only. Test applicability,
+            abscissa, branch, participating variant, anticipated variant,
+            anticipated distance and acceptance criteria must be reviewed
+            against approved project documents before issue.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+    # -------------------------------------------------------------------------
+    # Project information
+    # -------------------------------------------------------------------------
     with st.expander("Project Information", expanded=True):
-        col1, col2, col3 = st.columns(3)
+        project_col1, project_col2, project_col3 = st.columns(3)
 
-        with col1:
+        with project_col1:
             project = st.text_input(
                 "Project / Contract",
                 key="generator_project",
             )
+
             trackside_version = st.text_input(
                 "Trackside Version",
                 key="generator_trackside_version",
             )
 
-        with col2:
+        with project_col2:
             atp_version = st.text_input(
                 "ATP Version",
                 key="generator_atp_version",
             )
+
             ato_version = st.text_input(
                 "ATO Version",
                 key="generator_ato_version",
             )
 
-        with col3:
+        with project_col3:
             procedure_reference = st.text_input(
                 "Procedure Reference",
                 value=PROCEDURE_REFERENCE_DEFAULT,
                 key="generator_procedure_reference",
             )
+
             sheet_prefix = st.text_input(
                 "Test Sheet Prefix",
                 value=PROCEDURE_REFERENCE_DEFAULT,
@@ -1480,47 +1479,165 @@ def render_test_sheet_generator_app() -> None:
         "sheet_prefix": sheet_prefix or PROCEDURE_REFERENCE_DEFAULT,
     }
 
-    st.markdown("## 1. Upload SACEM Subdivision PDF")
+    # -------------------------------------------------------------------------
+    # Uploads
+    # -------------------------------------------------------------------------
+    st.markdown("## 1. Upload Source Documents")
 
-    uploaded_file = st.file_uploader(
-        "Upload approved SACEM Subdivision / Variant Map PDF",
-        type=["pdf"],
-        key="generator_pdf_file",
-    )
+    upload_col1, upload_col2 = st.columns(2)
 
-    if uploaded_file is None:
-        st.info("Upload one PDF to begin.")
+    with upload_col1:
+        subdivision_pdf = st.file_uploader(
+            "Station SACEM Subdivision PDF",
+            type=["pdf"],
+            key="generator_subdivision_pdf",
+            help=(
+                "Upload the station-specific SACEM subdivision / "
+                "variant-map / anticipation PDF."
+            ),
+        )
+
+    with upload_col2:
+        procedure_docx = st.file_uploader(
+            "Low-Speed Dynamic Test Procedure DOCX",
+            type=["docx"],
+            key="generator_procedure_docx",
+            help=(
+                "Upload the applicable C1252-TAC-0274-style procedure. "
+                "Test IDs, names and checklist text are extracted from it."
+            ),
+        )
+
+    if subdivision_pdf is None or procedure_docx is None:
+        st.info(
+            "Upload both the station Subdivision PDF and the applicable "
+            "Low-Speed Dynamic Test Procedure DOCX."
+        )
         return
 
+    pdf_bytes = subdivision_pdf.getvalue()
+    docx_bytes = procedure_docx.getvalue()
+
+    pdf_size_mb = len(pdf_bytes) / (1024 * 1024)
+
+    if pdf_size_mb > MAX_PDF_SIZE_MB:
+        st.error(
+            f"PDF file is {pdf_size_mb:.1f} MB. Maximum supported size "
+            f"for this tool is {MAX_PDF_SIZE_MB} MB. "
+            "Use an optimised/selectable-text PDF."
+        )
+        return
+
+    # -------------------------------------------------------------------------
+    # Procedure library
+    # -------------------------------------------------------------------------
+    try:
+        test_library = extract_procedure_library_cached(docx_bytes)
+    except Exception as exc:
+        st.error(
+            f"Unable to read procedure DOCX: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        st.exception(exc)
+        return
+
+    if test_library.empty:
+        st.error(
+            "No ATC-TNC-TRA-LSxx test definitions were found in the "
+            "uploaded procedure DOCX."
+        )
+        return
+
+    st.markdown("## 2. Review Procedure Test Library")
+
+    st.caption(
+        "Test codes and names are extracted from the uploaded procedure. "
+        "Set 'Needs Abscissa' and edit the checklist as required. "
+        "Use | to separate checklist actions."
+    )
+
+    edited_test_library = st.data_editor(
+        test_library,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        key="generator_test_library_editor",
+        column_config={
+            "needs_abscissa": st.column_config.CheckboxColumn(
+                "Needs Abscissa"
+            ),
+            "checklist": st.column_config.TextColumn(
+                "Checklist - separate actions using |",
+                width="large",
+            ),
+        },
+    )
+
+    test_library = edited_test_library
+
+    # -------------------------------------------------------------------------
+    # PDF extraction
+    # -------------------------------------------------------------------------
+    st.markdown("## 3. Extract Subdivision Events")
+
+    current_pdf_hash = file_hash(pdf_bytes)
+
+    existing_pdf_hash = st.session_state.get(
+        "generator_pdf_hash"
+    )
+
+    pdf_changed = existing_pdf_hash != current_pdf_hash
+
+    if pdf_changed:
+        st.session_state.pop("generator_events", None)
+        st.session_state.pop("generator_event_warnings", None)
+        st.session_state.pop("generator_register", None)
+        st.session_state.pop("generator_docx_zip", None)
+
     if st.button(
-        "🔎 Extract PDF Events",
+        "🔎 Extract Events From PDF",
         type="primary",
         use_container_width=True,
-        key="generator_extract_button",
+        key="generator_extract_events_button",
     ):
         progress_message = st.empty()
         progress_bar = st.progress(0)
 
         try:
-            events, page_texts, warnings = extract_pdf_content(
-                pdf_bytes=uploaded_file.getvalue(),
+            progress_message.info(
+                "Reading selectable text from PDF. "
+                "This is cached after the first extraction."
+            )
+
+            page_texts = extract_pdf_pages_cached(pdf_bytes)
+
+            progress_message.info(
+                f"PDF text loaded from {len(page_texts)} page(s). "
+                "Parsing subdivision event rows..."
+            )
+
+            events, warnings = build_events_from_pages(
+                page_texts=page_texts,
                 progress_bar=progress_bar,
                 progress_message=progress_message,
             )
 
+            st.session_state["generator_pdf_hash"] = current_pdf_hash
             st.session_state["generator_events"] = events
+            st.session_state["generator_event_warnings"] = warnings
             st.session_state["generator_page_count"] = len(page_texts)
-            st.session_state["generator_warnings"] = warnings
             st.session_state.pop("generator_register", None)
             st.session_state.pop("generator_docx_zip", None)
 
             if events.empty:
                 progress_message.warning(
-                    "Extraction completed but no usable event rows were found."
+                    "PDF extraction completed but no usable subdivision "
+                    "event rows were found."
                 )
             else:
                 progress_message.success(
-                    f"Extraction completed: {len(events)} event row(s) found."
+                    f"Extraction completed: {len(events)} event row(s) "
+                    f"found from {len(page_texts)} page(s)."
                 )
 
         except Exception as exc:
@@ -1538,27 +1655,42 @@ def render_test_sheet_generator_app() -> None:
 
     if events.empty:
         st.warning(
-            "Click 'Extract PDF Events'. If extraction fails, the full "
-            "technical detail will be displayed above."
+            "Click 'Extract Events From PDF' to create the source event "
+            "register."
         )
         return
 
-    warnings = st.session_state.get("generator_warnings", [])
+    warnings = st.session_state.get(
+        "generator_event_warnings",
+        [],
+    )
 
     if warnings:
         with st.expander(
             f"Extraction Warnings ({len(warnings)})",
             expanded=False,
         ):
+            st.warning(
+                "Some pages could not be fully interpreted. "
+                "Review extracted source events before creating sheets."
+            )
+
             for warning in warnings:
                 st.write(f"• {warning}")
 
-    with st.expander("Extracted Source Events", expanded=False):
-        st.dataframe(events, use_container_width=True, hide_index=True)
+    with st.expander("Review Extracted Source Events", expanded=False):
+        st.dataframe(
+            events,
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    st.markdown("## 2. Select Test Range")
+    # -------------------------------------------------------------------------
+    # Range selection
+    # -------------------------------------------------------------------------
+    st.markdown("## 4. Select Start and End Point")
 
-    branches = sorted(
+    available_branches = sorted(
         branch
         for branch in events["branch"].dropna().unique()
         if safe_text(branch)
@@ -1566,8 +1698,8 @@ def render_test_sheet_generator_app() -> None:
 
     selected_branch = st.selectbox(
         "Branch Filter",
-        options=["All branches"] + branches,
-        key="generator_branch",
+        options=["All branches"] + available_branches,
+        key="generator_branch_filter",
     )
 
     range_events = events.copy()
@@ -1577,25 +1709,27 @@ def render_test_sheet_generator_app() -> None:
             range_events["branch"].eq(selected_branch)
         ].copy()
 
-    range_events = range_events.dropna(subset=["abscissa_m"]).copy()
+    range_events = range_events.dropna(
+        subset=["abscissa_m"]
+    ).copy()
 
     if range_events.empty:
         st.error(
-            "No valid abscissa values found for this branch selection."
+            "No valid abscissa rows were found for the selected branch."
         )
         return
 
-    min_kp = float(range_events["abscissa_m"].min())
-    max_kp = float(range_events["abscissa_m"].max())
+    minimum_kp = float(range_events["abscissa_m"].min())
+    maximum_kp = float(range_events["abscissa_m"].max())
 
     range_col1, range_col2 = st.columns(2)
 
     with range_col1:
         start_kp = st.number_input(
             "Start KP / Abscissa",
-            min_value=min_kp,
-            max_value=max_kp,
-            value=min_kp,
+            min_value=minimum_kp,
+            max_value=maximum_kp,
+            value=minimum_kp,
             step=0.1,
             format="%.3f",
             key="generator_start_kp",
@@ -1604,9 +1738,9 @@ def render_test_sheet_generator_app() -> None:
     with range_col2:
         end_kp = st.number_input(
             "End KP / Abscissa",
-            min_value=min_kp,
-            max_value=max_kp,
-            value=max_kp,
+            min_value=minimum_kp,
+            max_value=maximum_kp,
+            value=maximum_kp,
             step=0.1,
             format="%.3f",
             key="generator_end_kp",
@@ -1616,9 +1750,9 @@ def render_test_sheet_generator_app() -> None:
         "Create Draft Test Register",
         type="primary",
         use_container_width=True,
-        key="generator_create_register",
+        key="generator_create_register_button",
     ):
-        st.session_state["generator_register"] = create_test_register(
+        st.session_state["generator_register"] = create_draft_register(
             extracted_events=events,
             start_kp=float(start_kp),
             end_kp=float(end_kp),
@@ -1634,11 +1768,26 @@ def render_test_sheet_generator_app() -> None:
 
     if register.empty:
         st.warning(
-            "No test rules matched extracted source events in the selected range."
+            "Create a draft register after selecting the start and end KP."
         )
         return
 
-    st.markdown("## 3. Review Test Register")
+    # -------------------------------------------------------------------------
+    # Register review
+    # -------------------------------------------------------------------------
+    st.markdown("## 5. Review and Assign Applicable Tests")
+
+    st.caption(
+        "Select the applicable test from the procedure library for each "
+        "source event. Delete non-applicable events. Verify all data."
+    )
+
+    available_test_codes = [""] + sorted(
+        test_library["test_code"]
+        .dropna()
+        .astype(str)
+        .tolist()
+    )
 
     reviewed_register = st.data_editor(
         register,
@@ -1647,6 +1796,10 @@ def render_test_sheet_generator_app() -> None:
         num_rows="dynamic",
         key="generator_register_editor",
         column_config={
+            "test_code": st.column_config.SelectboxColumn(
+                "Applicable Test",
+                options=available_test_codes,
+            ),
             "needs_abscissa": st.column_config.CheckboxColumn(
                 "Needs Abscissa"
             ),
@@ -1659,7 +1812,7 @@ def render_test_sheet_generator_app() -> None:
                 format="%.3f",
             ),
             "anticipate_abscissa_m": st.column_config.NumberColumn(
-                "Candidate Anticipated Abscissa (m)",
+                "Anticipated Abscissa (m)",
                 format="%.3f",
             ),
             "review_status": st.column_config.SelectboxColumn(
@@ -1683,36 +1836,68 @@ def render_test_sheet_generator_app() -> None:
         },
     )
 
+    reviewed_register = apply_test_library_to_register(
+        register=reviewed_register,
+        test_library=test_library,
+    )
+
     st.session_state["generator_register"] = reviewed_register
 
-    metric1, metric2, metric3 = st.columns(3)
+    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
 
-    metric1.metric("Draft Test Sheets", len(reviewed_register))
-    metric2.metric(
-        "Rows With Abscissa",
-        int(reviewed_register["abscissa_m"].notna().sum()),
+    metric_col1.metric(
+        "Register Rows",
+        len(reviewed_register),
     )
-    metric3.metric(
-        "Approved Rows",
+
+    metric_col2.metric(
+        "Assigned Tests",
         int(
-            reviewed_register["review_status"].eq(
-                "Approved for generation"
-            ).sum()
+            reviewed_register["test_code"]
+            .astype(str)
+            .str.strip()
+            .ne("")
+            .sum()
         ),
     )
 
-    st.markdown("## 4. Downloads")
+    metric_col3.metric(
+        "Approved Rows",
+        int(
+            reviewed_register["review_status"]
+            .eq("Approved for generation")
+            .sum()
+        ),
+    )
+
+    metric_col4.metric(
+        "Rows With Abscissa",
+        int(
+            reviewed_register["abscissa_m"]
+            .notna()
+            .sum()
+        ),
+    )
+
+    # -------------------------------------------------------------------------
+    # Download output
+    # -------------------------------------------------------------------------
+    st.markdown("## 6. Generate Downloads")
 
     excel_bytes = create_excel_bytes(
         register=reviewed_register,
         events=events,
+        test_library=test_library,
         project_info=project_info,
     )
 
     approved_register = reviewed_register[
-        reviewed_register["review_status"].eq(
-            "Approved for generation"
-        )
+        reviewed_register["test_code"]
+        .astype(str)
+        .str.strip()
+        .ne("")
+        & reviewed_register["review_status"]
+        .eq("Approved for generation")
     ].copy()
 
     download_col1, download_col2, download_col3 = st.columns(3)
@@ -1734,7 +1919,9 @@ def render_test_sheet_generator_app() -> None:
     with download_col2:
         st.download_button(
             "⬇️ Download CSV Register",
-            data=reviewed_register.to_csv(index=False).encode("utf-8"),
+            data=reviewed_register.to_csv(
+                index=False
+            ).encode("utf-8"),
             file_name=clean_filename(
                 f"{project_info['sheet_prefix']}_Test_Register.csv"
             ),
@@ -1749,35 +1936,44 @@ def render_test_sheet_generator_app() -> None:
                 disabled=True,
                 use_container_width=True,
             )
+
             st.caption(
-                "Set one or more rows to 'Approved for generation'."
+                "Assign a test code and set Review Status to "
+                "'Approved for generation'."
             )
+
         else:
             if st.button(
                 "📦 Generate DOCX Test Sheets",
                 type="primary",
                 use_container_width=True,
-                key="generator_create_docx_zip",
+                key="generator_create_docx_button",
             ):
-                docx_message = st.empty()
-                docx_progress = st.progress(0)
+                docx_progress_message = st.empty()
+                docx_progress_bar = st.progress(0)
 
                 try:
-                    st.session_state["generator_docx_zip"] = create_docx_zip(
+                    docx_zip = create_docx_zip(
                         register=approved_register,
                         project_info=project_info,
-                        progress_bar=docx_progress,
-                        progress_message=docx_message,
+                        test_library=test_library,
+                        progress_bar=docx_progress_bar,
+                        progress_message=docx_progress_message,
                     )
+
+                    st.session_state["generator_docx_zip"] = docx_zip
+
                 except Exception as exc:
-                    docx_progress.empty()
-                    docx_message.error(
+                    docx_progress_bar.empty()
+                    docx_progress_message.error(
                         f"DOCX generation failed: "
                         f"{type(exc).__name__}: {exc}"
                     )
                     st.exception(exc)
 
-            docx_zip = st.session_state.get("generator_docx_zip")
+            docx_zip = st.session_state.get(
+                "generator_docx_zip"
+            )
 
             if docx_zip:
                 st.download_button(
@@ -1789,5 +1985,5 @@ def render_test_sheet_generator_app() -> None:
                     ),
                     mime="application/zip",
                     use_container_width=True,
-                    key="generator_download_docx_zip",
+                    key="generator_download_docx_button",
                 )
