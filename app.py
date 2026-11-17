@@ -32,7 +32,7 @@ st.set_page_config(
 )
 
 
-def main():
+def main() -> None:
     st.sidebar.title("Alstom Engineering Tools")
 
     selected_theme = st.sidebar.selectbox(
