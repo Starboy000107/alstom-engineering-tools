@@ -1,4 +1,5 @@
 from __future__ import annotations
+import streamlit.components.v1 as components
 
 import io
 import re
@@ -741,13 +742,20 @@ def build_path_diagram(
     end_branch: str,
 ) -> str:
     if not path:
-        return ""
+        return """
+        <html>
+        <body style="font-family:Arial; padding:20px;">
+            No route path available.
+        </body>
+        </html>
+        """
 
-    width = max(900, len(path) * 170)
+    node_spacing = 180
+    width = max(950, len(path) * node_spacing + 120)
     nodes_html = []
 
     for index, branch in enumerate(path):
-        x = 90 + (index * 155)
+        x = 90 + (index * node_spacing)
 
         if branch == start_branch:
             fill = "#D9F2E6"
@@ -762,13 +770,15 @@ def build_path_diagram(
             stroke = "#0064A6"
             label = "ROUTE"
 
+        safe_branch = branch.replace("&", "&amp;")
+
         nodes_html.append(
             f"""
             <line
-                x1="{x - 60}"
-                y1="118"
-                x2="{x + 60}"
-                y2="118"
+                x1="{x - 72}"
+                y1="130"
+                x2="{x + 72}"
+                y2="130"
                 stroke="{stroke}"
                 stroke-width="7"
                 stroke-linecap="round"
@@ -776,7 +786,7 @@ def build_path_diagram(
 
             <circle
                 cx="{x}"
-                cy="118"
+                cy="130"
                 r="28"
                 fill="{fill}"
                 stroke="{stroke}"
@@ -785,19 +795,21 @@ def build_path_diagram(
 
             <text
                 x="{x}"
-                y="175"
+                y="185"
                 text-anchor="middle"
-                font-size="14"
+                font-family="Arial, sans-serif"
+                font-size="13"
                 fill="#102A43"
                 font-weight="700"
             >
-                {branch}
+                {safe_branch}
             </text>
 
             <text
                 x="{x}"
-                y="198"
+                y="208"
                 text-anchor="middle"
+                font-family="Arial, sans-serif"
                 font-size="11"
                 fill="{stroke}"
                 font-weight="700"
@@ -808,61 +820,82 @@ def build_path_diagram(
         )
 
     return f"""
-    <div style="
-        overflow-x:auto;
-        border:1px solid #D9E2EC;
-        border-radius:16px;
-        padding:12px;
-        background:#FFFFFF;
-    ">
-        <svg
-            width="{width}"
-            height="235"
-            xmlns="http://www.w3.org/2000/svg"
-        >
-            <rect
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {{
+                margin: 0;
+                padding: 0;
+                font-family: Arial, sans-serif;
+                background: transparent;
+            }}
+
+            .diagram-wrapper {{
+                overflow-x: auto;
+                border: 1px solid #D9E2EC;
+                border-radius: 16px;
+                padding: 12px;
+                background: #FFFFFF;
+            }}
+        </style>
+    </head>
+
+    <body>
+        <div class="diagram-wrapper">
+            <svg
                 width="{width}"
-                height="235"
-                rx="14"
-                fill="#F8FBFD"
-            />
-
-            <text
-                x="28"
-                y="38"
-                font-size="20"
-                font-weight="700"
-                fill="#102A43"
+                height="245"
+                viewBox="0 0 {width} 245"
+                xmlns="http://www.w3.org/2000/svg"
             >
-                Selected Train Route
-            </text>
+                <rect
+                    width="{width}"
+                    height="245"
+                    rx="14"
+                    fill="#F8FBFD"
+                />
 
-            <text
-                x="28"
-                y="63"
-                font-size="13"
-                fill="#52606D"
-            >
-                Green = Start Point | Blue = Route Branch | Red = End Point
-            </text>
+                <text
+                    x="28"
+                    y="38"
+                    font-family="Arial, sans-serif"
+                    font-size="20"
+                    font-weight="700"
+                    fill="#102A43"
+                >
+                    Selected Train Route
+                </text>
 
-            <line
-                x1="25"
-                y1="118"
-                x2="{width - 30}"
-                y2="118"
-                stroke="#B0BEC5"
-                stroke-width="4"
-            />
+                <text
+                    x="28"
+                    y="64"
+                    font-family="Arial, sans-serif"
+                    font-size="13"
+                    fill="#52606D"
+                >
+                    Green = Start Point | Blue = Route Branch | Red = End Point
+                </text>
 
-            <polygon
-                points="{width - 24},118 {width - 46},106 {width - 46},130"
-                fill="#102A43"
-            />
+                <line
+                    x1="25"
+                    y1="130"
+                    x2="{width - 35}"
+                    y2="130"
+                    stroke="#B0BEC5"
+                    stroke-width="4"
+                />
 
-            {''.join(nodes_html)}
-        </svg>
-    </div>
+                <polygon
+                    points="{width - 25},130 {width - 48},118 {width - 48},142"
+                    fill="#102A43"
+                />
+
+                {''.join(nodes_html)}
+            </svg>
+        </div>
+    </body>
+    </html>
     """
 
 
@@ -1715,28 +1748,50 @@ def render_test_sheet_generator_app() -> None:
         )
 
     else:
-        path_options = [
-            " → ".join(path)
-            for path in available_paths
-        ]
+        path_labels = []
+
+        for index, path in enumerate(available_paths, start=1):
+            path_labels.append(
+                f"Route Option {index} "
+                f"({len(path)} branches)"
+            )
 
         selected_path_label = st.radio(
             "Choose the correct physical route",
-            options=path_options,
+            options=path_labels,
             key="route_path_selector",
         )
 
-        selected_path = available_paths[
-            path_options.index(selected_path_label)
-        ]
+        selected_path_index = path_labels.index(
+            selected_path_label
+        )
 
-    st.markdown(
+        selected_path = available_paths[selected_path_index]
+
+        st.info(
+            f"""
+            **Selected route:** {selected_path[0]} → {selected_path[-1]}  
+            **Number of route branches:** {len(selected_path)}
+            """
+        )
+
+        with st.expander(
+            "Show technical branch sequence",
+            expanded=False,
+        ):
+            st.code(
+                " → ".join(selected_path),
+                language=None,
+            )
+
+    components.html(
         build_path_diagram(
             path=selected_path,
             start_branch=selected_start,
             end_branch=selected_end,
         ),
-        unsafe_allow_html=True,
+        height=280,
+        scrolling=True,
     )
 
     st.caption(
