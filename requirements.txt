@@ -9,8 +9,7 @@ opencv-python-headless
 numpy
 python-calamine
 xlrd
-opencv-python-headless
 pypdf>=4.0.0
 pytesseract>=0.3.10
 Pillow>=10.0.0
-pdfplumber
+pdfplumber>=0.11.0
