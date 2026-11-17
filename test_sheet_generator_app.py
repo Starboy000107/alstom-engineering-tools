@@ -600,7 +600,6 @@ def create_pdf_extraction_summary(
     return pd.DataFrame(records)
 
 @st.cache_data(show_spinner=False, max_entries=4)
-@st.cache_data(show_spinner=False, max_entries=4)
 def extract_pdf_text_pages(
     pdf_bytes: bytes,
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
@@ -1745,13 +1744,13 @@ def render_test_sheet_generator_app() -> None:
 
     current_pdf_hash = get_file_hash(pdf_bytes)
 
+    # Reset extraction output if the user uploads a different PDF.
     if current_pdf_hash != st.session_state["test_sheet_pdf_hash"]:
         st.session_state["test_sheet_pdf_hash"] = current_pdf_hash
 
         st.session_state["test_sheet_register"] = pd.DataFrame(
             columns=REGISTER_COLUMNS
         )
-
         st.session_state["test_sheet_page_count"] = 0
         st.session_state["test_sheet_export_zip"] = None
         st.session_state["test_sheet_pdf_text_log"] = ""
@@ -1766,6 +1765,9 @@ def render_test_sheet_generator_app() -> None:
             ]
         )
 
+    # -------------------------------------------------------------------------
+    # EXTRACTION BUTTON
+    # -------------------------------------------------------------------------
     if st.button(
         "Extract Low-Speed Test Points",
         type="primary",
@@ -1784,10 +1786,12 @@ def render_test_sheet_generator_app() -> None:
 
             st.session_state["test_sheet_page_count"] = len(pages)
 
+            # Save the complete extracted text log for display below.
             st.session_state["test_sheet_pdf_text_log"] = create_pdf_text_log(
                 extracted_pages
             )
 
+            # Save concise page-by-page summary.
             st.session_state["test_sheet_pdf_extraction_summary"] = (
                 create_pdf_extraction_summary(extracted_pages)
             )
@@ -1809,9 +1813,8 @@ def render_test_sheet_generator_app() -> None:
             if register.empty:
                 progress_text.warning(
                     "No low-speed test points were identified. "
-                    "Download the OCR text export below after extraction, "
-                    "then review whether OCR wording or source table quality "
-                    "requires additional rule tuning."
+                    "Review the extracted PDF/OCR text below to confirm "
+                    "whether OCR quality or test-detection rules require tuning."
                 )
             else:
                 progress_text.success(
@@ -1832,8 +1835,11 @@ def render_test_sheet_generator_app() -> None:
             st.exception(exc)
             return
 
-    register = st.session_state["test_sheet_register"]
-
+    # -------------------------------------------------------------------------
+    # EXTRACTED TEXT LOG
+    # This is intentionally positioned directly BELOW the extraction button.
+    # It is shown whether or not test points were found.
+    # -------------------------------------------------------------------------
     pdf_text_log = st.session_state.get(
         "test_sheet_pdf_text_log",
         "",
@@ -1845,15 +1851,18 @@ def render_test_sheet_generator_app() -> None:
     )
 
     if pdf_text_log:
-        st.markdown("### PDF Text Extraction / OCR Log")
+        st.divider()
+        st.markdown("### Extracted PDF Text / OCR Log")
 
         st.caption(
-            "This log shows exactly what text was exported from every "
-            "PDF page. It identifies whether each page used native PDF "
-            "text extraction or OCR."
+            "This section shows the complete text extracted from the uploaded "
+            "PDF. Each page is identified as native PDF text extraction or OCR "
+            "extraction. Review this output if expected test points are missing."
         )
 
         if not pdf_extraction_summary.empty:
+            st.markdown("#### Per-Page Extraction Summary")
+
             st.dataframe(
                 pdf_extraction_summary,
                 use_container_width=True,
@@ -1861,11 +1870,10 @@ def render_test_sheet_generator_app() -> None:
             )
 
         st.download_button(
-            "Download Full PDF Text / OCR Log",
+            "Download Full Extracted PDF Text / OCR Log",
             data=pdf_text_log.encode("utf-8"),
             file_name=clean_filename(
-                f"{project_info['sheet_prefix']}_"
-                f"PDF_Text_Extraction_Log.txt"
+                f"{project_info['sheet_prefix']}_PDF_Text_Extraction_Log.txt"
             ),
             mime="text/plain",
             use_container_width=True,
@@ -1873,20 +1881,29 @@ def render_test_sheet_generator_app() -> None:
         )
 
         with st.expander(
-            "Preview Extracted PDF Text",
-            expanded=False,
+            "Show Full Extracted PDF Text",
+            expanded=True,
         ):
             st.text_area(
                 "Full extracted PDF text",
                 value=pdf_text_log,
-                height=500,
+                height=650,
                 disabled=True,
                 key="test_sheet_pdf_text_preview",
             )
 
+        st.divider()
+
+    # -------------------------------------------------------------------------
+    # TEST REGISTER
+    # -------------------------------------------------------------------------
+    register = st.session_state["test_sheet_register"]
+
     if register.empty:
         st.warning(
-            "Click 'Extract Low-Speed Test Points' to create the draft register."
+            "Click 'Extract Low-Speed Test Points' to create the draft register. "
+            "The extracted PDF/OCR text log above can still be reviewed and "
+            "downloaded even if no test points were detected."
         )
         return
 
@@ -2030,7 +2047,8 @@ def render_test_sheet_generator_app() -> None:
             "Download Full TXT Register / Audit Log",
             data=full_register_text.encode("utf-8"),
             file_name=clean_filename(
-                f"{project_info['sheet_prefix']}_Subdivision_Test_Register_and_Audit_Log.txt"
+                f"{project_info['sheet_prefix']}_"
+                f"Subdivision_Test_Register_and_Audit_Log.txt"
             ),
             mime="text/plain",
             use_container_width=True,
