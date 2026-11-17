@@ -394,14 +394,14 @@ def find_first_number(text: str) -> Optional[float]:
 @st.cache_data(show_spinner=False)
 def extract_pdf_content(
     pdf_bytes: bytes,
+    progress_bar: Any = None,
+    progress_text: Any = None,
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
     Extract subdivision records from a vector/selectable-text PDF.
 
-    The SACEM source document has consistent table layout:
-        Test Abs. | Inter singularity | K.P. | Code | Remarks | Name | Reference
-
-    This function uses pdfplumber table extraction where possible.
+    Progress is displayed page by page when progress_bar and progress_text
+    Streamlit objects are supplied.
     """
     try:
         import pdfplumber
@@ -415,7 +415,14 @@ def extract_pdf_content(
     page_texts: List[str] = []
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        total_pages = len(pdf.pages)
+
         for page_number, page in enumerate(pdf.pages, start=1):
+            if progress_text is not None:
+                progress_text.info(
+                    f"Extracting page {page_number} of {total_pages}..."
+                )
+
             page_text = page.extract_text() or ""
             page_texts.append(page_text)
 
@@ -438,7 +445,7 @@ def extract_pdf_content(
                     )
                 )
 
-            # Fallback for PDFs where table extraction is poor.
+            # Fallback where table extraction does not produce a table.
             if not tables:
                 rows.extend(
                     extract_events_from_text(
@@ -447,6 +454,16 @@ def extract_pdf_content(
                         metadata=metadata,
                     )
                 )
+
+            if progress_bar is not None:
+                progress_bar.progress(
+                    int(page_number / total_pages * 100)
+                )
+
+    if progress_text is not None:
+        progress_text.success(
+            f"PDF extraction complete. Processed {len(page_texts)} page(s)."
+        )
 
     dataframe = pd.DataFrame(rows)
 
@@ -1266,8 +1283,17 @@ def create_docx_test_sheet(
 def create_docx_zip(
     register: pd.DataFrame,
     project_info: Dict[str, str],
+    progress_bar: Any = None,
+    progress_text: Any = None,
 ) -> bytes:
+    """
+    Create ZIP archive containing generated DOCX test sheets.
+
+    Progress is displayed sheet by sheet when progress objects are supplied.
+    """
     output = io.BytesIO()
+
+    total_sheets = len(register)
 
     with zipfile.ZipFile(
         output,
@@ -1278,25 +1304,43 @@ def create_docx_zip(
             register.iterrows(),
             start=1,
         ):
+            test_code = safe_text(row.get("test_code"))
+            branch = safe_text(row.get("branch")) or "NO_BRANCH"
+
+            if progress_text is not None:
+                progress_text.info(
+                    f"Generating DOCX test sheet {sequence} of "
+                    f"{total_sheets}: {test_code} / {branch}"
+                )
+
             sheet_number = (
                 f"{project_info['sheet_prefix']}-{sequence:03d}"
             )
 
             filename = clean_filename(
                 f"{sheet_number}_"
-                f"{safe_text(row.get('test_code'))}_"
-                f"{safe_text(row.get('branch'))}_"
+                f"{test_code}_"
+                f"{branch}_"
                 f"KP_{safe_text(row.get('abscissa_m'))}.docx"
             )
 
-            archive.writestr(
-                filename,
-                create_docx_test_sheet(
-                    row=row,
-                    project_info=project_info,
-                    sheet_number=sheet_number,
-                ),
+            docx_bytes = create_docx_test_sheet(
+                row=row,
+                project_info=project_info,
+                sheet_number=sheet_number,
             )
+
+            archive.writestr(filename, docx_bytes)
+
+            if progress_bar is not None:
+                progress_bar.progress(
+                    int(sequence / total_sheets * 100)
+                )
+
+    if progress_text is not None:
+        progress_text.success(
+            f"DOCX generation complete. Created {total_sheets} test sheet(s)."
+        )
 
     return output.getvalue()
 
@@ -1497,19 +1541,31 @@ def render_test_sheet_generator_app() -> None:
         use_container_width=True,
         key="generator_extract_pdf",
     ):
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
+
         try:
-            with st.spinner(
-                "Extracting subdivision tables from PDF..."
-            ):
-                extracted_events, page_texts = extract_pdf_content(
-                    pdf_bytes
-                )
+            extracted_events, page_texts = extract_pdf_content(
+                pdf_bytes=pdf_bytes,
+                progress_bar=progress_bar,
+                progress_text=progress_text,
+            )
 
             st.session_state["generator_events"] = extracted_events
             st.session_state["generator_page_count"] = len(page_texts)
             st.session_state["generator_file_name"] = uploaded_file.name
 
+            progress_bar.progress(100)
+
+            progress_text.success(
+                f"Extraction completed: {len(extracted_events)} "
+                f"potential event row(s) found from {len(page_texts)} page(s)."
+            )
+
         except Exception as exc:
+            progress_bar.empty()
+            progress_text.empty()
+
             st.error(f"PDF extraction failed: {exc}")
             return
 
@@ -1743,12 +1799,36 @@ def render_test_sheet_generator_app() -> None:
             )
 
         else:
-            try:
-                docx_zip = create_docx_zip(
-                    register=approved_register,
-                    project_info=project_info,
-                )
+            if st.button(
+                "📦 Generate Approved DOCX Test Sheets",
+                type="primary",
+                use_container_width=True,
+                key="generator_create_docx_zip",
+            ):
+                docx_progress_text = st.empty()
+                docx_progress_bar = st.progress(0)
 
+                try:
+                    docx_zip = create_docx_zip(
+                        register=approved_register,
+                        project_info=project_info,
+                        progress_bar=docx_progress_bar,
+                        progress_text=docx_progress_text,
+                    )
+
+                    st.session_state["generator_docx_zip"] = docx_zip
+
+                    docx_progress_bar.progress(100)
+
+                except Exception as exc:
+                    docx_progress_bar.empty()
+                    docx_progress_text.empty()
+
+                    st.error(f"DOCX generation failed: {exc}")
+
+            docx_zip = st.session_state.get("generator_docx_zip")
+
+            if docx_zip:
                 st.download_button(
                     "⬇️ Download Approved DOCX Test Sheets",
                     data=docx_zip,
@@ -1758,7 +1838,5 @@ def render_test_sheet_generator_app() -> None:
                     ),
                     mime="application/zip",
                     use_container_width=True,
+                    key="generator_download_docx_zip",
                 )
-
-            except Exception as exc:
-                st.error(f"DOCX generation failed: {exc}")
