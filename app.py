@@ -63,13 +63,6 @@ def main():
         "Alstom Engineering Tools Platform"
     )
 
-    # --------------------------------------------------------
-    # Apply theme BEFORE rendering a tool.
-    #
-    # This is important for long processes such as PDF
-    # extraction. The Light/Dark theme is already active
-    # while the progress bar is updating.
-    # --------------------------------------------------------
     render_global_theme(selected_theme)
 
     if selected_tool == "Master Drawing List Generator":
@@ -81,13 +74,6 @@ def main():
     elif selected_tool == "Test Sheet Generator":
         render_test_sheet_generator_app()
 
-    # --------------------------------------------------------
-    # Apply it once more after the tool.
-    #
-    # The Master Drawing List has its own CSS. Applying the
-    # global theme again ensures Light/Dark mode overrides
-    # its hard-coded colours after it is rendered.
-    # --------------------------------------------------------
     render_global_theme(selected_theme)
 
 
