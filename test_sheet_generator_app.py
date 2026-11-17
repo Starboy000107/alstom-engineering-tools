@@ -5,11 +5,15 @@ import io
 import re
 import zipfile
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+import cv2
 import fitz  # PyMuPDF
+import numpy as np
 import pandas as pd
+import pytesseract
 import streamlit as st
+from PIL import Image
 
 
 # =============================================================================
@@ -20,18 +24,18 @@ PROCEDURE_REFERENCE_DEFAULT = "C1252-TAC-0274"
 PROCEDURE_TITLE_DEFAULT = "Trackside ATC Low-Speed Dynamic Test Procedure"
 
 MAX_PDF_SIZE_MB = 100
-MAX_EVIDENCE_LENGTH = 2200
+MAX_EVIDENCE_LENGTH = 3000
+
+OCR_DPI = 300
+OCR_MIN_TEXT_CHARS = 80
+OCR_CONFIDENCE_MIN = 25
 
 
 # =============================================================================
-# FIXED PROCEDURE TEST RULES
+# TEST DEFINITIONS
 #
-# These are procedure-level definitions.
-# No station-specific sector, section, branch, abscissa, variant, equipment
-# name, or location is hard-coded here.
-#
-# Anticipated data is intentionally excluded because this application accepts
-# only a Subdivision PDF.
+# These are generic procedure-level rules.
+# No station-specific chainage, branch, section, location or variant is fixed.
 # =============================================================================
 
 TEST_RULES: Dict[str, Dict[str, Any]] = {
@@ -48,11 +52,7 @@ TEST_RULES: Dict[str, Dict[str, Any]] = {
             ("Selected Mode", "RM", "Y / N"),
             ("Localisation Status", "Out Loc", "Y / N"),
             ("Cross MTIB", "Localisation becomes Wait Loc", "Y / N"),
-            (
-                "Beacon Codes",
-                "Record and compare with approved design",
-                "Record",
-            ),
+            ("Beacon Codes", "Record and compare with approved design", "Record"),
             ("Calibration", "Record A-car number and calibration", "mm"),
             ("Localisation Status", "Total Loc", "Y / N"),
         ],
@@ -70,11 +70,7 @@ TEST_RULES: Dict[str, Dict[str, Any]] = {
             ("Selected Mode", "RM", "Y / N"),
             ("Localisation Status", "Out Loc", "Y / N"),
             ("Stop on STIB", "Localisation becomes Wait Inv", "Y / N"),
-            (
-                "Beacon Codes",
-                "Record and compare with approved design",
-                "Record",
-            ),
+            ("Beacon Codes", "Record and compare with approved design", "Record"),
             ("Localisation Status", "Total Loc", "Y / N"),
             ("Mode Available", "CM/AM available as applicable", "Y / N"),
             ("First RB / MTIB", "No Emergency Brake", "Y / N"),
@@ -87,28 +83,34 @@ TEST_RULES: Dict[str, Dict[str, Any]] = {
         "patterns": [
             r"SPACING\s+STOPPING\s+POINT",
             r"\bSPACING\b.*\bSTOPPING\b",
+
+            # Generic SACEM track-circuit wording:
+            # TUC KM T/C
+            # TUC KF T/C
+            # TUC KN T/C
+            # THW SP T/C
+            r"\b[A-Z]{2,5}\s+K[A-Z0-9]*\s+T\s*/?\s*C\b",
+            r"\b[A-Z]{2,5}\s+S[A-Z0-9]*\s+T\s*/?\s*C\b",
         ],
         "checks": [
-            (
-                "Track Circuit Occupied",
-                "Associated variant restrictive",
-                "Y / N",
-            ),
+            ("Track Circuit Occupied", "Associated variant restrictive", "Y / N"),
             ("Available Mode", "CM/AUTO", "Y / N"),
-            ("Localisation", "Record Loc Max", "m"),
+            ("Localisation Loc Max", "Record", "m"),
             ("Target Distance", "Record", "m"),
-            ("Singularity Abscissa", "Record", "m"),
+            ("Abscissa", "Record", "m"),
+            (
+                "Localisation Check",
+                "Loc Max + Target Distance = Abscissa ± approved tolerance",
+                "Y / N",
+            ),
             ("OMAP Target Speed", "Equal 0 where applicable", "Y / N"),
-            (
-                "Track Circuit Free",
-                "Associated variant permissive",
-                "Y / N",
-            ),
-            (
-                "Target Comparison",
-                "Free target >= occupied target",
-                "Y / N",
-            ),
+            ("Speedometer Target Speed", "Equal 0 where applicable", "Y / N"),
+            ("Associated Variant", "Restrictive", "Y / N"),
+            ("Track Circuit Free", "Associated variant permissive", "Y / N"),
+            ("Target Distance", ">= restrictive condition where applicable", "Y / N"),
+            ("OMAP Target Speed", "Record", "kph"),
+            ("Speedometer Target Speed", "> 0 where applicable", "kph"),
+            ("Associated Variant", "Permissive", "Y / N"),
         ],
     },
     "LS04": {
@@ -118,30 +120,17 @@ TEST_RULES: Dict[str, Dict[str, Any]] = {
         "patterns": [
             r"SPECIAL\s+STOPPING\s+POINT",
             r"\bSSP\b",
+            r"SSP\s+DISTANCE",
         ],
         "checks": [
-            (
-                "Restrictive Signal",
-                "Associated variant restrictive",
-                "Y / N",
-            ),
+            ("Restrictive Signal", "Associated variant restrictive", "Y / N"),
             ("Available Mode", "CM/AUTO", "Y / N"),
-            (
-                "Loc Max / Target Distance / Abscissa",
-                "Record values",
-                "m",
-            ),
+            ("Localisation Loc Max", "Record", "m"),
+            ("Target Distance", "Record", "m"),
+            ("Abscissa", "Record", "m"),
             ("OMAP Target Speed", "Equal 0 where applicable", "Y / N"),
-            (
-                "Permissive Signal",
-                "Associated variant permissive",
-                "Y / N",
-            ),
-            (
-                "Target Comparison",
-                "Permissive target >= restrictive",
-                "Y / N",
-            ),
+            ("Permissive Signal", "Associated variant permissive", "Y / N"),
+            ("Target Comparison", "Permissive target >= restrictive", "Y / N"),
         ],
     },
     "LS05": {
@@ -151,28 +140,13 @@ TEST_RULES: Dict[str, Dict[str, Any]] = {
         "patterns": [
             r"COMPLEX\s+STOPPING\s+POINT",
             r"SIGNAL.*OVERLAP",
+            r"\bPEP\b.*\bPSD\b",
         ],
         "checks": [
-            (
-                "Signal Red / Overlap Occupied",
-                "Variants restrictive",
-                "Y / N",
-            ),
-            (
-                "Signal Red / Overlap Free",
-                "Record stopping behaviour",
-                "Record",
-            ),
-            (
-                "Signal Blue / Overlap Free",
-                "Variants permissive",
-                "Y / N",
-            ),
-            (
-                "Target Comparison",
-                "Permissive target >= restrictive",
-                "Y / N",
-            ),
+            ("Signal Red / Overlap Occupied", "Variants restrictive", "Y / N"),
+            ("Signal Red / Overlap Free", "Record stopping behaviour", "Record"),
+            ("Signal Blue / Overlap Free", "Variants permissive", "Y / N"),
+            ("Target Comparison", "Permissive target >= restrictive", "Y / N"),
         ],
     },
     "LS06": {
@@ -184,29 +158,14 @@ TEST_RULES: Dict[str, Dict[str, Any]] = {
             r"\bDIVERGENCE\b",
             r"\bTURNOUT\b",
             r"POINT\s+(NORMAL|REVERSE|CONTROLLED|UNCONTROLLED)",
+            r"POINT\s+(NORMAL|REVERSE)\s+POSITION",
         ],
         "checks": [
-            (
-                "Point Uncontrolled",
-                "Associated variant restrictive",
-                "Y / N",
-            ),
+            ("Point Uncontrolled", "Associated variant restrictive", "Y / N"),
             ("Available Mode", "CM/AM", "Y / N"),
-            (
-                "Loc Max / Target Distance / Abscissa",
-                "Record",
-                "m",
-            ),
-            (
-                "Point Controlled",
-                "Associated variant permissive",
-                "Y / N",
-            ),
-            (
-                "Target Comparison",
-                "Controlled >= uncontrolled",
-                "Y / N",
-            ),
+            ("Loc Max / Target Distance / Abscissa", "Record", "m"),
+            ("Point Controlled", "Associated variant permissive", "Y / N"),
+            ("Target Comparison", "Controlled >= uncontrolled", "Y / N"),
         ],
     },
     "LS07": {
@@ -219,22 +178,10 @@ TEST_RULES: Dict[str, Dict[str, Any]] = {
             r"EXIT\s+SACEM\s+ROUTE",
         ],
         "checks": [
-            (
-                "Available Mode Before End of SACEM",
-                "CM/AUTO",
-                "Y / N",
-            ),
-            (
-                "Loc Max / Target Distance / Abscissa",
-                "Record",
-                "m",
-            ),
+            ("Available Mode Before End of SACEM", "CM/AUTO", "Y / N"),
+            ("Loc Max / Target Distance / Abscissa", "Record", "m"),
             ("OMAP Target Speed", "Equal 0 where applicable", "Y / N"),
-            (
-                "Beyond End of SACEM",
-                "CM/AM unavailable",
-                "Y / N",
-            ),
+            ("Beyond End of SACEM", "CM/AM unavailable", "Y / N"),
         ],
     },
     "LS08": {
@@ -245,22 +192,15 @@ TEST_RULES: Dict[str, Dict[str, Any]] = {
             r"STATION\s+CHARACTERISTICS",
             r"STATION\s+STOPPING",
             r"PLATFORM\s+STOPPING",
+            r"STATION.*PSD",
         ],
         "checks": [
             ("Localisation Status", "Total Loc", "Y / N"),
             ("Available Mode", "CM/AM", "Y / N"),
             ("Selected Mode", "CM", "Y / N"),
-            (
-                "Precise Stop",
-                "Record Loc Max and measured distance",
-                "m",
-            ),
+            ("Precise Stop", "Record Loc Max and measured distance", "m"),
             ("Door Side", "Correct side enabled", "A / B"),
-            (
-                "Stop Short / Overrun",
-                "Door enabled within approved tolerance",
-                "Y / N",
-            ),
+            ("Stop Short / Overrun", "Within approved tolerance", "Y / N"),
         ],
     },
     "LS09": {
@@ -273,31 +213,11 @@ TEST_RULES: Dict[str, Dict[str, Any]] = {
         ],
         "checks": [
             ("Correct Platform Side", "Door side enabled", "Y / N"),
-            (
-                "Open Wrong-Side Doors",
-                "PSD / relay not activated",
-                "Y / N",
-            ),
-            (
-                "Open Correct-Side Doors",
-                "PSD / relay activated",
-                "Y / N",
-            ),
-            (
-                "All Doors Closed Lost",
-                "Variants restrictive; RM only",
-                "Y / N",
-            ),
-            (
-                "PIOS / Override Active",
-                "CM/AM and timeout checked",
-                "Y / N",
-            ),
-            (
-                "Close Correct-Side Doors",
-                "PSD closed and variants permissive",
-                "Y / N",
-            ),
+            ("Open Wrong-Side Doors", "PSD / relay not activated", "Y / N"),
+            ("Open Correct-Side Doors", "PSD / relay activated", "Y / N"),
+            ("All Doors Closed Lost", "Variants restrictive; RM only", "Y / N"),
+            ("PIOS / Override Active", "CM/AM and timeout checked", "Y / N"),
+            ("Close Correct-Side Doors", "PSD closed and variants permissive", "Y / N"),
         ],
     },
     "LS10": {
@@ -308,35 +228,15 @@ TEST_RULES: Dict[str, Dict[str, Any]] = {
             r"EMERGENCY\s+ZONE",
             r"EMERGENCY\s+STOP\s+ZONE",
             r"\bESZ\b",
-            r"REPEAT\s+ENTRANCE\s+EMERGENCY",
             r"ESA\s+TEMP\s+POINT",
+            r"REPEAT\s+ENTRANCE\s+EMERGENCY",
         ],
         "checks": [
-            (
-                "ESZ Condition Active",
-                "Associated variant restrictive",
-                "Y / N",
-            ),
-            (
-                "Loc Max / Target Distance / Abscissa",
-                "Record",
-                "m",
-            ),
-            (
-                "ESZ Condition Resumed",
-                "Associated variant permissive",
-                "Y / N",
-            ),
-            (
-                "Inside Restrictive Zone",
-                "CM/AM unavailable",
-                "Y / N",
-            ),
-            (
-                "End of ESZ",
-                "CM becomes available",
-                "Y / N",
-            ),
+            ("ESZ Condition Active", "Associated variant restrictive", "Y / N"),
+            ("Loc Max / Target Distance / Abscissa", "Record", "m"),
+            ("ESZ Condition Resumed", "Associated variant permissive", "Y / N"),
+            ("Inside Restrictive Zone", "CM/AM unavailable", "Y / N"),
+            ("End of ESZ", "CM becomes available", "Y / N"),
         ],
     },
     "LS11": {
@@ -347,29 +247,14 @@ TEST_RULES: Dict[str, Dict[str, Any]] = {
             r"CHANGE\s+OF\s+END",
             r"CHANGE\s+ENDS",
             r"REVERSE\s+SUB-?SECTION",
+            r"REVERSE\s+BRANCH",
         ],
         "checks": [
-            (
-                "Cab 1 Arrival",
-                "Total Loc and CM/AM available",
-                "Y / N",
-            ),
+            ("Cab 1 Arrival", "Total Loc and CM/AM available", "Y / N"),
             ("Cab 1 Loc Max / Loc Min", "Record", "m"),
-            (
-                "Cab 2 Before Change of End",
-                "Shutdown and distance to signal checked",
-                "Y / N",
-            ),
-            (
-                "Cab 2 After Change of End",
-                "Total Loc and CM/AM available",
-                "Y / N",
-            ),
-            (
-                "First RB / MTIB",
-                "No delocalisation / no emergency brake",
-                "Y / N",
-            ),
+            ("Cab 2 Before Change of End", "Shutdown and distance checked", "Y / N"),
+            ("Cab 2 After Change of End", "Total Loc and CM/AM available", "Y / N"),
+            ("First RB / MTIB", "No delocalisation / emergency brake", "Y / N"),
         ],
     },
     "LS12": {
@@ -384,11 +269,7 @@ TEST_RULES: Dict[str, Dict[str, Any]] = {
             ("Track Circuit", "Record selected track circuit", "Record"),
             ("Section", "Record selected section", "Record"),
             ("TSR Value", "Record TSR value", "kph"),
-            (
-                "Train Behaviour",
-                "Target speed follows TSR; no emergency brake",
-                "Y / N",
-            ),
+            ("Train Behaviour", "Target speed follows TSR", "Y / N"),
         ],
     },
     "LS13": {
@@ -400,16 +281,8 @@ TEST_RULES: Dict[str, Dict[str, Any]] = {
         ],
         "checks": [
             ("Return Channel Location", "Record location", "Record"),
-            (
-                "Return Channel Loop",
-                "Record loop / equipment reference",
-                "Record",
-            ),
-            (
-                "Trackside Reception",
-                "Train information received",
-                "Y / N",
-            ),
+            ("Return Channel Loop", "Record loop/equipment reference", "Record"),
+            ("Trackside Reception", "Train information received", "Y / N"),
         ],
     },
     "LS14": {
@@ -419,25 +292,14 @@ TEST_RULES: Dict[str, Dict[str, Any]] = {
         "patterns": [
             r"END\s+OF\s+SHUNT",
             r"SHUNT\s+ROUTE",
+            r"SHUNT\s+TUNNEL",
         ],
         "checks": [
             ("Shunt Route Name", "Record", "Record"),
-            (
-                "Step 1 – Begin",
-                "Record branch, Loc Max and target distance",
-                "Record",
-            ),
+            ("Step 1 – Begin", "Record branch, Loc Max and target distance", "Record"),
             ("Step 2", "Train in RM", "Y / N"),
-            (
-                "Step 3 – End",
-                "Record CM-resume branch and Loc Max",
-                "Record",
-            ),
-            (
-                "Acceptance",
-                "CM/AM resumes at approved location",
-                "Y / N",
-            ),
+            ("Step 3 – End", "Record CM-resume branch and Loc Max", "Record"),
+            ("Acceptance", "CM/AM resumes at approved location", "Y / N"),
         ],
     },
 }
@@ -453,6 +315,8 @@ REGISTER_COLUMNS = [
     "branch",
     "direction",
     "abscissa_m",
+    "absolute_abscissa_m",
+    "subsection_start_abscissa_m",
     "inter_singularity_m",
     "row_number",
     "singularity_code",
@@ -461,6 +325,7 @@ REGISTER_COLUMNS = [
     "location_name",
     "source_page",
     "source_evidence",
+    "calculation_log",
     "review_status",
     "remarks",
 ]
@@ -471,7 +336,6 @@ REGISTER_COLUMNS = [
 # =============================================================================
 
 def safe_text(value: Any) -> str:
-    """Safely convert a value to a stripped string."""
     if value is None:
         return ""
 
@@ -485,24 +349,20 @@ def safe_text(value: Any) -> str:
 
 
 def normalise_spaces(value: Any) -> str:
-    """Collapse multiple spaces/newlines."""
     return re.sub(r"\s+", " ", safe_text(value)).strip()
 
 
 def clean_filename(value: str) -> str:
-    """Return a filename safe for Windows/macOS/Linux."""
     value = re.sub(r'[\\/:*?"<>|]', "_", safe_text(value))
     value = re.sub(r"\s+", "_", value)
     return value[:160] or "ATC_Test_Sheet"
 
 
 def get_file_hash(data: bytes) -> str:
-    """Hash PDF content to reset state when the uploaded PDF changes."""
     return hashlib.sha256(data).hexdigest()
 
 
 def to_float(value: Any) -> Optional[float]:
-    """Convert PDF number formats such as 2,191.0 m into float."""
     text = safe_text(value)
 
     if not text:
@@ -522,7 +382,6 @@ def to_float(value: Any) -> Optional[float]:
 
 
 def format_distance(value: Any) -> str:
-    """Format a numerical value as metres."""
     numeric = to_float(value)
 
     if numeric is None:
@@ -532,14 +391,6 @@ def format_distance(value: Any) -> str:
 
 
 def normalise_subsection(value: str) -> str:
-    """
-    Standardise a subsection reference.
-
-    Examples:
-        9-1-0      -> 09-01-0
-        09 01 2    -> 09-01-2
-        09-01-2    -> 09-01-2
-    """
     match = re.search(
         r"(\d{1,2})\s*[- ]\s*(\d{1,2})\s*[- ]\s*(\d{1,2})",
         safe_text(value),
@@ -554,54 +405,180 @@ def normalise_subsection(value: str) -> str:
 
 
 # =============================================================================
-# PDF TEXT EXTRACTION
+# OCR AND PDF EXTRACTION
 # =============================================================================
+
+def page_has_meaningful_text(page_text: str) -> bool:
+    compact = re.sub(r"\s+", "", safe_text(page_text))
+    return len(compact) >= OCR_MIN_TEXT_CHARS
+
+
+def preprocess_for_ocr(pixmap: fitz.Pixmap) -> Image.Image:
+    mode = "RGB" if pixmap.n >= 3 else "L"
+
+    image = Image.frombytes(
+        mode,
+        [pixmap.width, pixmap.height],
+        pixmap.samples,
+    )
+
+    image_array = np.array(image)
+
+    if image_array.ndim == 3:
+        gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = image_array
+
+    gray = cv2.resize(
+        gray,
+        None,
+        fx=1.4,
+        fy=1.4,
+        interpolation=cv2.INTER_CUBIC,
+    )
+
+    cleaned = cv2.threshold(
+        gray,
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+    )[1]
+
+    return Image.fromarray(cleaned)
+
+
+def group_ocr_words_into_visual_lines(
+    ocr_data: Dict[str, List[Any]],
+    y_tolerance: int = 18,
+) -> List[str]:
+    """
+    OCR word order is rebuilt using physical x/y positions.
+
+    This is essential for table schedules because normal OCR text output can
+    interleave the table columns.
+    """
+    words: List[Dict[str, Any]] = []
+
+    for index, raw_word in enumerate(ocr_data["text"]):
+        word = normalise_spaces(raw_word)
+
+        if not word:
+            continue
+
+        try:
+            confidence = float(ocr_data["conf"][index])
+        except (TypeError, ValueError):
+            confidence = -1.0
+
+        if confidence < OCR_CONFIDENCE_MIN:
+            continue
+
+        words.append(
+            {
+                "text": word,
+                "left": int(ocr_data["left"][index]),
+                "top": int(ocr_data["top"][index]),
+            }
+        )
+
+    words.sort(key=lambda item: (item["top"], item["left"]))
+
+    line_groups: List[List[Dict[str, Any]]] = []
+
+    for word in words:
+        if not line_groups:
+            line_groups.append([word])
+            continue
+
+        previous_line = line_groups[-1]
+        average_y = sum(item["top"] for item in previous_line) / len(previous_line)
+
+        if abs(word["top"] - average_y) <= y_tolerance:
+            previous_line.append(word)
+        else:
+            line_groups.append([word])
+
+    lines: List[str] = []
+
+    for line_words in line_groups:
+        line_words.sort(key=lambda item: item["left"])
+        lines.append(
+            normalise_spaces(" ".join(item["text"] for item in line_words))
+        )
+
+    return lines
+
+
+def ocr_pdf_page(page: fitz.Page) -> str:
+    scale = OCR_DPI / 72
+    matrix = fitz.Matrix(scale, scale)
+
+    pixmap = page.get_pixmap(
+        matrix=matrix,
+        alpha=False,
+        colorspace=fitz.csRGB,
+    )
+
+    image = preprocess_for_ocr(pixmap)
+
+    ocr_data = pytesseract.image_to_data(
+        image,
+        lang="eng",
+        config="--oem 3 --psm 6",
+        output_type=pytesseract.Output.DICT,
+    )
+
+    return "\n".join(group_ocr_words_into_visual_lines(ocr_data))
+
 
 @st.cache_data(show_spinner=False, max_entries=4)
 def extract_pdf_text_pages(pdf_bytes: bytes) -> List[str]:
     """
-    Extract selectable PDF text with PyMuPDF.
+    Use native PDF text where available.
 
-    Image-only or scanned PDFs require OCR and are not supported by this
-    selectable-text extraction function.
+    When a page is image-only/scanned, OCR it automatically.
     """
     document = fitz.open(stream=pdf_bytes, filetype="pdf")
-
     pages: List[str] = []
 
-    for page in document:
-        pages.append(page.get_text("text") or "")
+    try:
+        for page in document:
+            native_text = page.get_text("text") or ""
 
-    document.close()
+            if page_has_meaningful_text(native_text):
+                pages.append(native_text)
+            else:
+                pages.append(ocr_pdf_page(page))
+    finally:
+        document.close()
 
     return pages
 
 
 # =============================================================================
-# PDF PAGE CLASSIFICATION / METADATA
+# SOURCE PAGE IDENTIFICATION
 # =============================================================================
 
 def is_subdivision_page(page_text: str) -> bool:
-    """Identify Appendix J singularity table pages."""
     upper = page_text.upper()
 
-    return any(
-        marker in upper
-        for marker in [
-            "SINGULARITIES",
-            "SINGULARITY",
-            "INTER SINGUL",
-            "TEST ABSC",
-            "SUB SECTION",
-            "UP TRACK NORMAL DIRECTION",
-            "DN TRACK NORMAL DIRECTION",
-            "DOWN TRACK NORMAL DIRECTION",
-        ]
-    )
+    markers = [
+        "SINGULARITIES",
+        "SINGULARITY",
+        "INTER SINGUL",
+        "TEST ABSC",
+        "SUB SECTION",
+        "SUB-SECTION",
+        "UP TRACK NORMAL DIRECTION",
+        "DN TRACK NORMAL DIRECTION",
+        "DOWN TRACK NORMAL DIRECTION",
+        "K.P.",
+    ]
+
+    return any(marker in upper for marker in markers)
 
 
 def page_metadata(page_text: str) -> Dict[str, str]:
-    """Extract sector, section and direction from a Subdivision PDF page."""
     text = normalise_spaces(page_text)
 
     sector_match = re.search(
@@ -620,25 +597,12 @@ def page_metadata(page_text: str) -> Dict[str, str]:
 
     if re.search(r"\bUP\s+TRACK\b", text, flags=re.IGNORECASE):
         direction = "Up"
-
-    elif re.search(
-        r"\b(?:DN|DOWN)\s+TRACK\b",
-        text,
-        flags=re.IGNORECASE,
-    ):
+    elif re.search(r"\b(?:DN|DOWN)\s+TRACK\b", text, flags=re.IGNORECASE):
         direction = "Down"
 
     return {
-        "sector": (
-            f"{int(sector_match.group(1)):02d}"
-            if sector_match
-            else ""
-        ),
-        "section": (
-            f"{int(section_match.group(1)):02d}"
-            if section_match
-            else ""
-        ),
+        "sector": f"{int(sector_match.group(1)):02d}" if sector_match else "",
+        "section": f"{int(section_match.group(1)):02d}" if section_match else "",
         "direction": direction,
     }
 
@@ -647,8 +611,31 @@ def page_metadata(page_text: str) -> Dict[str, str]:
 # EVENT EXTRACTION
 # =============================================================================
 
+def extract_subsection_reference(text: str) -> str:
+    """
+    Extract generic subsection references.
+
+    Examples:
+        9-1-1
+        09-01-1
+        09-01-1-0
+        Sub Section 09-01-1
+    """
+    match = re.search(
+        r"(?:SUB\s*-?\s*SECTION(?:\s*(?:NUMBER|NO\.?))?\s*[:=]?\s*)?"
+        r"\b(\d{1,2}\s*[- ]\s*\d{1,2}\s*[- ]\s*\d{1,2})"
+        r"(?:\s*[- ]\s*\d{1,2})?\b",
+        safe_text(text),
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return ""
+
+    return normalise_subsection(match.group(1))
+
+
 def extract_associated_variant(text: str) -> str:
-    """Extract Associated Variant wording from a singularity context."""
     match = re.search(
         r"ASSOCIATED\s+VARIANTS?"
         r"(?:\s+NUMBER)?\s*[:=]?\s*"
@@ -658,10 +645,10 @@ def extract_associated_variant(text: str) -> str:
         r"RANK\s+OF\s+FIRST|"
         r"NUMBER\s+OF\s+ANTICIPATED|"
         r"SUB\s*-?\s*SECTION|"
-        r"SPACING\s+STOPPING|"
-        r"SPECIAL\s+STOPPING|"
-        r"COMPLEX\s+STOPPING|"
-        r"BEACON\s+TYPE"
+        r"BEACON\s+TYPE|"
+        r"VALUE\s+OF|"
+        r"SSP\s+DISTANCE|"
+        r"FIXED\s+CHARACTERISTICS"
         r")",
         normalise_spaces(text),
         flags=re.IGNORECASE,
@@ -670,11 +657,12 @@ def extract_associated_variant(text: str) -> str:
     if not match:
         return ""
 
-    return normalise_spaces(match.group(1)).strip("() ")
+    value = normalise_spaces(match.group(1)).strip("() ")
+
+    return value[:500]
 
 
 def extract_location_name(text: str) -> str:
-    """Extract asset/location name where one exists in the source text."""
     patterns = [
         r"RETURN\s+CHANNEL\s*(?:NUMBER)?\s*[:=]?\s*[A-Z0-9/_ -]+",
         r"(?:SIGNAL|SIG)\s*(?:NO\.?|NUMBER)?\s*[:=]?\s*[A-Z0-9/_ -]+",
@@ -685,11 +673,7 @@ def extract_location_name(text: str) -> str:
     ]
 
     for pattern in patterns:
-        match = re.search(
-            pattern,
-            text,
-            flags=re.IGNORECASE,
-        )
+        match = re.search(pattern, text, flags=re.IGNORECASE)
 
         if match:
             return normalise_spaces(match.group(0))
@@ -698,7 +682,6 @@ def extract_location_name(text: str) -> str:
 
 
 def infer_event_name(text: str) -> str:
-    """Produce an event label from PDF source wording."""
     upper = text.upper()
 
     labels = [
@@ -722,19 +705,24 @@ def infer_event_name(text: str) -> str:
         ("TURNOUT", "Turnout"),
         ("STATION CHARACTERISTICS", "Station Stopping Point"),
         ("TEMPORARY SPEED RESTRICTION", "Temporary Speed Restriction"),
-        ("PERMANENT SPEED RESTRICTION", "Speed Restriction"),
-        ("BEACON", "Beacon"),
     ]
 
     for phrase, label in labels:
         if phrase in upper:
             return label
 
+    track_circuit_match = re.search(
+        r"\b([A-Z]{2,5}\s+[KS][A-Z0-9]*\s+T\s*/?\s*C)\b",
+        upper,
+    )
+
+    if track_circuit_match:
+        return track_circuit_match.group(1)
+
     return "Subdivision Event"
 
 
 def identify_tests(source_text: str) -> List[str]:
-    """Identify applicable fixed procedure test types."""
     detected: List[str] = []
 
     for test_code, test_rule in TEST_RULES.items():
@@ -749,26 +737,31 @@ def identify_tests(source_text: str) -> List[str]:
 
 def parse_singularity_row(line: str) -> Optional[Dict[str, Any]]:
     """
-    Parse a text-extracted Appendix-J row.
+    Parse a singularity-schedule row.
 
-    Typical format:
+    Expected source structure:
 
-        45 ! 4.8 m 2,191.0 11 Associated variant : (TUC KF T/C)
+        row | inter singularity | absolute k.p. | code | remarks
 
-    This can vary substantially between PDF generators; the surrounding
-    event context is checked before creating any test-sheet record.
+    Examples OCR may produce:
+
+        20 8.4 m 1,611.4 15.7 Sub section end...
+        26 3.0 m 1,788.0 15.4 Associated variant : (TUC KM T/C)
     """
+    text = normalise_spaces(line)
+
     pattern = re.compile(
-        r"^\s*(?P<row>\d{1,3})\s+"
+        r"^\s*"
+        r"(?P<row>\d{1,3})\s+"
         r"(?:!\s*)?"
         r"(?:(?P<inter>-?\d+(?:[,.]\d+)?)\s*m?\s+)?"
         r"(?P<abscissa>-?\d+(?:[,.]\d+)?)\s+"
-        r"(?P<code>\d+(?:_\d+)?)\s+"
+        r"(?P<code>\d+(?:[._-]\d+)?)\s+"
         r"(?P<remaining>.+)$",
         flags=re.IGNORECASE,
     )
 
-    match = pattern.match(normalise_spaces(line))
+    match = pattern.match(text)
 
     if not match:
         return None
@@ -790,27 +783,70 @@ def parse_singularity_row(line: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def calculate_local_abscissa(
+    absolute_abscissa_m: Optional[float],
+    subsection_start_abscissa_m: Optional[float],
+    subsection: str,
+) -> Tuple[Optional[float], str]:
+    """
+    Calculate local test-sheet abscissa.
+
+    Example:
+        Event schedule chainage:          1788.0 m
+        Sub-section start chainage:       1611.4 m
+        Local abscissa:                    176.6 m
+
+        1788.0 - 1611.4 = 176.6 m
+    """
+    if absolute_abscissa_m is None:
+        return None, "Calculation unavailable: event absolute chainage is missing."
+
+    if subsection_start_abscissa_m is None:
+        return (
+            None,
+            "Calculation unavailable: current sub-section start chainage "
+            "was not detected before this event.",
+        )
+
+    local_abscissa = round(
+        absolute_abscissa_m - subsection_start_abscissa_m,
+        3,
+    )
+
+    log = (
+        f"Sub-section {subsection or 'not stated'} local abscissa calculation: "
+        f"{absolute_abscissa_m:.3f} m - "
+        f"{subsection_start_abscissa_m:.3f} m = "
+        f"{local_abscissa:.3f} m."
+    )
+
+    if local_abscissa < -0.001:
+        log += (
+            " WARNING: negative result. Check OCR order, direction, "
+            "branch context and sub-section boundary."
+        )
+
+    return local_abscissa, log
+
+
+# =============================================================================
+# MAIN REGISTER EXTRACTION
+# =============================================================================
+
 def extract_test_register_from_pdf(
     pages: List[str],
     progress_bar: Any,
     progress_text: Any,
 ) -> pd.DataFrame:
-    """
-    Extract only test-sheet candidate locations from a Subdivision PDF.
-
-    Anticipated location information is intentionally excluded.
-    """
     records: List[Dict[str, Any]] = []
     total_pages = len(pages)
 
     for page_number, page_text in enumerate(pages, start=1):
         progress_text.info(
-            f"Reading subdivision page {page_number} of {total_pages}..."
+            f"Reading and analysing page {page_number} of {total_pages}..."
         )
 
-        progress_bar.progress(
-            int(page_number / total_pages * 100)
-        )
+        progress_bar.progress(int(page_number / total_pages * 100))
 
         if not is_subdivision_page(page_text):
             continue
@@ -824,62 +860,64 @@ def extract_test_register_from_pdf(
         ]
 
         current_subsection = ""
+        current_subsection_start_abscissa: Optional[float] = None
 
         for line_index, line in enumerate(lines):
-            subsection_match = re.search(
-                r"SUB\s*-?\s*SECTION\s*(?:NUMBER)?\s*[:=]?\s*"
-                r"(\d{1,2}\s*[- ]\s*\d{1,2}\s*[- ]\s*\d{1,2})",
-                line,
-                flags=re.IGNORECASE,
-            )
-
-            if subsection_match:
-                current_subsection = normalise_subsection(
-                    subsection_match.group(1)
-                )
-
             parsed_row = parse_singularity_row(line)
 
-            if parsed_row is None:
-                continue
-
-            # A nearby context window handles PDFs that split singularity
-            # row content across several extracted text lines.
-            context_start = max(0, line_index - 2)
-            context_end = min(len(lines), line_index + 4)
+            context_start = max(0, line_index - 3)
+            context_end = min(len(lines), line_index + 5)
 
             context = normalise_spaces(
                 " ".join(lines[context_start:context_end])
             )
+
+            detected_subsection = extract_subsection_reference(
+                f"{line} {context}"
+            )
+
+            # A sub-section start is normally a schedule row containing:
+            # "Sub Section 09-01-1 ..."
+            # The associated absolute k.p. becomes the local zero point.
+            if detected_subsection and parsed_row is not None:
+                line_upper = line.upper()
+                context_upper = context.upper()
+
+                if (
+                    "SUB SECTION" in line_upper
+                    or "SUB-SECTION" in line_upper
+                    or "SUB SECTION" in context_upper
+                    or "SUB-SECTION" in context_upper
+                ):
+                    current_subsection = detected_subsection
+                    current_subsection_start_abscissa = parsed_row["abscissa_m"]
+
+            elif detected_subsection and not current_subsection:
+                current_subsection = detected_subsection
+
+            if parsed_row is None:
+                continue
 
             matched_tests = identify_tests(context)
 
             if not matched_tests:
                 continue
 
-            subsection = current_subsection
-
-            # Fallback if a subsection can be identified in nearby content.
-            if not subsection:
-                inferred_match = re.search(
-                    r"\b(\d{1,2}\s*-\s*\d{1,2}\s*[- ]\s*\d{1,2})\b",
-                    context,
-                )
-
-                if inferred_match:
-                    subsection = normalise_subsection(
-                        inferred_match.group(1)
-                    )
-
             sector = metadata["sector"]
             section = metadata["section"]
 
-            if subsection:
-                subsection_parts = subsection.split("-")
+            if current_subsection:
+                subsection_parts = current_subsection.split("-")
 
                 if len(subsection_parts) == 3:
                     sector = subsection_parts[0]
                     section = subsection_parts[1]
+
+            local_abscissa, calculation_log = calculate_local_abscissa(
+                absolute_abscissa_m=parsed_row["abscissa_m"],
+                subsection_start_abscissa_m=current_subsection_start_abscissa,
+                subsection=current_subsection,
+            )
 
             for test_code in matched_tests:
                 test_rule = TEST_RULES[test_code]
@@ -891,12 +929,21 @@ def extract_test_register_from_pdf(
                         "test_name": test_rule["name"],
                         "sector": sector,
                         "section": section,
-                        "subsection": subsection,
-                        # Subdivision PDFs often give subsection but not full
-                        # branch. We do not invent a branch number.
-                        "branch": subsection,
+                        "subsection": current_subsection,
+                        "branch": current_subsection,
                         "direction": metadata["direction"],
-                        "abscissa_m": parsed_row["abscissa_m"],
+
+                        # Test-sheet-local calculated abscissa.
+                        "abscissa_m": local_abscissa,
+
+                        # Original schedule/source absolute chainage.
+                        "absolute_abscissa_m": parsed_row["abscissa_m"],
+
+                        # Chainage of the active section start.
+                        "subsection_start_abscissa_m": (
+                            current_subsection_start_abscissa
+                        ),
+
                         "inter_singularity_m": parsed_row[
                             "inter_singularity_m"
                         ],
@@ -910,14 +957,12 @@ def extract_test_register_from_pdf(
                         ),
                         "location_name": extract_location_name(context),
                         "source_page": page_number,
-                        "source_evidence": context[
-                            :MAX_EVIDENCE_LENGTH
-                        ],
+                        "source_evidence": context[:MAX_EVIDENCE_LENGTH],
+                        "calculation_log": calculation_log,
                         "review_status": "To be reviewed",
                         "remarks": (
-                            "Generated from Subdivision PDF only. "
-                            "Anticipated branch, sub-section, variant, "
-                            "distance and abscissa are not included."
+                            "Generated from Subdivision PDF/OCR. "
+                            "Engineering verification is mandatory before use."
                         ),
                     }
                 )
@@ -934,7 +979,7 @@ def extract_test_register_from_pdf(
             "test_code",
             "source_page",
             "row_number",
-            "abscissa_m",
+            "absolute_abscissa_m",
             "subsection",
         ]
     )
@@ -944,7 +989,7 @@ def extract_test_register_from_pdf(
             "sector",
             "section",
             "subsection",
-            "abscissa_m",
+            "absolute_abscissa_m",
             "test_code",
         ],
         na_position="last",
@@ -954,7 +999,6 @@ def extract_test_register_from_pdf(
 
 
 def apply_test_details(register: pd.DataFrame) -> pd.DataFrame:
-    """Refresh ID and name after a manual test-code change."""
     output = register.copy()
 
     for index in output.index:
@@ -963,7 +1007,6 @@ def apply_test_details(register: pd.DataFrame) -> pd.DataFrame:
         if test_code in TEST_RULES:
             output.at[index, "test_id"] = TEST_RULES[test_code]["id"]
             output.at[index, "test_name"] = TEST_RULES[test_code]["name"]
-
         else:
             output.at[index, "test_id"] = ""
             output.at[index, "test_name"] = ""
@@ -972,43 +1015,178 @@ def apply_test_details(register: pd.DataFrame) -> pd.DataFrame:
 
 
 # =============================================================================
-# DOCX GENERATION
+# TEXT EXPORT
 # =============================================================================
 
-def set_cell_text(
-    cell: Any,
-    value: Any,
-    bold: bool = False,
-) -> None:
-    """Write text to a python-docx table cell."""
-    cell.text = ""
+def create_text_test_sheet(
+    row: pd.Series,
+    project_info: Dict[str, str],
+    sheet_number: str,
+) -> str:
+    test_code = safe_text(row.get("test_code"))
+    test_rule = TEST_RULES.get(test_code)
 
+    if test_rule is None:
+        raise ValueError(f"Unknown test code: {test_code}")
+
+    lines = [
+        "=" * 90,
+        "ALSTOM",
+        project_info["procedure_title"],
+        "",
+        f"{test_rule['name']} ({test_rule['id']})",
+        "=" * 90,
+        "",
+        f"Project / Contract: {project_info['project']}",
+        f"Procedure Reference: {project_info['procedure_reference']}",
+        f"Test Sheet No.: {sheet_number}",
+        f"Review Status: {safe_text(row.get('review_status'))}",
+        "",
+        "-" * 90,
+        "LOCATION / SOURCE DATA",
+        "-" * 90,
+        f"Test Code: {test_code}",
+        f"Sector: {safe_text(row.get('sector'))}",
+        f"Section: {safe_text(row.get('section'))}",
+        f"Sub-section: {safe_text(row.get('subsection'))}",
+        f"Branch Reference: {safe_text(row.get('branch'))}",
+        f"Direction: {safe_text(row.get('direction'))}",
+        f"Event: {safe_text(row.get('event_name'))}",
+        f"Location / Asset: {safe_text(row.get('location_name'))}",
+        f"Associated Variant: {safe_text(row.get('associated_variant'))}",
+        f"Source PDF Page: {safe_text(row.get('source_page'))}",
+        f"Singularity Row: {safe_text(row.get('row_number'))}",
+        f"Singularity Code: {safe_text(row.get('singularity_code'))}",
+        "",
+        "-" * 90,
+        "ABSCISSA CALCULATION",
+        "-" * 90,
+        f"Absolute Schedule Chainage: {format_distance(row.get('absolute_abscissa_m'))}",
+        f"Sub-section Start Chainage: {format_distance(row.get('subsection_start_abscissa_m'))}",
+        f"Calculated Local Abscissa: {format_distance(row.get('abscissa_m'))}",
+        f"Calculation Log: {safe_text(row.get('calculation_log'))}",
+        "",
+        "-" * 90,
+        "TEST CHECKS",
+        "-" * 90,
+    ]
+
+    for sequence, (action, expected, unit) in enumerate(
+        test_rule["checks"],
+        start=1,
+    ):
+        lines.extend(
+            [
+                f"{sequence}. Check / Test Action: {action}",
+                f"   Expected Requirement: {expected}",
+                f"   Actual Result / Record ({unit}): ______________________________",
+                "   Result: [ ] Y   [ ] N   [ ] N/A",
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            "-" * 90,
+            "SOURCE EVIDENCE",
+            "-" * 90,
+            safe_text(row.get("source_evidence")),
+            "",
+            "-" * 90,
+            "ENGINEERING REMARKS",
+            "-" * 90,
+            safe_text(row.get("remarks")),
+            "",
+            "-" * 90,
+            "APPROVAL",
+            "-" * 90,
+            "Test Result: [ ] Passed   [ ] Failed",
+            "",
+            "Alstom Name: __________________________",
+            "Alstom Signature: _____________________",
+            "Alstom Date: __________________________",
+            "",
+            "MTR Name: _____________________________",
+            "MTR Signature: ________________________",
+            "MTR Date: _____________________________",
+            "",
+            "UNCONTROLLED WHEN PRINTED – Verify approved project-specific data before use.",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
+def create_register_text(
+    register: pd.DataFrame,
+    project_info: Dict[str, str],
+) -> str:
+    lines = [
+        "=" * 110,
+        "ATC LOW-SPEED DYNAMIC TEST REGISTER",
+        "=" * 110,
+        f"Project / Contract: {project_info['project']}",
+        f"Procedure Reference: {project_info['procedure_reference']}",
+        f"Procedure Title: {project_info['procedure_title']}",
+        f"Generated Date: {date.today()}",
+        f"Number of Records: {len(register)}",
+        "",
+    ]
+
+    for sequence, (_, row) in enumerate(register.iterrows(), start=1):
+        lines.extend(
+            [
+                "=" * 110,
+                f"RECORD {sequence}",
+                "=" * 110,
+                f"Test: {safe_text(row.get('test_name'))}",
+                f"Test Code: {safe_text(row.get('test_code'))}",
+                f"Test ID: {safe_text(row.get('test_id'))}",
+                f"Review Status: {safe_text(row.get('review_status'))}",
+                f"Sector / Section / Sub-section: "
+                f"{safe_text(row.get('sector'))} / "
+                f"{safe_text(row.get('section'))} / "
+                f"{safe_text(row.get('subsection'))}",
+                f"Direction: {safe_text(row.get('direction'))}",
+                f"Event: {safe_text(row.get('event_name'))}",
+                f"Associated Variant: {safe_text(row.get('associated_variant'))}",
+                f"Source Page / Row: "
+                f"{safe_text(row.get('source_page'))} / "
+                f"{safe_text(row.get('row_number'))}",
+                f"Absolute Chainage: {format_distance(row.get('absolute_abscissa_m'))}",
+                f"Sub-section Start Chainage: "
+                f"{format_distance(row.get('subsection_start_abscissa_m'))}",
+                f"Calculated Local Abscissa: {format_distance(row.get('abscissa_m'))}",
+                f"Calculation: {safe_text(row.get('calculation_log'))}",
+                "",
+                "Source Evidence:",
+                safe_text(row.get("source_evidence")),
+                "",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+# =============================================================================
+# DOCX EXPORT
+# =============================================================================
+
+def set_cell_text(cell: Any, value: Any, bold: bool = False) -> None:
+    cell.text = ""
     paragraph = cell.paragraphs[0]
     run = paragraph.add_run(safe_text(value))
     run.bold = bold
 
 
-def add_docx_row(
-    table: Any,
-    values: List[Any],
-    bold: bool = False,
-) -> None:
-    """Add a row to a DOCX table."""
+def add_docx_row(table: Any, values: List[Any], bold: bool = False) -> None:
     cells = table.add_row().cells
 
     for index, value in enumerate(values):
-        set_cell_text(
-            cells[index],
-            value,
-            bold=bold,
-        )
+        set_cell_text(cells[index], value, bold=bold)
 
 
-def set_table_font_size(
-    table: Any,
-    point_size: int = 8,
-) -> None:
-    """Set a consistent font size in all table cells."""
+def set_table_font_size(table: Any, point_size: int = 8) -> None:
     from docx.shared import Pt
 
     for row in table.rows:
@@ -1023,28 +1201,20 @@ def create_docx_test_sheet(
     project_info: Dict[str, str],
     sheet_number: str,
 ) -> bytes:
-    """
-    Generate one Word test sheet.
-
-    No anticipated fields are rendered because only the Subdivision PDF is
-    uploaded in this application.
-    """
     try:
         from docx import Document
         from docx.enum.text import WD_ALIGN_PARAGRAPH
         from docx.shared import Inches, Pt
     except ImportError as exc:
         raise RuntimeError(
-            "Missing dependency python-docx. "
-            "Install python-docx>=1.1.2."
+            "Missing python-docx. Install python-docx>=1.1.2."
         ) from exc
 
     test_code = safe_text(row.get("test_code"))
+    test_rule = TEST_RULES.get(test_code)
 
-    if test_code not in TEST_RULES:
+    if test_rule is None:
         raise ValueError(f"Unknown test code: {test_code}")
-
-    test_rule = TEST_RULES[test_code]
 
     document = Document()
 
@@ -1057,36 +1227,24 @@ def create_docx_test_sheet(
     document.styles["Normal"].font.name = "Arial"
     document.styles["Normal"].font.size = Pt(8)
 
-    # -------------------------------------------------------------------------
-    # Header
-    # -------------------------------------------------------------------------
     header = document.add_paragraph()
     header.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    company_name = header.add_run("ALSTOM\n")
-    company_name.bold = True
-    company_name.font.size = Pt(16)
+    run = header.add_run("ALSTOM\n")
+    run.bold = True
+    run.font.size = Pt(16)
 
-    procedure_title = header.add_run(
-        project_info["procedure_title"]
-    )
-    procedure_title.bold = True
-    procedure_title.font.size = Pt(10)
+    run = header.add_run(project_info["procedure_title"])
+    run.bold = True
+    run.font.size = Pt(10)
 
     title = document.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    title_run = title.add_run(
-        f"{test_rule['name']} ({test_rule['id']})"
-    )
-    title_run.bold = True
-    title_run.font.size = Pt(12)
+    run = title.add_run(f"{test_rule['name']} ({test_rule['id']})")
+    run.bold = True
+    run.font.size = Pt(12)
 
-    document.add_paragraph()
-
-    # -------------------------------------------------------------------------
-    # General information table
-    # -------------------------------------------------------------------------
     information_table = document.add_table(rows=0, cols=6)
     information_table.style = "Table Grid"
 
@@ -1095,9 +1253,9 @@ def create_docx_test_sheet(
         [
             "Project / Contract:",
             project_info["project"],
-            "Procedure Reference:",
+            "Procedure Ref:",
             project_info["procedure_reference"],
-            "Test Sheet No.:",
+            "Sheet No.:",
             sheet_number,
         ],
     )
@@ -1118,81 +1276,40 @@ def create_docx_test_sheet(
 
     document.add_paragraph()
 
-    # -------------------------------------------------------------------------
-    # Location table
-    # -------------------------------------------------------------------------
-    subtitle = document.add_paragraph()
-    subtitle.add_run(test_rule["short_name"]).bold = True
-
     location_table = document.add_table(rows=0, cols=4)
     location_table.style = "Table Grid"
 
-    add_docx_row(
-        location_table,
-        [
-            "Sector:",
-            safe_text(row.get("sector")),
-            "Direction:",
-            safe_text(row.get("direction")) or "Not stated",
-        ],
-    )
+    location_rows = [
+        ["Sector:", row.get("sector"), "Direction:", row.get("direction")],
+        ["Section:", row.get("section"), "Sub-section:", row.get("subsection")],
+        ["Branch:", row.get("branch"), "Event:", row.get("event_name")],
+        ["Location / Asset:", row.get("location_name"), "Variant:", row.get("associated_variant")],
+        ["Absolute Chainage:", format_distance(row.get("absolute_abscissa_m")), "Sub-section Start:", format_distance(row.get("subsection_start_abscissa_m"))],
+        ["Calculated Abscissa:", format_distance(row.get("abscissa_m")), "Source Page:", row.get("source_page")],
+    ]
 
-    add_docx_row(
-        location_table,
-        [
-            "Section:",
-            safe_text(row.get("section")),
-            "Sub-section:",
-            safe_text(row.get("subsection")) or "Not stated",
-        ],
-    )
-
-    add_docx_row(
-        location_table,
-        [
-            "Branch Reference:",
-            safe_text(row.get("branch")) or "Not stated",
-            "Abscissa:",
-            format_distance(row.get("abscissa_m")) or "Not stated",
-        ],
-    )
-
-    add_docx_row(
-        location_table,
-        [
-            "Event:",
-            safe_text(row.get("event_name")),
-            "Location / Asset:",
-            safe_text(row.get("location_name")),
-        ],
-    )
-
-    add_docx_row(
-        location_table,
-        [
-            "Associated Variant:",
-            safe_text(row.get("associated_variant")) or "Not stated",
-            "Source PDF Page:",
-            safe_text(row.get("source_page")),
-        ],
-    )
+    for values in location_rows:
+        add_docx_row(location_table, values)
 
     set_table_font_size(location_table)
 
-    note = document.add_paragraph()
-    note_run = note.add_run(
-        "Anticipated branch, sub-section, variant, distance and abscissa "
-        "are not included because this document was generated from the "
-        "Subdivision PDF only."
+    document.add_paragraph()
+
+    calculation_title = document.add_paragraph()
+    calculation_title.add_run("Abscissa Calculation / Audit Log").bold = True
+
+    calculation_table = document.add_table(rows=1, cols=1)
+    calculation_table.style = "Table Grid"
+
+    set_cell_text(
+        calculation_table.rows[0].cells[0],
+        safe_text(row.get("calculation_log")),
     )
-    note_run.italic = True
-    note_run.font.size = Pt(8)
+
+    set_table_font_size(calculation_table)
 
     document.add_paragraph()
 
-    # -------------------------------------------------------------------------
-    # Test checks table
-    # -------------------------------------------------------------------------
     test_table = document.add_table(rows=1, cols=4)
     test_table.style = "Table Grid"
 
@@ -1204,11 +1321,7 @@ def create_docx_test_sheet(
     ]
 
     for index, header_text in enumerate(headers):
-        set_cell_text(
-            test_table.rows[0].cells[index],
-            header_text,
-            bold=True,
-        )
+        set_cell_text(test_table.rows[0].cells[index], header_text, bold=True)
 
     for action, expected, unit in test_rule["checks"]:
         add_docx_row(
@@ -1225,40 +1338,28 @@ def create_docx_test_sheet(
 
     document.add_paragraph()
 
-    # -------------------------------------------------------------------------
-    # Evidence / comments
-    # -------------------------------------------------------------------------
-    comments_heading = document.add_paragraph()
-    comments_heading.add_run(
-        "Source Evidence / Engineering Remarks"
-    ).bold = True
+    evidence_title = document.add_paragraph()
+    evidence_title.add_run("Source Evidence / Engineering Remarks").bold = True
 
-    comments_table = document.add_table(rows=1, cols=1)
-    comments_table.style = "Table Grid"
+    evidence_table = document.add_table(rows=1, cols=1)
+    evidence_table.style = "Table Grid"
 
-    comment_text = (
-        f"Source Page: {safe_text(row.get('source_page'))}\n"
+    evidence = (
+        f"Source PDF Page: {safe_text(row.get('source_page'))}\n"
         f"Singularity Row: {safe_text(row.get('row_number'))}\n"
         f"Singularity Code: {safe_text(row.get('singularity_code'))}\n"
-        f"Event: {safe_text(row.get('event_name'))}\n\n"
-        f"PDF Source Evidence:\n"
+        f"Calculation: {safe_text(row.get('calculation_log'))}\n\n"
+        f"PDF/OCR Source Evidence:\n"
         f"{safe_text(row.get('source_evidence'))}\n\n"
         f"Engineering Remarks:\n"
         f"{safe_text(row.get('remarks'))}"
     )
 
-    set_cell_text(
-        comments_table.rows[0].cells[0],
-        comment_text,
-    )
-
-    set_table_font_size(comments_table)
+    set_cell_text(evidence_table.rows[0].cells[0], evidence)
+    set_table_font_size(evidence_table)
 
     document.add_paragraph()
 
-    # -------------------------------------------------------------------------
-    # Approval table
-    # -------------------------------------------------------------------------
     approval_table = document.add_table(rows=0, cols=3)
     approval_table.style = "Table Grid"
 
@@ -1281,12 +1382,11 @@ def create_docx_test_sheet(
     footer = document.add_paragraph()
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    footer_run = footer.add_run(
-        "UNCONTROLLED WHEN PRINTED – "
-        "Verify approved project-specific data before use."
+    run = footer.add_run(
+        "UNCONTROLLED WHEN PRINTED – Verify approved project-specific data before use."
     )
-    footer_run.italic = True
-    footer_run.font.size = Pt(7)
+    run.italic = True
+    run.font.size = Pt(7)
 
     output = io.BytesIO()
     document.save(output)
@@ -1294,41 +1394,56 @@ def create_docx_test_sheet(
     return output.getvalue()
 
 
-def create_docx_zip(
+def create_export_zip(
     register: pd.DataFrame,
     project_info: Dict[str, str],
     progress_bar: Any,
     progress_text: Any,
 ) -> bytes:
-    """Build a ZIP archive of approved Word test sheets."""
+    """
+    ZIP contains:
+    - DOCX test sheets
+    - equivalent TXT test sheets
+    - full register TXT export
+    - CSV register
+    """
     output = io.BytesIO()
     total = len(register)
 
-    with zipfile.ZipFile(
-        output,
-        "w",
-        zipfile.ZIP_DEFLATED,
-    ) as archive:
-        for sequence, (_, row) in enumerate(
-            register.iterrows(),
-            start=1,
-        ):
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "ATC_Low_Speed_Test_Register.txt",
+            create_register_text(register, project_info),
+        )
+
+        archive.writestr(
+            "ATC_Low_Speed_Test_Register.csv",
+            register.to_csv(index=False),
+        )
+
+        for sequence, (_, row) in enumerate(register.iterrows(), start=1):
             test_code = safe_text(row.get("test_code"))
             subsection = safe_text(row.get("subsection")) or "NO_SUBSECTION"
 
+            sheet_number = f"{project_info['sheet_prefix']}-{sequence:03d}"
+
             progress_text.info(
-                f"Generating test sheet {sequence} of {total}: "
+                f"Generating export {sequence} of {total}: "
                 f"{test_code} / {subsection}"
             )
 
-            sheet_number = (
-                f"{project_info['sheet_prefix']}-{sequence:03d}"
+            basename = clean_filename(
+                f"{sheet_number}_{test_code}_{subsection}_"
+                f"KP_{safe_text(row.get('abscissa_m'))}"
             )
 
-            filename = clean_filename(
-                f"{sheet_number}_{test_code}_{subsection}_"
-                f"KP_{safe_text(row.get('abscissa_m'))}.docx"
+            text_sheet = create_text_test_sheet(
+                row=row,
+                project_info=project_info,
+                sheet_number=sheet_number,
             )
+
+            archive.writestr(f"{basename}.txt", text_sheet)
 
             document_bytes = create_docx_test_sheet(
                 row=row,
@@ -1336,15 +1451,13 @@ def create_docx_zip(
                 sheet_number=sheet_number,
             )
 
-            archive.writestr(filename, document_bytes)
+            archive.writestr(f"{basename}.docx", document_bytes)
 
-            progress_bar.progress(
-                int(sequence / total * 100)
-            )
+            progress_bar.progress(int(sequence / total * 100))
 
     progress_bar.progress(100)
     progress_text.success(
-        f"DOCX generation completed: {total} test sheet(s)."
+        f"Export completed: {total} DOCX and TXT test sheet(s)."
     )
 
     return output.getvalue()
@@ -1358,40 +1471,50 @@ def create_excel_bytes(
     register: pd.DataFrame,
     project_info: Dict[str, str],
 ) -> bytes:
-    """Create an Excel test register."""
     output = io.BytesIO()
 
-    with pd.ExcelWriter(
-        output,
-        engine="openpyxl",
-    ) as writer:
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
         cover = pd.DataFrame(
             [
                 ["Project / Contract", project_info["project"]],
-                [
-                    "Procedure Reference",
-                    project_info["procedure_reference"],
-                ],
+                ["Procedure Reference", project_info["procedure_reference"]],
                 ["Procedure Title", project_info["procedure_title"]],
                 ["Generated Date", str(date.today())],
                 ["Test Register Rows", len(register)],
+                ["Extraction Method", "Native PDF text + OCR fallback"],
                 [
-                    "Anticipated Data",
-                    "Not included – Subdivision PDF only",
+                    "Abscissa Calculation",
+                    "Local Abscissa = Absolute Chainage - Sub-section Start Chainage",
                 ],
             ],
             columns=["Field", "Value"],
         )
 
-        cover.to_excel(
-            writer,
-            sheet_name="Cover",
-            index=False,
-        )
+        cover.to_excel(writer, sheet_name="Cover", index=False)
+        register.to_excel(writer, sheet_name="Test Register", index=False)
 
-        register.to_excel(
+        calculation_columns = [
+            "test_code",
+            "test_name",
+            "subsection",
+            "source_page",
+            "row_number",
+            "absolute_abscissa_m",
+            "subsection_start_abscissa_m",
+            "abscissa_m",
+            "calculation_log",
+            "source_evidence",
+        ]
+
+        available_columns = [
+            column
+            for column in calculation_columns
+            if column in register.columns
+        ]
+
+        register[available_columns].to_excel(
             writer,
-            sheet_name="Test Register",
+            sheet_name="Calculation Log",
             index=False,
         )
 
@@ -1407,27 +1530,21 @@ def create_excel_bytes(
 
                 worksheet.column_dimensions[
                     column_cells[0].column_letter
-                ].width = min(
-                    max(maximum_length + 2, 12),
-                    70,
-                )
+                ].width = min(max(maximum_length + 2, 12), 70)
 
     return output.getvalue()
 
 
 # =============================================================================
-# STREAMLIT USER INTERFACE
+# STREAMLIT APPLICATION
 # =============================================================================
 
 def initialise_test_sheet_state() -> None:
-    """Initialise namespaced session-state entries."""
     defaults = {
         "test_sheet_pdf_hash": "",
-        "test_sheet_register": pd.DataFrame(
-            columns=REGISTER_COLUMNS
-        ),
+        "test_sheet_register": pd.DataFrame(columns=REGISTER_COLUMNS),
         "test_sheet_page_count": 0,
-        "test_sheet_docx_zip": None,
+        "test_sheet_export_zip": None,
     }
 
     for key, value in defaults.items():
@@ -1436,32 +1553,22 @@ def initialise_test_sheet_state() -> None:
 
 
 def render_test_sheet_generator_app() -> None:
-    """
-    Render the Test Sheet Generator page.
-
-    Important:
-    st.set_page_config() is intentionally NOT used here because it is already
-    defined in the project's main app.py.
-    """
     initialise_test_sheet_state()
 
     st.title("ATC Low-Speed Dynamic Test Sheet Generator")
 
     st.warning(
         "Engineering control: this tool produces draft test sheets. "
-        "The user must verify all extracted locations, variants, abscissae, "
-        "test applicability and approved project information before use."
+        "All OCR output, calculated chainages, locations, variants, "
+        "test applicability and approved project information must be "
+        "engineering-reviewed before use."
     )
 
     st.info(
-        "Input requirement: upload one Station SACEM Subdivision PDF. "
-        "Anticipated information is excluded because it requires a separate "
-        "approved anticipation/transmission source document."
+        "The extractor supports selectable PDF text and scanned/image-only "
+        "Subdivision schedule pages. Image-only schedule pages are OCR processed."
     )
 
-    # -------------------------------------------------------------------------
-    # Project information
-    # -------------------------------------------------------------------------
     with st.expander("Project Information", expanded=True):
         column_1, column_2 = st.columns(2)
 
@@ -1494,15 +1601,9 @@ def render_test_sheet_generator_app() -> None:
         "project": project,
         "procedure_reference": procedure_reference,
         "procedure_title": procedure_title,
-        "sheet_prefix": (
-            sheet_prefix
-            or PROCEDURE_REFERENCE_DEFAULT
-        ),
+        "sheet_prefix": sheet_prefix or PROCEDURE_REFERENCE_DEFAULT,
     }
 
-    # -------------------------------------------------------------------------
-    # PDF upload
-    # -------------------------------------------------------------------------
     st.markdown("## 1. Upload Subdivision PDF")
 
     uploaded_pdf = st.file_uploader(
@@ -1514,8 +1615,7 @@ def render_test_sheet_generator_app() -> None:
 
     if uploaded_pdf is None:
         st.info(
-            "Upload a selectable-text SACEM Subdivision PDF containing "
-            "singularity tables."
+            "Upload a SACEM Subdivision PDF containing singularity schedules."
         )
         return
 
@@ -1537,11 +1637,8 @@ def render_test_sheet_generator_app() -> None:
             columns=REGISTER_COLUMNS
         )
         st.session_state["test_sheet_page_count"] = 0
-        st.session_state["test_sheet_docx_zip"] = None
+        st.session_state["test_sheet_export_zip"] = None
 
-    # -------------------------------------------------------------------------
-    # Extraction
-    # -------------------------------------------------------------------------
     if st.button(
         "Extract Low-Speed Test Points",
         type="primary",
@@ -1553,7 +1650,7 @@ def render_test_sheet_generator_app() -> None:
 
         try:
             progress_text.info(
-                "Reading selectable text from the Subdivision PDF..."
+                "Reading PDF pages. Scanned singularity pages will be OCR processed..."
             )
 
             pages = extract_pdf_text_pages(pdf_bytes)
@@ -1562,7 +1659,7 @@ def render_test_sheet_generator_app() -> None:
 
             progress_text.info(
                 f"PDF loaded: {len(pages)} page(s). "
-                "Extracting low-speed test points..."
+                "Extracting test points and calculating local abscissae..."
             )
 
             register = extract_test_register_from_pdf(
@@ -1572,26 +1669,30 @@ def render_test_sheet_generator_app() -> None:
             )
 
             st.session_state["test_sheet_register"] = register
-            st.session_state["test_sheet_docx_zip"] = None
+            st.session_state["test_sheet_export_zip"] = None
 
             if register.empty:
                 progress_text.warning(
                     "No low-speed test points were identified. "
-                    "The PDF may be image-only, may not contain selectable "
-                    "text, or its event wording/table format may need "
-                    "additional parsing rules."
+                    "Download the OCR text export below after extraction, "
+                    "then review whether OCR wording or source table quality "
+                    "requires additional rule tuning."
                 )
             else:
                 progress_text.success(
-                    f"Extraction complete: {len(register)} draft "
-                    f"test sheet record(s) found."
+                    f"Extraction complete: {len(register)} draft record(s) found."
                 )
 
-        except Exception as exc:
-            progress_bar.empty()
+        except pytesseract.TesseractNotFoundError:
             progress_text.error(
-                f"PDF extraction failed: "
-                f"{type(exc).__name__}: {exc}"
+                "Tesseract OCR is not installed or is not available in PATH. "
+                "Install tesseract-ocr in the deployment environment."
+            )
+            return
+
+        except Exception as exc:
+            progress_text.error(
+                f"PDF extraction failed: {type(exc).__name__}: {exc}"
             )
             st.exception(exc)
             return
@@ -1600,40 +1701,17 @@ def render_test_sheet_generator_app() -> None:
 
     if register.empty:
         st.warning(
-            "Click 'Extract Low-Speed Test Points' to create the draft "
-            "register."
+            "Click 'Extract Low-Speed Test Points' to create the draft register."
         )
         return
 
-    # -------------------------------------------------------------------------
-    # Metrics
-    # -------------------------------------------------------------------------
     metric_1, metric_2, metric_3 = st.columns(3)
 
-    metric_1.metric(
-        "Draft Test Sheets",
-        len(register),
-    )
+    metric_1.metric("Draft Test Sheets", len(register))
+    metric_2.metric("PDF Pages", st.session_state["test_sheet_page_count"])
+    metric_3.metric("Test Types Detected", register["test_code"].nunique())
 
-    metric_2.metric(
-        "PDF Pages",
-        st.session_state["test_sheet_page_count"],
-    )
-
-    metric_3.metric(
-        "Test Types Detected",
-        register["test_code"].nunique(),
-    )
-
-    # -------------------------------------------------------------------------
-    # Review register
-    # -------------------------------------------------------------------------
     st.markdown("## 2. Review and Approve Test Register")
-
-    st.caption(
-        "Edit extracted values where required. Only rows marked "
-        "'Approved for generation' will be included in the Word-document ZIP."
-    )
 
     reviewed_register = st.data_editor(
         register,
@@ -1648,7 +1726,15 @@ def render_test_sheet_generator_app() -> None:
                 required=True,
             ),
             "abscissa_m": st.column_config.NumberColumn(
-                "Abscissa (m)",
+                "Calculated Local Abscissa (m)",
+                format="%.3f",
+            ),
+            "absolute_abscissa_m": st.column_config.NumberColumn(
+                "Absolute Schedule Chainage (m)",
+                format="%.3f",
+            ),
+            "subsection_start_abscissa_m": st.column_config.NumberColumn(
+                "Sub-section Start Chainage (m)",
                 format="%.3f",
             ),
             "inter_singularity_m": st.column_config.NumberColumn(
@@ -1668,6 +1754,10 @@ def render_test_sheet_generator_app() -> None:
                 "Source Evidence",
                 width="large",
             ),
+            "calculation_log": st.column_config.TextColumn(
+                "Calculation Log",
+                width="large",
+            ),
             "remarks": st.column_config.TextColumn(
                 "Engineering Remarks",
                 width="large",
@@ -1676,145 +1766,132 @@ def render_test_sheet_generator_app() -> None:
     )
 
     reviewed_register = apply_test_details(reviewed_register)
-
     st.session_state["test_sheet_register"] = reviewed_register
 
-    review_metric_1, review_metric_2, review_metric_3 = st.columns(3)
+    st.markdown("### Abscissa Calculation and OCR Audit Log")
 
-    review_metric_1.metric(
-        "Approved for Generation",
-        int(
-            reviewed_register["review_status"]
-            .eq("Approved for generation")
-            .sum()
-        ),
+    calculation_columns = [
+        "test_code",
+        "test_name",
+        "subsection",
+        "source_page",
+        "row_number",
+        "absolute_abscissa_m",
+        "subsection_start_abscissa_m",
+        "abscissa_m",
+        "calculation_log",
+        "source_evidence",
+    ]
+
+    available_calculation_columns = [
+        column
+        for column in calculation_columns
+        if column in reviewed_register.columns
+    ]
+
+    st.dataframe(
+        reviewed_register[available_calculation_columns],
+        use_container_width=True,
+        hide_index=True,
     )
 
-    review_metric_2.metric(
-        "Rows with Abscissa",
-        int(
-            reviewed_register["abscissa_m"]
-            .notna()
-            .sum()
-        ),
-    )
+    approved_register = reviewed_register[
+        reviewed_register["review_status"]
+        .eq("Approved for generation")
+        & reviewed_register["test_code"].isin(TEST_RULES.keys())
+    ].copy()
 
-    review_metric_3.metric(
-        "Rows with Associated Variant",
-        int(
-            reviewed_register["associated_variant"]
-            .astype(str)
-            .str.strip()
-            .ne("")
-            .sum()
-        ),
-    )
-
-    # -------------------------------------------------------------------------
-    # Exports
-    # -------------------------------------------------------------------------
-    st.markdown("## 3. Download Register and DOCX Test Sheets")
+    st.markdown("## 3. Download Register, Text Logs and Test Sheets")
 
     excel_bytes = create_excel_bytes(
         register=reviewed_register,
         project_info=project_info,
     )
 
-    approved_register = reviewed_register[
-        reviewed_register["review_status"]
-        .eq("Approved for generation")
-        & reviewed_register["test_code"]
-        .isin(TEST_RULES.keys())
-    ].copy()
+    full_register_text = create_register_text(
+        register=reviewed_register,
+        project_info=project_info,
+    )
 
-    download_col_1, download_col_2, download_col_3 = st.columns(3)
+    column_1, column_2, column_3, column_4 = st.columns(4)
 
-    with download_col_1:
+    with column_1:
         st.download_button(
-            "⬇️ Download Excel Register",
+            "Download Excel Register",
             data=excel_bytes,
             file_name=clean_filename(
-                f"{project_info['sheet_prefix']}_"
-                f"Subdivision_Test_Register.xlsx"
+                f"{project_info['sheet_prefix']}_Subdivision_Test_Register.xlsx"
             ),
             mime=(
                 "application/vnd.openxmlformats-officedocument."
                 "spreadsheetml.sheet"
             ),
             use_container_width=True,
-            key="test_sheet_download_excel",
         )
 
-    with download_col_2:
+    with column_2:
         st.download_button(
-            "⬇️ Download CSV Register",
-            data=reviewed_register.to_csv(
-                index=False
-            ).encode("utf-8"),
+            "Download CSV Register",
+            data=reviewed_register.to_csv(index=False).encode("utf-8"),
             file_name=clean_filename(
-                f"{project_info['sheet_prefix']}_"
-                f"Subdivision_Test_Register.csv"
+                f"{project_info['sheet_prefix']}_Subdivision_Test_Register.csv"
             ),
             mime="text/csv",
             use_container_width=True,
-            key="test_sheet_download_csv",
         )
 
-    with download_col_3:
+    with column_3:
+        st.download_button(
+            "Download Full TXT Register / Audit Log",
+            data=full_register_text.encode("utf-8"),
+            file_name=clean_filename(
+                f"{project_info['sheet_prefix']}_Subdivision_Test_Register_and_Audit_Log.txt"
+            ),
+            mime="text/plain",
+            use_container_width=True,
+        )
+
+    with column_4:
         if approved_register.empty:
             st.button(
-                "📦 Generate DOCX Test Sheets",
+                "Generate DOCX + TXT ZIP",
                 disabled=True,
                 use_container_width=True,
-                key="test_sheet_generate_docx_disabled",
             )
-
-            st.caption(
-                "Set Review Status to 'Approved for generation' for "
-                "at least one valid test row."
-            )
-
         else:
             if st.button(
-                f"📦 Generate {len(approved_register)} DOCX Test Sheet(s)",
+                f"Generate {len(approved_register)} DOCX + TXT Test Sheet(s)",
                 type="primary",
                 use_container_width=True,
-                key="test_sheet_generate_docx",
             ):
                 progress_text = st.empty()
                 progress_bar = st.progress(0)
 
                 try:
-                    docx_zip = create_docx_zip(
+                    export_zip = create_export_zip(
                         register=approved_register,
                         project_info=project_info,
                         progress_bar=progress_bar,
                         progress_text=progress_text,
                     )
 
-                    st.session_state["test_sheet_docx_zip"] = docx_zip
+                    st.session_state["test_sheet_export_zip"] = export_zip
 
                 except Exception as exc:
-                    progress_bar.empty()
                     progress_text.error(
-                        f"DOCX generation failed: "
-                        f"{type(exc).__name__}: {exc}"
+                        f"Export generation failed: {type(exc).__name__}: {exc}"
                     )
                     st.exception(exc)
 
-            docx_zip = st.session_state.get(
-                "test_sheet_docx_zip"
-            )
+    export_zip = st.session_state.get("test_sheet_export_zip")
 
-            if docx_zip:
-                st.download_button(
-                    "⬇️ Download DOCX Test Sheets ZIP",
-                    data=docx_zip,
-                    file_name=clean_filename(
-                        f"{project_info['sheet_prefix']}_"
-                        f"ATC_Low_Speed_Test_Sheets.zip"
-                    ),
-                    mime="application/zip",
-                    use_container_width=True,
-                    key="test_sheet_download_docx_zip",
-                )
+    if export_zip:
+        st.download_button(
+            "Download DOCX + TXT Test Sheets ZIP",
+            data=export_zip,
+            file_name=clean_filename(
+                f"{project_info['sheet_prefix']}_ATC_Low_Speed_Test_Sheets.zip"
+            ),
+            mime="application/zip",
+            use_container_width=True,
+        )
