@@ -4,10 +4,36 @@ import io
 import re
 import zipfile
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+
+
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
+REGISTER_COLUMNS = [
+    "test_code",
+    "test_name",
+    "needs_abscissa",
+    "sector",
+    "section",
+    "subsection",
+    "branch",
+    "direction",
+    "participate_abscissa_m",
+    "participate_variant",
+    "anticipate_variant",
+    "anticipate_abscissa_m",
+    "location_name",
+    "event_name",
+    "remarks",
+    "source_row",
+    "review_status",
+    "checks",
+]
 
 
 # =============================================================================
@@ -15,7 +41,7 @@ import streamlit as st
 # =============================================================================
 
 def safe_text(value: Any) -> str:
-    """Convert values safely to stripped text."""
+    """Safely convert a value to stripped text."""
     if value is None:
         return ""
 
@@ -29,11 +55,49 @@ def safe_text(value: Any) -> str:
 
 
 def normalise_spaces(value: Any) -> str:
+    """Replace repeated spaces/newlines with one space."""
     return re.sub(r"\s+", " ", safe_text(value)).strip()
+
+
+def clean_filename(value: str) -> str:
+    """Create a safe filename."""
+    value = safe_text(value)
+    value = re.sub(r'[\\/:*?"<>|]', "_", value)
+    value = re.sub(r"\s+", "_", value)
+    return value[:150] or "ATC_Test_Sheet"
+
+
+def to_number(value: Any) -> Optional[float]:
+    """Convert a KP/abscissa value to float where possible."""
+    text = safe_text(value)
+
+    if not text:
+        return None
+
+    text = text.replace(",", "").replace(" ", "")
+
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def to_bool(value: Any) -> bool:
+    """Convert Excel-style Yes/No, True/False values to bool."""
+    return safe_text(value).upper() in {
+        "YES",
+        "Y",
+        "TRUE",
+        "T",
+        "1",
+        "REQUIRED",
+    }
 
 
 def normalise_branch(value: Any) -> str:
     """
+    Normalise branch numbers.
+
     Examples:
         9-1-1-0       -> 09-01-1-0
         09-01-1-0     -> 09-01-1-0
@@ -59,7 +123,8 @@ def normalise_branch(value: Any) -> str:
     )
 
 
-def branch_parts(branch: str) -> tuple[str, str, str]:
+def branch_parts(branch: str) -> Tuple[str, str, str]:
+    """Return Sector, Section and Subsection from a branch string."""
     parts = safe_text(branch).split("-")
 
     sector = parts[0] if len(parts) >= 1 else ""
@@ -69,54 +134,31 @@ def branch_parts(branch: str) -> tuple[str, str, str]:
     return sector, section, subsection
 
 
-def clean_filename(value: str) -> str:
-    value = safe_text(value)
-    value = re.sub(r'[\\/:*?"<>|]', "_", value)
-    value = re.sub(r"\s+", "_", value)
-    return value[:150] or "Test_Sheet"
-
-
-def to_number(value: Any) -> Optional[float]:
-    text = safe_text(value).replace(",", "").replace(" ", "")
-
-    if not text:
-        return None
-
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def yes_no(value: Any) -> bool:
-    return safe_text(value).upper() in {
-        "YES",
-        "Y",
-        "TRUE",
-        "1",
-        "T",
-    }
-
-
 # =============================================================================
-# INPUT COLUMN NORMALISATION
+# INPUT WORKBOOK COLUMN ALIASES
 # =============================================================================
 
+# The uploaded Subdivision worksheet may have different column names.
+# These aliases allow the application to recognise common variations.
 COLUMN_ALIASES: Dict[str, List[str]] = {
     "kp": [
         "kp",
         "k.p.",
         "k.p",
+        "k p",
         "abscissa",
         "abscissa_m",
         "abscissa (m)",
         "chainage",
         "chainage_m",
+        "chainage (m)",
     ],
     "branch": [
         "branch",
-        "branch_number",
         "branch number",
+        "branch_number",
+        "branch no",
+        "branch_no",
     ],
     "sector": [
         "sector",
@@ -135,7 +177,9 @@ COLUMN_ALIASES: Dict[str, List[str]] = {
         "event name",
         "name",
         "singularity",
+        "singularity name",
         "singularity_name",
+        "event",
         "type",
     ],
     "remarks": [
@@ -144,45 +188,72 @@ COLUMN_ALIASES: Dict[str, List[str]] = {
         "description",
         "details",
         "singularities",
+        "comment",
+        "comments",
     ],
     "variant_number": [
-        "variant_number",
         "variant number",
+        "variant_number",
         "variant",
-        "variant_no",
         "variant no",
+        "variant_no",
+        "variant rank",
         "rank",
     ],
     "participate_variant": [
-        "participate_variant",
-        "participating_variant",
         "participate variant",
-        "associated_variant",
+        "participate_variant",
+        "participating variant",
+        "participating_variant",
         "associated variant",
+        "associated_variant",
     ],
     "anticipate_variant": [
-        "anticipate_variant",
-        "anticipated_variant",
         "anticipate variant",
+        "anticipate_variant",
         "anticipated variant",
+        "anticipated_variant",
+    ],
+    "anticipate_abscissa_m": [
+        "anticipate abscissa",
+        "anticipate_abscissa",
+        "anticipate abscissa m",
+        "anticipate_abscissa_m",
+        "anticipated abscissa",
+        "anticipated_abscissa",
+        "anticipated abscissa m",
+        "anticipated_abscissa_m",
     ],
     "location_name": [
-        "location_name",
         "location",
+        "location name",
+        "location_name",
         "asset",
+        "asset name",
         "asset_name",
         "signal",
+        "track circuit",
         "track_circuit",
     ],
     "direction": [
         "direction",
+        "track direction",
         "track_direction",
+        "normal direction",
         "normal_direction",
     ],
 }
 
 
-def find_column(dataframe: pd.DataFrame, aliases: List[str]) -> Optional[str]:
+# =============================================================================
+# WORKBOOK READING AND NORMALISATION
+# =============================================================================
+
+def find_column(
+    dataframe: pd.DataFrame,
+    aliases: List[str],
+) -> Optional[str]:
+    """Find an actual dataframe column using a list of aliases."""
     lookup = {
         normalise_spaces(column).lower(): column
         for column in dataframe.columns
@@ -195,34 +266,43 @@ def find_column(dataframe: pd.DataFrame, aliases: List[str]) -> Optional[str]:
     return None
 
 
-def standardise_subdivision_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
+def standardise_subdivision_dataframe(
+    raw_dataframe: pd.DataFrame,
+) -> pd.DataFrame:
     """
-    Convert user workbook columns into standard internal columns.
+    Convert uploaded Subdivision data to the internal standard structure.
 
-    The source workbook can use different headings such as:
-    - K.P.
-    - Abscissa
-    - Name
-    - Remarks
-    - Associated Variant
+    Required practical information:
+        - KP / Abscissa
+        - Event Name, Name or Remarks
+        - Branch is strongly recommended
+
+    The application will populate Sector, Section and Subsection from the
+    Branch Number if they are not separately provided.
     """
-    output = pd.DataFrame(index=raw.index)
+    output = pd.DataFrame(index=raw_dataframe.index)
 
-    for standard_name, aliases in COLUMN_ALIASES.items():
-        source_column = find_column(raw, aliases)
+    for standard_column, aliases in COLUMN_ALIASES.items():
+        actual_column = find_column(raw_dataframe, aliases)
 
-        if source_column:
-            output[standard_name] = raw[source_column]
+        if actual_column:
+            output[standard_column] = raw_dataframe[actual_column]
         else:
-            output[standard_name] = ""
+            output[standard_column] = ""
 
     output["kp"] = output["kp"].apply(to_number)
+    output["anticipate_abscissa_m"] = (
+        output["anticipate_abscissa_m"].apply(to_number)
+    )
 
     output["branch"] = output["branch"].apply(normalise_branch)
 
     for index in output.index:
         branch = safe_text(output.at[index, "branch"])
-        branch_sector, branch_section, branch_subsection = branch_parts(branch)
+
+        branch_sector, branch_section, branch_subsection = (
+            branch_parts(branch)
+        )
 
         if not safe_text(output.at[index, "sector"]):
             output.at[index, "sector"] = branch_sector
@@ -234,16 +314,31 @@ def standardise_subdivision_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
             output.at[index, "subsection"] = branch_subsection
 
     for column in output.columns:
-        if column != "kp":
+        if column not in {"kp", "anticipate_abscissa_m"}:
             output[column] = output[column].apply(safe_text)
 
-    output["source_row"] = raw.index + 2
+    # Excel header is normally row 1; dataframe row zero represents Excel row 2.
+    output["source_row"] = raw_dataframe.index + 2
 
     return output
 
 
-def standardise_mapping_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
-    """Validate and standardise the TestMapping sheet."""
+def standardise_mapping_dataframe(
+    raw_dataframe: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Standardise TestMapping worksheet.
+
+    Required TestMapping columns:
+        event_pattern
+        test_code
+        test_name
+        needs_abscissa
+        include_anticipate
+
+    Optional:
+        checks
+    """
     required_columns = [
         "event_pattern",
         "test_code",
@@ -254,37 +349,43 @@ def standardise_mapping_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
 
     lookup = {
         normalise_spaces(column).lower(): column
-        for column in raw.columns
+        for column in raw_dataframe.columns
     }
 
     missing = [
-        column
-        for column in required_columns
-        if column.lower() not in lookup
+        required
+        for required in required_columns
+        if required.lower() not in lookup
     ]
 
     if missing:
         raise ValueError(
-            "TestMapping sheet is missing required column(s): "
+            "The TestMapping worksheet is missing required columns: "
             + ", ".join(missing)
         )
 
     mapping = pd.DataFrame()
 
     for column in required_columns + ["checks"]:
-        source_column = lookup.get(column.lower())
+        actual_column = lookup.get(column.lower())
 
-        if source_column:
-            mapping[column] = raw[source_column]
+        if actual_column:
+            mapping[column] = raw_dataframe[actual_column]
         else:
             mapping[column] = ""
 
     mapping["event_pattern"] = mapping["event_pattern"].apply(safe_text)
     mapping["test_code"] = mapping["test_code"].apply(safe_text)
     mapping["test_name"] = mapping["test_name"].apply(safe_text)
-    mapping["needs_abscissa"] = mapping["needs_abscissa"].apply(yes_no)
-    mapping["include_anticipate"] = mapping["include_anticipate"].apply(yes_no)
     mapping["checks"] = mapping["checks"].apply(safe_text)
+
+    mapping["needs_abscissa"] = (
+        mapping["needs_abscissa"].apply(to_bool)
+    )
+
+    mapping["include_anticipate"] = (
+        mapping["include_anticipate"].apply(to_bool)
+    )
 
     mapping = mapping[
         mapping["event_pattern"].astype(str).str.strip().ne("")
@@ -293,46 +394,140 @@ def standardise_mapping_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
     return mapping.reset_index(drop=True)
 
 
-# =============================================================================
-# PARTICIPATE / ANTICIPATE VARIANT RESOLUTION
-# =============================================================================
-
-def extract_variant_from_text(text: Any, label: str) -> str:
+def read_project_information(
+    workbook_sheets: Dict[str, pd.DataFrame],
+) -> Dict[str, str]:
     """
-    Extract values such as:
+    Read optional Project worksheet.
 
+    Expected structure:
+        Field | Value
+    """
+    project_info = {
+        "procedure_reference": "C1252-TAC-XXXX",
+        "procedure_title": "ATC Dynamic Test Procedure",
+        "project": "",
+        "trackside_version": "",
+        "atp_version": "",
+        "ato_version": "",
+        "sheet_prefix": "ATC-TEST",
+    }
+
+    project_sheet_name = None
+
+    for sheet_name in workbook_sheets:
+        if sheet_name.strip().lower() == "project":
+            project_sheet_name = sheet_name
+            break
+
+    if not project_sheet_name:
+        return project_info
+
+    project_dataframe = workbook_sheets[project_sheet_name].copy()
+
+    if (
+        "Field" not in project_dataframe.columns
+        or "Value" not in project_dataframe.columns
+    ):
+        return project_info
+
+    project_key_map = {
+        "procedure reference": "procedure_reference",
+        "procedure title": "procedure_title",
+        "project": "project",
+        "project / contract": "project",
+        "trackside version": "trackside_version",
+        "atp version": "atp_version",
+        "ato version": "ato_version",
+        "test sheet prefix": "sheet_prefix",
+    }
+
+    for _, row in project_dataframe.iterrows():
+        field = safe_text(row.get("Field")).lower()
+        value = safe_text(row.get("Value"))
+
+        if field in project_key_map:
+            project_info[project_key_map[field]] = value
+
+    if not project_info["sheet_prefix"]:
+        project_info["sheet_prefix"] = (
+            project_info["procedure_reference"]
+        )
+
+    return project_info
+
+
+def find_sheet_name(
+    workbook_sheets: Dict[str, pd.DataFrame],
+    expected_name: str,
+) -> Optional[str]:
+    """Find a worksheet name without case sensitivity."""
+    for sheet_name in workbook_sheets:
+        if sheet_name.strip().lower() == expected_name.lower():
+            return sheet_name
+
+    return None
+
+
+# =============================================================================
+# PARTICIPATING / ANTICIPATED VARIANT RESOLUTION
+# =============================================================================
+
+def extract_variant_from_remarks(
+    remarks: str,
+    labels: List[str],
+) -> str:
+    """
+    Extract a variant reference from free text.
+
+    Examples supported:
         Associated variant: (TUC KP T/C)
+        Participate variant: 7
+        Participating Variant = TC 2450
         Anticipate variant: 14-07-1
-        Participating variant = 3
+        Anticipated Variant: 5
 
-    This supports source data where variants have not yet been separated
-    into dedicated workbook columns.
+    This is a helper only. Dedicated Excel columns are always preferred.
     """
-    value = safe_text(text)
+    text = safe_text(remarks)
 
-    pattern = (
-        rf"{label}"
-        r"(?:\s+(?:variant|variants|number))?"
-        r"\s*[:=]?\s*"
-        r"\(?([^()\n]+?)\)?"
-        r"(?=$|;|\||\n|,?\s+(?:anticipate|associated|participate|"
-        r"number of|rank of|sub section))"
-    )
+    if not text:
+        return ""
 
-    match = re.search(pattern, value, flags=re.IGNORECASE)
+    for label in labels:
+        pattern = (
+            rf"(?:{label})"
+            r"(?:\s+(?:variant|variants|number))?"
+            r"\s*[:=]?\s*"
+            r"\(?([^()\n;|]+?)\)?"
+            r"(?=$|;|\||\n|"
+            r",\s*(?:associated|participate|participating|"
+            r"anticipate|anticipated|number of|rank of|sub section))"
+        )
 
-    if match:
-        return normalise_spaces(match.group(1))
+        match = re.search(
+            pattern,
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        if match:
+            return normalise_spaces(match.group(1))
 
     return ""
 
 
-def build_variant_index(subdivision: pd.DataFrame) -> Dict[str, List[pd.Series]]:
+def build_variant_index(
+    subdivision: pd.DataFrame,
+) -> Dict[str, List[pd.Series]]:
     """
-    Builds an index which can be used to locate a variant and obtain
-    its related event abscissa.
+    Build an index of variant number -> relevant subdivision rows.
+
+    This lets the generator estimate anticipated abscissa where:
+        - an anticipated variant is provided; and
+        - another subdivision row contains that variant number and a KP.
     """
-    index: Dict[str, List[pd.Series]] = {}
+    variant_index: Dict[str, List[pd.Series]] = {}
 
     for _, row in subdivision.iterrows():
         variant = safe_text(row.get("variant_number"))
@@ -341,9 +536,32 @@ def build_variant_index(subdivision: pd.DataFrame) -> Dict[str, List[pd.Series]]
             continue
 
         key = variant.upper()
-        index.setdefault(key, []).append(row)
+        variant_index.setdefault(key, []).append(row)
 
-    return index
+    return variant_index
+
+
+def variant_candidates(value: str) -> List[str]:
+    """
+    Produce possible index keys for a variant value.
+
+    Example:
+        'Variant 7' -> ['VARIANT 7', '7']
+        '7'         -> ['7']
+    """
+    text = safe_text(value).upper()
+
+    if not text:
+        return []
+
+    candidates = [text]
+
+    numeric_match = re.search(r"\b(\d+)\b", text)
+
+    if numeric_match:
+        candidates.append(numeric_match.group(1))
+
+    return list(dict.fromkeys(candidates))
 
 
 def resolve_variant_abscissa(
@@ -352,76 +570,46 @@ def resolve_variant_abscissa(
     reference_kp: Optional[float],
 ) -> Optional[float]:
     """
-    Find the closest matching variant row and return its KP/abscissa.
+    Locate the closest known abscissa/KP for a variant.
 
-    If there are several rows with the same variant number, the nearest
-    row to the participating event KP is used.
+    If more than one source row has the same variant number, the row closest
+    to the participating event abscissa is selected.
     """
-    value = safe_text(variant_value).upper()
+    candidate_rows: List[pd.Series] = []
 
-    if not value:
-        return None
+    for candidate in variant_candidates(variant_value):
+        candidate_rows.extend(
+            variant_index.get(candidate, [])
+        )
 
-    candidate_keys = [value]
-
-    numeric_match = re.search(r"\b(\d+)\b", value)
-
-    if numeric_match:
-        candidate_keys.append(numeric_match.group(1))
-
-    candidates: List[pd.Series] = []
-
-    for key in candidate_keys:
-        candidates.extend(variant_index.get(key, []))
-
-    if not candidates:
-        return None
-
-    candidates_with_kp = [
-        row for row in candidates
+    candidate_rows = [
+        row
+        for row in candidate_rows
         if pd.notna(row.get("kp"))
     ]
 
-    if not candidates_with_kp:
+    if not candidate_rows:
         return None
 
     if reference_kp is None:
-        return float(candidates_with_kp[0]["kp"])
+        return float(candidate_rows[0]["kp"])
 
-    closest = min(
-        candidates_with_kp,
-        key=lambda row: abs(float(row["kp"]) - reference_kp),
+    closest_row = min(
+        candidate_rows,
+        key=lambda row: abs(
+            float(row["kp"]) - float(reference_kp)
+        ),
     )
 
-    return float(closest["kp"])
+    return float(closest_row["kp"])
 
 
 # =============================================================================
-# TEST-POINT BUILDING
+# TEST MATCHING
 # =============================================================================
 
-REGISTER_COLUMNS = [
-    "test_code",
-    "test_name",
-    "needs_abscissa",
-    "sector",
-    "section",
-    "subsection",
-    "branch",
-    "direction",
-    "participate_abscissa_m",
-    "participate_variant",
-    "anticipate_variant",
-    "anticipate_abscissa_m",
-    "location_name",
-    "event_name",
-    "remarks",
-    "source_row",
-    "review_status",
-]
-
-
-def event_text(row: pd.Series) -> str:
+def build_searchable_event_text(row: pd.Series) -> str:
+    """Build text used to match TestMapping regular-expression rules."""
     return " ".join(
         [
             safe_text(row.get("event_name")),
@@ -433,82 +621,100 @@ def event_text(row: pd.Series) -> str:
     )
 
 
-def match_tests_for_event(
+def create_test_records_for_event(
     row: pd.Series,
     mapping: pd.DataFrame,
     variant_index: Dict[str, List[pd.Series]],
 ) -> List[Dict[str, Any]]:
     """
-    Match an event row against every TestMapping regex rule.
+    Create zero, one or multiple test records for a subdivision event.
 
-    Multiple tests can be generated from one singularity if multiple
-    mapping rules match.
+    Test generation depends entirely on TestMapping worksheet rules.
+    There is no Python hard-coding of LS01, LS02, LS03 etc.
     """
     output: List[Dict[str, Any]] = []
-    searchable_text = event_text(row)
+
+    searchable_text = build_searchable_event_text(row)
+
     source_kp = row.get("kp")
 
-    participate_variant = safe_text(row.get("participate_variant"))
-    anticipate_variant = safe_text(row.get("anticipate_variant"))
+    participate_variant = safe_text(
+        row.get("participate_variant")
+    )
+
+    anticipate_variant = safe_text(
+        row.get("anticipate_variant")
+    )
+
     remarks = safe_text(row.get("remarks"))
 
     if not participate_variant:
-        participate_variant = extract_variant_from_text(
+        participate_variant = extract_variant_from_remarks(
             remarks,
-            r"(?:associated|participate|participating)",
+            labels=[
+                "associated",
+                "participate",
+                "participating",
+            ],
         )
 
     if not anticipate_variant:
-        anticipate_variant = extract_variant_from_text(
+        anticipate_variant = extract_variant_from_remarks(
             remarks,
-            r"anticipate(?:d)?",
+            labels=[
+                "anticipate",
+                "anticipated",
+            ],
         )
 
+    explicit_anticipate_abs = row.get("anticipate_abscissa_m")
+
     for _, rule in mapping.iterrows():
-        pattern = safe_text(rule["event_pattern"])
+        event_pattern = safe_text(rule.get("event_pattern"))
 
         try:
-            matched = re.search(
-                pattern,
+            pattern_match = re.search(
+                event_pattern,
                 searchable_text,
                 flags=re.IGNORECASE,
             )
         except re.error as exc:
             raise ValueError(
-                f"Invalid TestMapping regex '{pattern}': {exc}"
+                f"Invalid regular expression in TestMapping: "
+                f"'{event_pattern}'. Error: {exc}"
             ) from exc
 
-        if not matched:
+        if not pattern_match:
             continue
 
-        needs_abscissa = bool(rule["needs_abscissa"])
-        include_anticipate = bool(rule["include_anticipate"])
+        needs_abscissa = bool(rule.get("needs_abscissa"))
+        include_anticipate = bool(rule.get("include_anticipate"))
 
-        participate_abscissa: Optional[float]
-        anticipate_abscissa: Optional[float]
-
-        if needs_abscissa:
-            participate_abscissa = (
-                float(source_kp)
-                if pd.notna(source_kp)
-                else None
-            )
+        # Participating abscissa is only populated where the mapping says
+        # the test requires abscissa.
+        if needs_abscissa and pd.notna(source_kp):
+            participate_abscissa = float(source_kp)
         else:
             participate_abscissa = None
 
-        if include_anticipate:
-            anticipate_abscissa = resolve_variant_abscissa(
-                variant_value=anticipate_variant,
-                variant_index=variant_index,
-                reference_kp=participate_abscissa,
-            )
-        else:
-            anticipate_abscissa = None
+        anticipate_abscissa: Optional[float] = None
+
+        if include_anticipate and anticipate_variant:
+            if pd.notna(explicit_anticipate_abs):
+                anticipate_abscissa = float(
+                    explicit_anticipate_abs
+                )
+            else:
+                anticipate_abscissa = resolve_variant_abscissa(
+                    variant_value=anticipate_variant,
+                    variant_index=variant_index,
+                    reference_kp=participate_abscissa,
+                )
 
         output.append(
             {
-                "test_code": safe_text(rule["test_code"]),
-                "test_name": safe_text(rule["test_name"]),
+                "test_code": safe_text(rule.get("test_code")),
+                "test_name": safe_text(rule.get("test_name")),
                 "needs_abscissa": needs_abscissa,
                 "sector": safe_text(row.get("sector")),
                 "section": safe_text(row.get("section")),
@@ -523,9 +729,11 @@ def match_tests_for_event(
                     else ""
                 ),
                 "anticipate_abscissa_m": anticipate_abscissa,
-                "location_name": safe_text(row.get("location_name")),
+                "location_name": safe_text(
+                    row.get("location_name")
+                ),
                 "event_name": safe_text(row.get("event_name")),
-                "remarks": safe_text(row.get("remarks")),
+                "remarks": remarks,
                 "source_row": safe_text(row.get("source_row")),
                 "review_status": "To be reviewed",
                 "checks": safe_text(rule.get("checks")),
@@ -541,42 +749,58 @@ def create_test_register(
     start_kp: float,
     end_kp: float,
     selected_branch: str = "",
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Find all events between selected start/end KPs and create test records.
+    Select all source events between start and end KP and create test sheets.
+
+    Returns:
+        test_register
+        selected_subdivision_events
     """
     lower_kp = min(start_kp, end_kp)
     upper_kp = max(start_kp, end_kp)
 
-    selected = subdivision[
+    selected_events = subdivision[
         subdivision["kp"].notna()
-        & subdivision["kp"].between(lower_kp, upper_kp, inclusive="both")
+        & subdivision["kp"].between(
+            lower_kp,
+            upper_kp,
+            inclusive="both",
+        )
     ].copy()
 
     if selected_branch:
-        selected = selected[
-            selected["branch"].astype(str).eq(selected_branch)
+        selected_events = selected_events[
+            selected_events["branch"].eq(selected_branch)
         ].copy()
+
+    selected_events = selected_events.sort_values(
+        by=["branch", "kp"],
+        na_position="last",
+    ).reset_index(drop=True)
 
     variant_index = build_variant_index(subdivision)
 
     records: List[Dict[str, Any]] = []
 
-    for _, row in selected.iterrows():
+    for _, event_row in selected_events.iterrows():
         records.extend(
-            match_tests_for_event(
-                row=row,
+            create_test_records_for_event(
+                row=event_row,
                 mapping=mapping,
                 variant_index=variant_index,
             )
         )
 
     if not records:
-        return pd.DataFrame(columns=REGISTER_COLUMNS + ["checks"])
+        return (
+            pd.DataFrame(columns=REGISTER_COLUMNS),
+            selected_events,
+        )
 
-    result = pd.DataFrame(records)
+    register = pd.DataFrame(records)
 
-    result = result.drop_duplicates(
+    register = register.drop_duplicates(
         subset=[
             "test_code",
             "branch",
@@ -587,20 +811,30 @@ def create_test_register(
         ]
     ).reset_index(drop=True)
 
-    result = result.sort_values(
-        by=["branch", "participate_abscissa_m", "test_code"],
+    register = register.sort_values(
+        by=[
+            "branch",
+            "participate_abscissa_m",
+            "test_code",
+        ],
         na_position="last",
     ).reset_index(drop=True)
 
-    return result
+    return register, selected_events
 
 
 # =============================================================================
-# DOCX GENERATION
+# DOCX TEST SHEET GENERATION
 # =============================================================================
 
-def set_cell_text(cell: Any, text: str, bold: bool = False) -> None:
+def set_cell_text(
+    cell: Any,
+    text: str,
+    bold: bool = False,
+) -> None:
+    """Set Word table cell content."""
     cell.text = ""
+
     paragraph = cell.paragraphs[0]
     run = paragraph.add_run(safe_text(text))
     run.bold = bold
@@ -611,18 +845,24 @@ def add_table_row(
     values: List[str],
     bold: bool = False,
 ) -> None:
+    """Add a row to a python-docx table."""
     cells = table.add_row().cells
 
     for index, value in enumerate(values):
-        set_cell_text(cells[index], value, bold=bold)
+        set_cell_text(
+            cells[index],
+            value,
+            bold=bold,
+        )
 
 
 def checks_from_row(row: pd.Series) -> List[str]:
     """
-    Checks are configured in TestMapping with | separators.
+    Obtain checks from the TestMapping worksheet.
 
-    Example:
-        Track circuit occupied|Record Loc Max|Confirm target speed
+    Checks must use pipe separators in Excel:
+
+        Track circuit occupied|Record Loc Max|Confirm target distance
     """
     configured_checks = safe_text(row.get("checks"))
 
@@ -634,22 +874,32 @@ def checks_from_row(row: pd.Series) -> List[str]:
         ]
 
     return [
-        "Confirm engineering source and approved design data.",
-        "Record OMAP / onboard / wayside evidence reference.",
-        "Confirm participating variant state.",
+        "Confirm applicable approved engineering source.",
+        "Confirm participating variant condition.",
+        "Record OMAP, wayside log, screenshot or test evidence.",
     ]
+
+
+def format_abscissa(value: Any) -> str:
+    """Format abscissa for display."""
+    numeric = to_number(value)
+
+    if numeric is None:
+        return ""
+
+    return f"{numeric:.3f} m"
 
 
 def create_docx_test_sheet(
     row: pd.Series,
-    project: Dict[str, str],
+    project_info: Dict[str, str],
     sheet_number: str,
 ) -> bytes:
     """
-    Create a generic project-configurable DOCX test sheet.
+    Generate one generic configurable DOCX test sheet.
 
-    The tests and checks are driven by TestMapping, not hard-coded
-    LS01–LS14 Python logic.
+    The generated test title, abscissa requirement, anticipated information
+    and test actions all originate from the workbook data and mapping rules.
     """
     try:
         from docx import Document
@@ -657,7 +907,8 @@ def create_docx_test_sheet(
         from docx.shared import Inches, Pt
     except ImportError as exc:
         raise RuntimeError(
-            "Missing python-docx. Install with: pip install python-docx"
+            "Missing dependency: python-docx. "
+            "Install using: pip install python-docx"
         ) from exc
 
     document = Document()
@@ -671,61 +922,68 @@ def create_docx_test_sheet(
     document.styles["Normal"].font.name = "Arial"
     document.styles["Normal"].font.size = Pt(8)
 
-    heading = document.add_paragraph()
-    heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    header = document.add_paragraph()
+    header.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    heading_run = heading.add_run(
-        project["procedure_title"]
+    header_run = header.add_run(
+        safe_text(project_info["procedure_title"])
     )
-    heading_run.bold = True
-    heading_run.font.size = Pt(13)
+    header_run.bold = True
+    header_run.font.size = Pt(13)
 
     title = document.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     title_run = title.add_run(
-        f"{safe_text(row['test_code'])} – {safe_text(row['test_name'])}"
+        f"{safe_text(row.get('test_code'))} – "
+        f"{safe_text(row.get('test_name'))}"
     )
     title_run.bold = True
     title_run.font.size = Pt(11)
 
     document.add_paragraph()
 
-    details_table = document.add_table(rows=0, cols=4)
-    details_table.style = "Table Grid"
+    # -------------------------------------------------------------------------
+    # Project information
+    # -------------------------------------------------------------------------
+    info_table = document.add_table(rows=0, cols=4)
+    info_table.style = "Table Grid"
 
     add_table_row(
-        details_table,
+        info_table,
         [
             "Procedure Reference",
-            project["procedure_reference"],
+            project_info["procedure_reference"],
             "Test Sheet Number",
             sheet_number,
         ],
     )
 
     add_table_row(
-        details_table,
+        info_table,
         [
             "Project / Contract",
-            project["project"],
+            project_info["project"],
             "Trackside Version",
-            project["trackside_version"],
+            project_info["trackside_version"],
         ],
     )
 
     add_table_row(
-        details_table,
+        info_table,
         [
             "ATP Version",
-            project["atp_version"],
+            project_info["atp_version"],
             "ATO Version",
-            project["ato_version"],
+            project_info["ato_version"],
         ],
     )
 
     document.add_paragraph()
 
+    # -------------------------------------------------------------------------
+    # Location and variant information
+    # -------------------------------------------------------------------------
     location_table = document.add_table(rows=0, cols=4)
     location_table.style = "Table Grid"
 
@@ -734,7 +992,7 @@ def create_docx_test_sheet(
         [
             "Sector",
             safe_text(row.get("sector")),
-            "Branch",
+            "Branch Number",
             safe_text(row.get("branch")),
         ],
     )
@@ -753,18 +1011,13 @@ def create_docx_test_sheet(
     )
 
     if bool(row.get("needs_abscissa")):
-        participate_abs = safe_text(
-            row.get("participate_abscissa_m")
-        )
-
-        if participate_abs:
-            participate_abs += " m"
-
         add_table_row(
             location_table,
             [
                 "Participating Abscissa",
-                participate_abs,
+                format_abscissa(
+                    row.get("participate_abscissa_m")
+                ),
                 "Participating Variant",
                 safe_text(row.get("participate_variant")),
             ],
@@ -775,28 +1028,24 @@ def create_docx_test_sheet(
             [
                 "Participating Variant",
                 safe_text(row.get("participate_variant")),
-                "Abscissa Requirement",
+                "Abscissa",
                 "Not required for this test",
             ],
         )
 
-    anticipate_variant = safe_text(row.get("anticipate_variant"))
-
-    if anticipate_variant:
-        anticipated_abs = safe_text(
-            row.get("anticipate_abscissa_m")
-        )
-
-        if anticipated_abs:
-            anticipated_abs += " m"
-
+    if safe_text(row.get("anticipate_variant")):
         add_table_row(
             location_table,
             [
                 "Anticipated Variant",
-                anticipate_variant,
+                safe_text(row.get("anticipate_variant")),
                 "Anticipated Abscissa",
-                anticipated_abs or "To be confirmed",
+                (
+                    format_abscissa(
+                        row.get("anticipate_abscissa_m")
+                    )
+                    or "To be verified"
+                ),
             ],
         )
 
@@ -812,6 +1061,9 @@ def create_docx_test_sheet(
 
     document.add_paragraph()
 
+    # -------------------------------------------------------------------------
+    # Configurable test checks
+    # -------------------------------------------------------------------------
     test_table = document.add_table(rows=1, cols=4)
     test_table.style = "Table Grid"
 
@@ -822,15 +1074,19 @@ def create_docx_test_sheet(
         "OK?",
     ]
 
-    for index, text in enumerate(headers):
-        set_cell_text(test_table.rows[0].cells[index], text, bold=True)
+    for index, header_text in enumerate(headers):
+        set_cell_text(
+            test_table.rows[0].cells[index],
+            header_text,
+            bold=True,
+        )
 
     for check in checks_from_row(row):
         add_table_row(
             test_table,
             [
                 check,
-                "Compliant with approved design and test procedure.",
+                "Compliant with approved design and procedure.",
                 "",
                 "☐ Y   ☐ N   ☐ N/A",
             ],
@@ -838,25 +1094,38 @@ def create_docx_test_sheet(
 
     document.add_paragraph()
 
-    comments = document.add_paragraph()
-    comments.add_run("Engineering Notes / Source Evidence").bold = True
+    # -------------------------------------------------------------------------
+    # Notes
+    # -------------------------------------------------------------------------
+    notes_title = document.add_paragraph()
+    notes_title.add_run(
+        "Engineering Notes / Source Evidence"
+    ).bold = True
 
     notes_table = document.add_table(rows=1, cols=1)
     notes_table.style = "Table Grid"
 
-    note_text = (
+    notes = (
         f"Source row: {safe_text(row.get('source_row'))}\n"
-        f"Event: {safe_text(row.get('event_name'))}\n"
-        f"Remarks: {safe_text(row.get('remarks'))}\n\n"
-        "This sheet is automatically generated. The extracted data, "
-        "variants, abscissae, test applicability and acceptance criteria "
-        "must be reviewed against approved project documents before issue."
+        f"Source event: {safe_text(row.get('event_name'))}\n"
+        f"Subdivision remarks: {safe_text(row.get('remarks'))}\n\n"
+        "Important: this test sheet is automatically generated. "
+        "Participating variant, anticipated variant, abscissa, "
+        "test applicability and acceptance criteria must be checked "
+        "against approved project design, PAT, invariant, signalling "
+        "and test procedure documents before issue."
     )
 
-    set_cell_text(notes_table.rows[0].cells[0], note_text)
+    set_cell_text(
+        notes_table.rows[0].cells[0],
+        notes,
+    )
 
     document.add_paragraph()
 
+    # -------------------------------------------------------------------------
+    # Approval
+    # -------------------------------------------------------------------------
     approval_table = document.add_table(rows=0, cols=3)
     approval_table.style = "Table Grid"
 
@@ -873,8 +1142,8 @@ def create_docx_test_sheet(
         approval_table,
         [
             "Name",
-            "Contractor / Supplier",
-            "Client / Employer",
+            "Alstom / Contractor",
+            "MTR / Client",
         ],
     )
 
@@ -900,7 +1169,8 @@ def create_docx_test_sheet(
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     footer_run = footer.add_run(
-        "UNCONTROLLED WHEN PRINTED – Verify approved design data before use."
+        "UNCONTROLLED WHEN PRINTED – "
+        "Verify approved engineering data before use."
     )
     footer_run.italic = True
     footer_run.font.size = Pt(7)
@@ -913,8 +1183,9 @@ def create_docx_test_sheet(
 
 def create_docx_zip(
     register: pd.DataFrame,
-    project: Dict[str, str],
+    project_info: Dict[str, str],
 ) -> bytes:
+    """Create a ZIP archive containing all generated DOCX test sheets."""
     output = io.BytesIO()
 
     with zipfile.ZipFile(
@@ -922,30 +1193,32 @@ def create_docx_zip(
         "w",
         zipfile.ZIP_DEFLATED,
     ) as archive:
-        for sequence, (_, row) in enumerate(register.iterrows(), start=1):
+        for sequence, (_, row) in enumerate(
+            register.iterrows(),
+            start=1,
+        ):
             sheet_number = (
-                f"{project['sheet_prefix']}-{sequence:03d}"
+                f"{project_info['sheet_prefix']}-{sequence:03d}"
             )
 
-            branch = safe_text(row.get("branch")) or "NO_BRANCH"
             test_code = safe_text(row.get("test_code")) or "NO_CODE"
+            branch = safe_text(row.get("branch")) or "NO_BRANCH"
 
-            abs_value = safe_text(
+            abscissa = safe_text(
                 row.get("participate_abscissa_m")
             ) or "NO_ABSCISSA"
 
             filename = clean_filename(
-                f"{sheet_number}_{test_code}_{branch}_KP_{abs_value}.docx"
+                f"{sheet_number}_{test_code}_{branch}_KP_{abscissa}.docx"
             )
 
-            archive.writestr(
-                filename,
-                create_docx_test_sheet(
-                    row=row,
-                    project=project,
-                    sheet_number=sheet_number,
-                ),
+            docx_bytes = create_docx_test_sheet(
+                row=row,
+                project_info=project_info,
+                sheet_number=sheet_number,
             )
+
+            archive.writestr(filename, docx_bytes)
 
     return output.getvalue()
 
@@ -957,30 +1230,44 @@ def create_docx_zip(
 def create_excel_bytes(
     register: pd.DataFrame,
     selected_events: pd.DataFrame,
-    project: Dict[str, str],
+    project_info: Dict[str, str],
 ) -> bytes:
+    """Create Excel register export."""
     output = io.BytesIO()
 
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl",
+    ) as writer:
         cover = pd.DataFrame(
             [
-                ["Procedure Reference", project["procedure_reference"]],
-                ["Procedure Title", project["procedure_title"]],
-                ["Project / Contract", project["project"]],
-                ["Trackside Version", project["trackside_version"]],
-                ["ATP Version", project["atp_version"]],
-                ["ATO Version", project["ato_version"]],
+                ["Procedure Reference", project_info["procedure_reference"]],
+                ["Procedure Title", project_info["procedure_title"]],
+                ["Project / Contract", project_info["project"]],
+                ["Trackside Version", project_info["trackside_version"]],
+                ["ATP Version", project_info["atp_version"]],
+                ["ATO Version", project_info["ato_version"]],
                 ["Generated Date", str(date.today())],
                 ["Generated Test Sheets", len(register)],
             ],
             columns=["Field", "Value"],
         )
 
-        cover.to_excel(writer, sheet_name="Cover", index=False)
-        register.to_excel(writer, sheet_name="Test Register", index=False)
+        cover.to_excel(
+            writer,
+            sheet_name="Cover",
+            index=False,
+        )
+
+        register.to_excel(
+            writer,
+            sheet_name="Test Register",
+            index=False,
+        )
+
         selected_events.to_excel(
             writer,
-            sheet_name="Selected Subdivision Events",
+            sheet_name="Selected Source Events",
             index=False,
         )
 
@@ -998,19 +1285,24 @@ def create_excel_bytes(
 
                 worksheet.column_dimensions[
                     column_cells[0].column_letter
-                ].width = min(max(max_length + 2, 12), 65)
+                ].width = min(
+                    max(max_length + 2, 12),
+                    65,
+                )
 
     return output.getvalue()
 
 
 # =============================================================================
-# TEMPLATE DOWNLOAD
+# INPUT TEMPLATE
 # =============================================================================
 
 def create_input_template() -> bytes:
     """
-    Downloadable workbook template. This is only a starting structure;
-    project data must be imported from approved subdivision information.
+    Create a downloadable workbook template.
+
+    The TestMapping sheet defines all test rules. You can add new test
+    codes, names, event patterns and checks without editing generator.py.
     """
     output = io.BytesIO()
 
@@ -1024,12 +1316,13 @@ def create_input_template() -> bytes:
                 "subsection": "09-01-1",
                 "event_name": "Sub Section Heading",
                 "remarks": (
-                    "Associated variant: (TUC KP T/C); "
+                    "Associated variant: TUC KP T/C; "
                     "Anticipate variant: 14-07-1"
                 ),
                 "variant_number": "1",
                 "participate_variant": "TUC KP T/C",
                 "anticipate_variant": "14-07-1",
+                "anticipate_abscissa_m": "",
                 "location_name": "",
                 "direction": "Up",
             },
@@ -1040,11 +1333,27 @@ def create_input_template() -> bytes:
                 "section": "01",
                 "subsection": "09-01-1",
                 "event_name": "Spacing Stopping Point",
-                "remarks": "Associated variant: (TUC KP T/C)",
+                "remarks": "Associated variant: TUC KP T/C",
                 "variant_number": "5",
                 "participate_variant": "TUC KP T/C",
-                "anticipate_variant": "",
+                "anticipate_variant": "14-07-1",
+                "anticipate_abscissa_m": 1437.1,
                 "location_name": "TC 2450",
+                "direction": "Up",
+            },
+            {
+                "kp": 1531.5,
+                "branch": "09-01-1-0",
+                "sector": "09",
+                "section": "01",
+                "subsection": "09-01-1",
+                "event_name": "Return Channel",
+                "remarks": "Return channel number: 1",
+                "variant_number": "15-3",
+                "participate_variant": "",
+                "anticipate_variant": "",
+                "anticipate_abscissa_m": "",
+                "location_name": "Return Channel 1",
                 "direction": "Up",
             },
         ]
@@ -1058,25 +1367,59 @@ def create_input_template() -> bytes:
                 "test_name": (
                     "Spacing Stopping Point Test – Track Circuit"
                 ),
-                "needs_abscissa": True,
-                "include_anticipate": True,
+                "needs_abscissa": "Yes",
+                "include_anticipate": "Yes",
                 "checks": (
                     "Track circuit occupied|"
                     "Available mode CM/AUTO|"
                     "Record Loc Max|"
                     "Record target distance|"
-                    "Track circuit free"
+                    "Confirm OMAP target speed|"
+                    "Track circuit free|"
+                    "Confirm permissive target distance"
+                ),
+            },
+            {
+                "event_pattern": "SPECIAL STOPPING POINT",
+                "test_code": "LS04",
+                "test_name": (
+                    "Special Stopping Point Test – Signal Without Overlap"
+                ),
+                "needs_abscissa": "Yes",
+                "include_anticipate": "Yes",
+                "checks": (
+                    "Set restrictive signal condition|"
+                    "Confirm CM/AUTO availability|"
+                    "Record Loc Max and target distance|"
+                    "Set permissive signal condition|"
+                    "Confirm target-distance comparison"
+                ),
+            },
+            {
+                "event_pattern": "STATION",
+                "test_code": "LS08",
+                "test_name": (
+                    "Station Stopping Point and Door Side Verification"
+                ),
+                "needs_abscissa": "Yes",
+                "include_anticipate": "No",
+                "checks": (
+                    "Confirm Total Localisation|"
+                    "Confirm CM mode|"
+                    "Record precise stopping distance|"
+                    "Confirm correct platform door side|"
+                    "Confirm door enable tolerance"
                 ),
             },
             {
                 "event_pattern": "RETURN CHANNEL",
                 "test_code": "LS13",
                 "test_name": "Return Channel Test",
-                "needs_abscissa": False,
-                "include_anticipate": False,
+                "needs_abscissa": "No",
+                "include_anticipate": "No",
                 "checks": (
                     "Record return channel location|"
-                    "Confirm return-channel loop|"
+                    "Record loop or equipment reference|"
                     "Confirm trackside reception"
                 ),
             },
@@ -1084,12 +1427,27 @@ def create_input_template() -> bytes:
                 "event_pattern": "END OF SHUNT",
                 "test_code": "LS14",
                 "test_name": "End of Shunt Test",
-                "needs_abscissa": False,
-                "include_anticipate": False,
+                "needs_abscissa": "No",
+                "include_anticipate": "No",
                 "checks": (
-                    "Record shunt route name|"
-                    "Confirm RM operation|"
-                    "Confirm CM/AM resume"
+                    "Record shunt route|"
+                    "Confirm train in RM|"
+                    "Record CM resume location|"
+                    "Confirm CM/AM resumes at approved location"
+                ),
+            },
+            {
+                "event_pattern": "MOVING TRAIN INITIALISATION|MTIB",
+                "test_code": "LS01",
+                "test_name": "MTIB Initialization Test",
+                "needs_abscissa": "No",
+                "include_anticipate": "No",
+                "checks": (
+                    "Confirm RM mode|"
+                    "Confirm Out Localisation|"
+                    "Cross MTIB|"
+                    "Record beacon code|"
+                    "Confirm Total Localisation"
                 ),
             },
         ]
@@ -1103,11 +1461,15 @@ def create_input_template() -> bytes:
             ["Trackside Version", ""],
             ["ATP Version", ""],
             ["ATO Version", ""],
+            ["Test Sheet Prefix", "ATC-TEST"],
         ],
         columns=["Field", "Value"],
     )
 
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl",
+    ) as writer:
         subdivision_example.to_excel(
             writer,
             sheet_name="Subdivision",
@@ -1130,30 +1492,38 @@ def create_input_template() -> bytes:
 
 
 # =============================================================================
-# STREAMLIT APPLICATION
+# UI
 # =============================================================================
 
 def render_styles() -> None:
+    """Local page CSS."""
     st.markdown(
         """
         <style>
-        .hero {
+        .generator-hero {
             background: linear-gradient(135deg, #102A43, #164E72);
             color: white;
-            padding: 24px 30px;
+            padding: 22px 28px;
             border-radius: 14px;
             margin-bottom: 16px;
         }
-        .hero h1 {
+
+        .generator-hero h1 {
             color: white !important;
             margin: 0 !important;
         }
-        .notice {
+
+        .generator-hero p {
+            color: #EAF4FB !important;
+            margin: 8px 0 0 0 !important;
+        }
+
+        .generator-warning {
             background: #FFF7E8;
             border-left: 5px solid #E37400;
+            padding: 14px 16px;
             border-radius: 8px;
-            padding: 14px;
-            margin: 12px 0;
+            margin: 12px 0 18px 0;
         }
         </style>
         """,
@@ -1161,71 +1531,23 @@ def render_styles() -> None:
     )
 
 
-def read_project_sheet(
-    excel_file: Any,
-) -> Dict[str, str]:
-    defaults = {
-        "procedure_reference": "C1252-TAC-XXXX",
-        "procedure_title": "ATC Dynamic Test Procedure",
-        "project": "",
-        "trackside_version": "",
-        "atp_version": "",
-        "ato_version": "",
-        "sheet_prefix": "ATC-TEST",
-    }
+def render_test_sheet_generator_app() -> None:
+    """
+    Render the Test Sheet Generator inside the main engineering platform.
 
-    try:
-        project_df = pd.read_excel(
-            excel_file,
-            sheet_name="Project",
-        )
-    except Exception:
-        return defaults
-
-    if "Field" not in project_df.columns or "Value" not in project_df.columns:
-        return defaults
-
-    for _, row in project_df.iterrows():
-        field = safe_text(row["Field"]).lower()
-        value = safe_text(row["Value"])
-
-        mapping = {
-            "procedure reference": "procedure_reference",
-            "procedure title": "procedure_title",
-            "project / contract": "project",
-            "project": "project",
-            "trackside version": "trackside_version",
-            "atp version": "atp_version",
-            "ato version": "ato_version",
-            "test sheet prefix": "sheet_prefix",
-        }
-
-        if field in mapping:
-            defaults[mapping[field]] = value
-
-    if not defaults["sheet_prefix"]:
-        defaults["sheet_prefix"] = defaults["procedure_reference"]
-
-    return defaults
-
-
-def main() -> None:
-    st.set_page_config(
-        page_title="ATC Test Sheet Generator",
-        page_icon="🚆",
-        layout="wide",
-    )
-
+    This function is imported and called from app.py.
+    Do not call st.set_page_config() in this module.
+    """
     render_styles()
 
     st.markdown(
         """
-        <div class="hero">
-            <h1>ATC Subdivision Test Sheet Generator</h1>
+        <div class="generator-hero">
+            <h1>ATC Test Sheet Generator</h1>
             <p>
-                Select a start and end KP, identify applicable ATC tests,
-                resolve participating and anticipated variants, and generate
-                a reviewable test-sheet register and DOCX test sheets.
+                Upload one approved project workbook, select start and end KP,
+                identify configurable ATC tests, and generate reviewable
+                DOCX test sheets.
             </p>
         </div>
         """,
@@ -1234,128 +1556,161 @@ def main() -> None:
 
     st.markdown(
         """
-        <div class="notice">
-            <b>Engineering warning:</b><br>
-            This application assists test planning. It does not approve
-            abscissae, variants, stopping points, safety conditions or test
-            applicability. All generated data must be checked against approved
-            subdivision, invariant, signalling, PAT and test documentation.
+        <div class="generator-warning">
+            <b>Engineering limitation:</b><br>
+            This tool assists test planning only. It does not approve
+            abscissae, variants, anticipated variants, stopping points,
+            safety conditions, design logic or test applicability.
+            All generated records must be independently reviewed against
+            approved subdivision, PAT, invariant, signalling and procedure
+            documents before issue.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     st.download_button(
-        "Download Input Workbook Template",
+        "⬇️ Download Input Workbook Template",
         data=create_input_template(),
         file_name="ATC_Test_Sheet_Generator_Template.xlsx",
         mime=(
             "application/vnd.openxmlformats-officedocument."
             "spreadsheetml.sheet"
         ),
+        use_container_width=False,
     )
 
     st.markdown("## 1. Upload One Project Workbook")
 
-    uploaded = st.file_uploader(
-        "Upload one Excel workbook containing Subdivision and TestMapping sheets",
+    uploaded_file = st.file_uploader(
+        (
+            "Upload one Excel workbook containing "
+            "'Subdivision' and 'TestMapping' worksheets"
+        ),
         type=["xlsx", "xlsm"],
+        key="test_sheet_generator_input_file",
     )
 
-    if uploaded is None:
+    if uploaded_file is None:
         st.info(
-            "Upload an Excel workbook. Use the downloadable template if "
-            "needed."
+            "Upload one Excel workbook. Download the template above if you "
+            "need the required workbook structure."
         )
         return
 
     try:
-        raw_subdivision = pd.read_excel(
-            uploaded,
-            sheet_name="Subdivision",
+        workbook_sheets = pd.read_excel(
+            uploaded_file,
+            sheet_name=None,
         )
 
-        uploaded.seek(0)
-
-        raw_mapping = pd.read_excel(
-            uploaded,
-            sheet_name="TestMapping",
+        subdivision_sheet = find_sheet_name(
+            workbook_sheets,
+            "Subdivision",
         )
 
-        uploaded.seek(0)
+        mapping_sheet = find_sheet_name(
+            workbook_sheets,
+            "TestMapping",
+        )
 
-        project_defaults = read_project_sheet(uploaded)
+        if not subdivision_sheet:
+            raise ValueError(
+                "Workbook does not contain a worksheet named 'Subdivision'."
+            )
+
+        if not mapping_sheet:
+            raise ValueError(
+                "Workbook does not contain a worksheet named 'TestMapping'."
+            )
 
         subdivision = standardise_subdivision_dataframe(
-            raw_subdivision
+            workbook_sheets[subdivision_sheet]
         )
 
         test_mapping = standardise_mapping_dataframe(
-            raw_mapping
+            workbook_sheets[mapping_sheet]
+        )
+
+        project_info = read_project_information(
+            workbook_sheets
         )
 
     except Exception as exc:
-        st.error(f"Cannot read uploaded workbook: {exc}")
+        st.error(f"Unable to read uploaded workbook: {exc}")
         return
 
     if subdivision.empty:
-        st.error("Subdivision sheet contains no usable rows.")
+        st.error("The Subdivision worksheet contains no data.")
         return
 
     if subdivision["kp"].notna().sum() == 0:
         st.error(
-            "No KP/Abscissa values were found. Add a kp, K.P., "
-            "Abscissa or Chainage column."
+            "No usable KP / Abscissa values were found. "
+            "Add a column called KP, K.P., Abscissa or Chainage."
+        )
+        return
+
+    if test_mapping.empty:
+        st.error(
+            "The TestMapping worksheet contains no valid mapping rules."
         )
         return
 
     st.success(
-        f"Loaded {len(subdivision)} subdivision rows and "
-        f"{len(test_mapping)} configurable test-mapping rules."
+        f"Loaded {len(subdivision)} subdivision row(s) and "
+        f"{len(test_mapping)} configurable test-mapping rule(s)."
     )
 
     with st.expander("Project Information", expanded=True):
-        col1, col2, col3 = st.columns(3)
+        project_col1, project_col2, project_col3 = st.columns(3)
 
-        with col1:
-            project_defaults["project"] = st.text_input(
+        with project_col1:
+            project_info["project"] = st.text_input(
                 "Project / Contract",
-                value=project_defaults["project"],
+                value=project_info["project"],
+                key="generator_project",
             )
 
-            project_defaults["trackside_version"] = st.text_input(
+            project_info["trackside_version"] = st.text_input(
                 "Trackside Version",
-                value=project_defaults["trackside_version"],
+                value=project_info["trackside_version"],
+                key="generator_trackside",
             )
 
-        with col2:
-            project_defaults["atp_version"] = st.text_input(
+        with project_col2:
+            project_info["atp_version"] = st.text_input(
                 "ATP Version",
-                value=project_defaults["atp_version"],
+                value=project_info["atp_version"],
+                key="generator_atp",
             )
 
-            project_defaults["ato_version"] = st.text_input(
+            project_info["ato_version"] = st.text_input(
                 "ATO Version",
-                value=project_defaults["ato_version"],
+                value=project_info["ato_version"],
+                key="generator_ato",
             )
 
-        with col3:
-            project_defaults["procedure_reference"] = st.text_input(
+        with project_col3:
+            project_info["procedure_reference"] = st.text_input(
                 "Procedure Reference",
-                value=project_defaults["procedure_reference"],
+                value=project_info["procedure_reference"],
+                key="generator_procedure_reference",
             )
 
-            project_defaults["sheet_prefix"] = st.text_input(
+            project_info["sheet_prefix"] = st.text_input(
                 "Test Sheet Prefix",
-                value=project_defaults["sheet_prefix"],
+                value=project_info["sheet_prefix"],
+                key="generator_sheet_prefix",
             )
 
-            project_defaults["procedure_title"] = st.text_input(
+            project_info["procedure_title"] = st.text_input(
                 "Procedure Title",
-                value=project_defaults["procedure_title"],
+                value=project_info["procedure_title"],
+                key="generator_procedure_title",
             )
 
-    st.markdown("## 2. Select Start and End Point")
+    st.markdown("## 2. Select Test Range")
 
     available_branches = sorted(
         branch
@@ -1368,6 +1723,7 @@ def main() -> None:
     selected_branch_display = st.selectbox(
         "Branch Filter",
         options=branch_options,
+        key="generator_branch_filter",
     )
 
     selected_branch = (
@@ -1376,19 +1732,19 @@ def main() -> None:
         else selected_branch_display
     )
 
-    filtered_for_range = subdivision.copy()
+    range_dataframe = subdivision.copy()
 
     if selected_branch:
-        filtered_for_range = filtered_for_range[
-            filtered_for_range["branch"] == selected_branch
+        range_dataframe = range_dataframe[
+            range_dataframe["branch"].eq(selected_branch)
         ].copy()
 
-    minimum_kp = float(filtered_for_range["kp"].min())
-    maximum_kp = float(filtered_for_range["kp"].max())
+    minimum_kp = float(range_dataframe["kp"].min())
+    maximum_kp = float(range_dataframe["kp"].max())
 
-    col1, col2 = st.columns(2)
+    range_col1, range_col2 = st.columns(2)
 
-    with col1:
+    with range_col1:
         start_kp = st.number_input(
             "Start KP / Abscissa",
             min_value=minimum_kp,
@@ -1396,9 +1752,10 @@ def main() -> None:
             value=minimum_kp,
             step=0.1,
             format="%.3f",
+            key="generator_start_kp",
         )
 
-    with col2:
+    with range_col2:
         end_kp = st.number_input(
             "End KP / Abscissa",
             min_value=minimum_kp,
@@ -1406,99 +1763,71 @@ def main() -> None:
             value=maximum_kp,
             step=0.1,
             format="%.3f",
+            key="generator_end_kp",
         )
 
     if st.button(
-        "Find Applicable Tests",
+        "🔎 Find Applicable Tests",
         type="primary",
         use_container_width=True,
+        key="generator_find_tests",
     ):
-        register = create_test_register(
-            subdivision=subdivision,
-            mapping=test_mapping,
-            start_kp=float(start_kp),
-            end_kp=float(end_kp),
-            selected_branch=selected_branch,
-        )
-
-        lower_kp = min(float(start_kp), float(end_kp))
-        upper_kp = max(float(start_kp), float(end_kp))
-
-        selected_events = subdivision[
-            subdivision["kp"].notna()
-            & subdivision["kp"].between(
-                lower_kp,
-                upper_kp,
-                inclusive="both",
+        try:
+            register, selected_events = create_test_register(
+                subdivision=subdivision,
+                mapping=test_mapping,
+                start_kp=float(start_kp),
+                end_kp=float(end_kp),
+                selected_branch=selected_branch,
             )
-        ].copy()
 
-        if selected_branch:
-            selected_events = selected_events[
-                selected_events["branch"] == selected_branch
-            ].copy()
+            st.session_state["generator_register"] = register
+            st.session_state["generator_selected_events"] = (
+                selected_events
+            )
 
-        st.session_state["atc_register"] = register
-        st.session_state["atc_selected_events"] = selected_events
+        except Exception as exc:
+            st.error(f"Test generation failed: {exc}")
 
     register = st.session_state.get(
-        "atc_register",
-        pd.DataFrame(),
+        "generator_register",
+        pd.DataFrame(columns=REGISTER_COLUMNS),
     )
 
     selected_events = st.session_state.get(
-        "atc_selected_events",
+        "generator_selected_events",
         pd.DataFrame(),
     )
 
     if register.empty:
         st.warning(
-            "No tests have been generated yet, or no TestMapping rules "
-            "matched events in the selected range."
+            "No tests were generated. Check the selected KP range and "
+            "confirm that TestMapping event patterns match your "
+            "Subdivision event names or remarks."
         )
 
         with st.expander("View TestMapping Rules"):
-            st.dataframe(test_mapping, use_container_width=True)
+            st.dataframe(
+                test_mapping,
+                use_container_width=True,
+                hide_index=True,
+            )
 
         return
 
     st.markdown("## 3. Review Generated Test Register")
 
     st.caption(
-        "Review every generated test. You may add, remove or edit rows before "
-        "generating DOCX test sheets."
+        "Review and correct the generated data against approved engineering "
+        "documents before downloading DOCX test sheets."
     )
-
-    editable_columns = [
-        "test_code",
-        "test_name",
-        "needs_abscissa",
-        "sector",
-        "section",
-        "subsection",
-        "branch",
-        "direction",
-        "participate_abscissa_m",
-        "participate_variant",
-        "anticipate_variant",
-        "anticipate_abscissa_m",
-        "location_name",
-        "event_name",
-        "remarks",
-        "source_row",
-        "review_status",
-        "checks",
-    ]
-
-    register = register[
-        [column for column in editable_columns if column in register.columns]
-    ].copy()
 
     reviewed_register = st.data_editor(
         register,
         use_container_width=True,
         hide_index=True,
         num_rows="dynamic",
+        key="generator_register_editor",
         column_config={
             "needs_abscissa": st.column_config.CheckboxColumn(
                 "Needs Abscissa"
@@ -1526,19 +1855,22 @@ def main() -> None:
                 width="large",
             ),
             "checks": st.column_config.TextColumn(
-                "Checks (separate by |)",
+                "Checks - separate each item using |",
                 width="large",
             ),
         },
     )
 
-    st.session_state["atc_register"] = reviewed_register
+    st.session_state["generator_register"] = reviewed_register
 
-    metric1, metric2, metric3 = st.columns(3)
+    metric_col1, metric_col2, metric_col3 = st.columns(3)
 
-    metric1.metric("Generated Test Sheets", len(reviewed_register))
+    metric_col1.metric(
+        "Generated Test Sheets",
+        len(reviewed_register),
+    )
 
-    metric2.metric(
+    metric_col2.metric(
         "Tests Requiring Abscissa",
         int(
             reviewed_register["needs_abscissa"]
@@ -1548,7 +1880,7 @@ def main() -> None:
         ),
     )
 
-    metric3.metric(
+    metric_col3.metric(
         "Rows With Anticipated Variant",
         int(
             reviewed_register["anticipate_variant"]
@@ -1564,17 +1896,17 @@ def main() -> None:
     excel_bytes = create_excel_bytes(
         register=reviewed_register,
         selected_events=selected_events,
-        project=project_defaults,
+        project_info=project_info,
     )
 
-    col1, col2, col3 = st.columns(3)
+    download_col1, download_col2, download_col3 = st.columns(3)
 
-    with col1:
+    with download_col1:
         st.download_button(
-            "Download Excel Register",
+            "⬇️ Download Excel Register",
             data=excel_bytes,
             file_name=clean_filename(
-                f"{project_defaults['sheet_prefix']}_Test_Register.xlsx"
+                f"{project_info['sheet_prefix']}_Test_Register.xlsx"
             ),
             mime=(
                 "application/vnd.openxmlformats-officedocument."
@@ -1583,29 +1915,31 @@ def main() -> None:
             use_container_width=True,
         )
 
-    with col2:
+    with download_col2:
         st.download_button(
-            "Download CSV Register",
-            data=reviewed_register.to_csv(index=False).encode("utf-8"),
+            "⬇️ Download CSV Register",
+            data=reviewed_register.to_csv(
+                index=False
+            ).encode("utf-8"),
             file_name=clean_filename(
-                f"{project_defaults['sheet_prefix']}_Test_Register.csv"
+                f"{project_info['sheet_prefix']}_Test_Register.csv"
             ),
             mime="text/csv",
             use_container_width=True,
         )
 
-    with col3:
+    with download_col3:
         try:
             docx_zip = create_docx_zip(
                 register=reviewed_register,
-                project=project_defaults,
+                project_info=project_info,
             )
 
             st.download_button(
-                "Download DOCX Test Sheets",
+                "⬇️ Download DOCX Test Sheets",
                 data=docx_zip,
                 file_name=clean_filename(
-                    f"{project_defaults['sheet_prefix']}_Test_Sheets.zip"
+                    f"{project_info['sheet_prefix']}_Test_Sheets.zip"
                 ),
                 mime="application/zip",
                 use_container_width=True,
@@ -1615,11 +1949,15 @@ def main() -> None:
             st.error(f"DOCX generation failed: {exc}")
 
     with st.expander("Selected Source Events"):
-        st.dataframe(selected_events, use_container_width=True)
+        st.dataframe(
+            selected_events,
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    with st.expander("Configured TestMapping Rules"):
-        st.dataframe(test_mapping, use_container_width=True)
-
-
-if __name__ == "__main__":
-    main()
+    with st.expander("Configured Test Mapping Rules"):
+        st.dataframe(
+            test_mapping,
+            use_container_width=True,
+            hide_index=True,
+        )
