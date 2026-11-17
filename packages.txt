@@ -1,0 +1,3 @@
+libreoffice-calc
+tesseract-ocr
+tesseract-ocr-eng
