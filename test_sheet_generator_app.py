@@ -1993,6 +1993,9 @@ def create_export_zip(
     register: pd.DataFrame,
     project_info: Dict[str, str],
     pdf_text_log: str,
+    singularities: pd.DataFrame,
+    variant_composition: pd.DataFrame,
+    organised_source_log: str,
     progress_bar: Any,
     progress_text: Any,
 ) -> bytes:
@@ -2010,6 +2013,20 @@ def create_export_zip(
         archive.writestr(
             "PDF_Text_Extraction_Log.txt",
             safe_text(pdf_text_log),
+        )
+        archive.writestr(
+            "Organised_Source_Extraction_Log.txt",
+            safe_text(organised_source_log),
+        )
+
+        archive.writestr(
+            "Singularities.csv",
+            singularities.to_csv(index=False),
+        )
+
+        archive.writestr(
+            "Variant_Composition.csv",
+            variant_composition.to_csv(index=False),
         )
         archive.writestr(
             "ATC_Low_Speed_Test_Register.txt",
@@ -2309,27 +2326,69 @@ def render_test_sheet_generator_app() -> None:
 
         try:
             progress_text.info(
-                "Reading PDF pages. Scanned singularity pages will be OCR processed..."
+                "Reading PDF pages. Scanned/image-only pages will be OCR processed..."
             )
+
+            # -----------------------------------------------------------------
+            # 1. Extract native PDF text or OCR text from every PDF page.
+            # -----------------------------------------------------------------
+            pages, extracted_pages = extract_pdf_text_pages(pdf_bytes)
 
             st.session_state["test_sheet_page_count"] = len(pages)
 
-            st.session_state["test_sheet_pdf_text_log"] = create_pdf_text_log(
-                extracted_pages
+            # Complete raw native/OCR extraction audit log.
+            st.session_state["test_sheet_pdf_text_log"] = (
+                create_pdf_text_log(extracted_pages)
             )
 
+            # Short per-page audit summary.
             st.session_state["test_sheet_pdf_extraction_summary"] = (
                 create_pdf_extraction_summary(extracted_pages)
             )
 
-            # New source-table extraction
+            # -----------------------------------------------------------------
+            # 2. Extract all Singularities schedule rows.
+            #
+            # This table retains:
+            # - Sub-section reference
+            # - Absolute K.P.
+            # - Sub-section-start K.P.
+            # - Calculated local abscissa
+            # - Singularity code/name
+            # - Associated variant/source evidence
+            # -----------------------------------------------------------------
+            progress_text.info(
+                "Extracting Singularities schedule rows and calculating "
+                "local abscissae..."
+            )
+
             singularities = extract_singularities_table(pages)
+
+            st.session_state["test_sheet_singularities"] = singularities
+
+            # -----------------------------------------------------------------
+            # 3. Extract Variant Composition records.
+            #
+            # This table retains:
+            # - Sub-section
+            # - Route
+            # - Rank
+            # - Participating rank / variants
+            # - Anticipated rank / variants
+            # -----------------------------------------------------------------
+            progress_text.info(
+                "Extracting Variant Composition records, routes and ranks..."
+            )
 
             variant_composition = extract_variant_composition_table(pages)
 
-            st.session_state["test_sheet_singularities"] = singularities
-            st.session_state["test_sheet_variant_composition"] = variant_composition
+            st.session_state["test_sheet_variant_composition"] = (
+                variant_composition
+            )
 
+            # -----------------------------------------------------------------
+            # 4. Create readable text table / audit log.
+            # -----------------------------------------------------------------
             st.session_state["test_sheet_organised_source_log"] = (
                 create_organised_source_log(
                     singularities=singularities,
@@ -2337,41 +2396,71 @@ def render_test_sheet_generator_app() -> None:
                 )
             )
 
-            # Existing low-speed test-sheet extraction
+            # -----------------------------------------------------------------
+            # 5. Extract applicable low-speed dynamic test points.
+            # -----------------------------------------------------------------
+            progress_text.info(
+                f"PDF loaded: {len(pages)} page(s). "
+                "Identifying low-speed test points..."
+            )
+
             register = extract_test_register_from_pdf(
                 pages=pages,
                 progress_bar=progress_bar,
                 progress_text=progress_text,
             )
-            
 
             st.session_state["test_sheet_register"] = register
             st.session_state["test_sheet_export_zip"] = None
 
+            progress_bar.progress(100)
+
+            # -----------------------------------------------------------------
+            # 6. Final status message.
+            # -----------------------------------------------------------------
+            summary_message = (
+                f"PDF pages: {len(pages)} | "
+                f"Singularity rows: {len(singularities)} | "
+                f"Variant Composition records: {len(variant_composition)} | "
+                f"Low-Speed test records: {len(register)}"
+            )
+
             if register.empty:
                 progress_text.warning(
-                    "No low-speed test points were identified. "
-                    "Review the extracted PDF/OCR text below to confirm "
-                    "whether OCR quality or test-detection rules require tuning."
+                    "Extraction completed, but no low-speed test points were "
+                    "identified. Review the raw OCR text and organised source "
+                    f"tables. {summary_message}"
                 )
             else:
                 progress_text.success(
-                    f"Extraction complete: {len(register)} draft record(s) found."
+                    f"Extraction completed successfully. {summary_message}"
                 )
 
         except pytesseract.TesseractNotFoundError:
+            progress_bar.empty()
+
             progress_text.error(
                 "Tesseract OCR is not installed or is not available in PATH. "
-                "Install tesseract-ocr in the deployment environment."
+                "Install tesseract-ocr in the deployment environment and "
+                "restart the application."
             )
-            return
+
+        except fitz.FileDataError:
+            progress_bar.empty()
+
+            progress_text.error(
+                "The uploaded file cannot be opened as a valid PDF. "
+                "Please upload a readable, non-corrupted PDF."
+            )
 
         except Exception as exc:
+            progress_bar.empty()
+
             progress_text.error(
                 f"PDF extraction failed: {type(exc).__name__}: {exc}"
             )
+
             st.exception(exc)
-            return
 
     # -------------------------------------------------------------------------
     # EXTRACTED TEXT LOG
@@ -2386,6 +2475,23 @@ def render_test_sheet_generator_app() -> None:
     pdf_extraction_summary = st.session_state.get(
         "test_sheet_pdf_extraction_summary",
         pd.DataFrame(),
+    )
+
+    # Always retrieve source tables from session state here.
+    # They are needed later for Excel export, even if the raw OCR log is empty.
+    singularities = st.session_state.get(
+        "test_sheet_singularities",
+        pd.DataFrame(columns=SINGULARITY_COLUMNS),
+    )
+
+    variant_composition = st.session_state.get(
+        "test_sheet_variant_composition",
+        pd.DataFrame(columns=VARIANT_COMPOSITION_COLUMNS),
+    )
+
+    organised_source_log = st.session_state.get(
+        "test_sheet_organised_source_log",
+        "",
     )
 
     if pdf_text_log:
@@ -2406,22 +2512,8 @@ def render_test_sheet_generator_app() -> None:
                 use_container_width=True,
                 hide_index=True,
             )
+
         st.markdown("### Organised Source Tables")
-
-        singularities = st.session_state.get(
-            "test_sheet_singularities",
-            pd.DataFrame(columns=SINGULARITY_COLUMNS),
-        )
-
-        variant_composition = st.session_state.get(
-            "test_sheet_variant_composition",
-            pd.DataFrame(columns=VARIANT_COMPOSITION_COLUMNS),
-        )
-
-        organised_source_log = st.session_state.get(
-            "test_sheet_organised_source_log",
-            "",
-        )
 
         tab_1, tab_2, tab_3 = st.tabs(
             [
