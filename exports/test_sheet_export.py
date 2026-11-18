@@ -5,6 +5,7 @@ import re
 import zipfile
 from datetime import date
 from typing import Any, Dict, List, Optional
+from docx.shared import RGBColor
 
 import pandas as pd
 
@@ -75,7 +76,7 @@ def set_cell_text(
     bold: bool = False,
     point_size: int = 8,
 ) -> None:
-    from docx.shared import Pt
+    from docx.shared import Pt, RGBColor
 
     cell.text = ""
 
@@ -83,6 +84,7 @@ def set_cell_text(
     run = paragraph.add_run(safe_text(value))
     run.bold = bold
     run.font.size = Pt(point_size)
+    run.font.color.rgb = RGBColor(0, 0, 0)
 
 
 def add_docx_row(
@@ -104,13 +106,16 @@ def add_docx_row(
 
 
 def set_table_font_size(table: Any, point_size: int = 8) -> None:
-    from docx.shared import Pt
+    from docx.shared import Pt, RGBColor
+
+    black = RGBColor(0, 0, 0)
 
     for row in table.rows:
         for cell in row.cells:
             for paragraph in cell.paragraphs:
                 for run in paragraph.runs:
                     run.font.size = Pt(point_size)
+                    run.font.color.rgb = black
 
 
 def shade_cell(cell: Any, fill: str = "D9E1F2") -> None:
@@ -125,13 +130,51 @@ def shade_cell(cell: Any, fill: str = "D9E1F2") -> None:
 
 
 def add_heading(document: Any, text: str, size: int = 10) -> None:
-    from docx.shared import Pt
+    from docx.shared import Pt, RGBColor
 
     paragraph = document.add_paragraph()
     run = paragraph.add_run(text)
     run.bold = True
     run.font.size = Pt(size)
+    run.font.color.rgb = RGBColor(0, 0, 0)
 
+def force_document_black_font(document: Any) -> None:
+    """
+    Explicitly apply black font to every run in the generated DOCX.
+
+    This avoids Word theme colours, hyperlink-like blue text, and inherited
+    font colours from styles/templates.
+    """
+    from docx.shared import RGBColor
+
+    black = RGBColor(0, 0, 0)
+
+    # Main body paragraphs.
+    for paragraph in document.paragraphs:
+        for run in paragraph.runs:
+            run.font.color.rgb = black
+
+    # Tables.
+    for table in document.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.color.rgb = black
+
+    # Headers and footers.
+    for section in document.sections:
+        for container in (section.header, section.footer):
+            for paragraph in container.paragraphs:
+                for run in paragraph.runs:
+                    run.font.color.rgb = black
+
+            for table in container.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for paragraph in cell.paragraphs:
+                            for run in paragraph.runs:
+                                run.font.color.rgb = black
 
 # =============================================================================
 # COMMON APPENDIX-A STYLE SECTIONS
@@ -212,7 +255,10 @@ def add_location_information(
             "Sector:",
             safe_text(row.get("sector")),
             "Branch Number:",
-            safe_text(row.get("branch")),
+            (
+                safe_text(row.get("participating_branch"))
+                or safe_text(row.get("branch"))
+            ),
         ],
         point_size=8,
     )
@@ -398,6 +444,120 @@ def add_footer(document: Any) -> None:
     run.italic = True
     run.font.size = Pt(7)
 
+def add_variant_execution_plan(
+    document: Any,
+    row: pd.Series,
+) -> None:
+    """
+    Adds the route/variant planning information used to execute the dynamic
+    test. Values must originate from an approved route/variant plan.
+    """
+    add_heading(document, "Variant Participation / Anticipation Plan", 9)
+
+    table = document.add_table(rows=1, cols=3)
+    table.style = "Table Grid"
+
+    headers = ["Planning Item", "Participate", "Anticipate"]
+
+    for index, value in enumerate(headers):
+        set_cell_text(
+            table.rows[0].cells[index],
+            value,
+            bold=True,
+            point_size=8,
+        )
+        shade_cell(table.rows[0].cells[index], "D9E1F2")
+
+    participate_subsection = safe_text(
+        row.get("participating_subsections")
+    )
+    anticipate_subsection = safe_text(
+        row.get("anticipated_subsections")
+    )
+
+    participate_branch = (
+        safe_text(row.get("participating_branch"))
+        or safe_text(row.get("participating_branches"))
+    )
+
+    anticipate_branch = (
+        safe_text(row.get("anticipated_branch"))
+        or safe_text(row.get("anticipated_branches"))
+    )
+
+    rows = [
+        [
+            "Sub-section",
+            participate_subsection,
+            anticipate_subsection,
+        ],
+        [
+            "Branch",
+            participate_branch,
+            anticipate_branch,
+        ],
+        [
+            "Associated Variant",
+            safe_text(row.get("participating_variant")),
+            safe_text(row.get("anticipated_variant")),
+        ],
+        [
+            "Variant Rank",
+            safe_text(row.get("participating_variant_rank")),
+            safe_text(row.get("anticipated_variant_rank")),
+        ],
+        [
+            "Variant Number",
+            safe_text(row.get("participating_variant_number")),
+            safe_text(row.get("anticipated_variant_number")),
+        ],
+        [
+            "Variant Hexadecimal Reference",
+            safe_text(row.get("participating_variant_hex")),
+            safe_text(row.get("anticipated_variant_hex")),
+        ],
+        [
+            "Test / Planning Abscissa",
+            format_distance(row.get("participating_abscissa_m")),
+            format_distance(row.get("anticipated_abscissa_m")),
+        ],
+    ]
+
+    for values in rows:
+        add_docx_row(table, values, point_size=8)
+
+    set_table_font_size(table, 8)
+    document.add_paragraph()
+
+def participate_value(row: pd.Series) -> str:
+    value = format_distance(row.get("participating_abscissa_m"))
+
+    if not value:
+        value = format_distance(row.get("abscissa_m"))
+
+    branch = (
+        safe_text(row.get("participating_branch"))
+        or safe_text(row.get("participating_branches"))
+    )
+
+    if branch:
+        return f"{value}\n{branch}" if value else branch
+
+    return value
+
+
+def anticipate_value(row: pd.Series) -> str:
+    value = format_distance(row.get("anticipated_abscissa_m"))
+
+    branch = (
+        safe_text(row.get("anticipated_branch"))
+        or safe_text(row.get("anticipated_branches"))
+    )
+
+    if branch:
+        return f"{value}\n{branch}" if value else branch
+
+    return value
 
 # =============================================================================
 # LS01 — MTIB INITIALISATION
@@ -513,18 +673,48 @@ def add_stopping_point_body(
         rows = [
             ["1. Track Circuit Occupied", "", "Y / N", "", ""],
             ["Available Mode", "CM/AUTO", "Y / N", "", ""],
-            ["Localisation", "Loc Max (1)", "m", "", ""],
-            ["", "Target Distance (2)", "m", "", ""],
-            ["", "Abscissa (3)", "m", "", ""],
+            [
+                "Localisation",
+                "Loc Max (1)",
+                "m",
+                participate_value(row),
+                anticipate_value(row),
+            ],
+            [
+                "",
+                "Target Distance (2)",
+                "m",
+                "",
+                "",
+            ],
+            [
+                "",
+                "Abscissa (3)",
+                "m",
+                participate_value(row),
+                anticipate_value(row),
+            ],
             ["", "(1) + (2) = (3), ±0.75 m where applicable", "Y/N/N/A", "", ""],
             ["OMAP Target Speed", "Equal 0", "kph", "", ""],
             ["Speedometer Target Speed", "Equal 0", "kph", "", ""],
-            ["Associated Variant", "Restrictive", "Y / N", "", ""],
+            [
+                "Associated Variant",
+                "Restrictive",
+                "Y / N",
+                safe_text(row.get("participating_variant")),
+                safe_text(row.get("anticipated_variant")),
+            ],
             ["2. Track Circuit Free", "", "Y / N", "", ""],
             ["Target Distance", ">= restrictive target where applicable", "m", "", ""],
             ["OMAP Target Speed", "Record", "kph", "", ""],
             ["Speedometer Target Speed", "> 0", "kph", "", ""],
-            ["Associated Variant", "Permissive", "Y / N", "", ""],
+            [
+                "Associated Variant",
+                "Permissive",
+                "Y / N",
+                safe_text(row.get("participating_variant")),
+                safe_text(row.get("anticipated_variant")),
+            ],
             ["3. Variant Toggled", "", "Y / N", "", ""],
         ]
 
@@ -532,27 +722,75 @@ def add_stopping_point_body(
         rows = [
             ["1. Restrictive Signal", "", "Y / N", "", ""],
             ["Available Mode", "CM/AUTO", "Y / N", "", ""],
-            ["Localisation", "Loc Max (1)", "m", "", ""],
-            ["", "Target Distance (2)", "m", "", ""],
-            ["", "Abscissa (3)", "m", "", ""],
+            [
+                "Localisation",
+                "Loc Max (1)",
+                "m",
+                participate_value(row),
+                anticipate_value(row),
+            ],
+            [
+                "",
+                "Target Distance (2)",
+                "m",
+                "",
+                "",
+            ],
+            [
+                "",
+                "Abscissa (3)",
+                "m",
+                participate_value(row),
+                anticipate_value(row),
+            ],
             ["", "(1) + (2) = (3), ±0.75 m where applicable", "Y/N/N/A", "", ""],
             ["OMAP Target Speed", "Equal 0", "kph", "", ""],
             ["Speedometer Target Speed", "Equal 0", "kph", "", ""],
-            ["Associated Variant", "Restrictive", "Y / N", "", ""],
+            [
+                "Associated Variant",
+                "Restrictive",
+                "Y / N",
+                safe_text(row.get("participating_variant")),
+                safe_text(row.get("anticipated_variant")),
+            ],
             ["2. Permissive Signal", "", "Y / N", "", ""],
             ["Target Distance", ">= restrictive target", "m", "", ""],
             ["OMAP Target Speed", "Record", "kph", "", ""],
             ["Speedometer Target Speed", "> 0", "kph", "", ""],
-            ["Associated Variant", "Permissive", "Y / N", "", ""],
+            [
+                "Associated Variant",
+                "Permissive",
+                "Y / N",
+                safe_text(row.get("participating_variant")),
+                safe_text(row.get("anticipated_variant")),
+            ],
         ]
 
     elif test_type == "complex":
         rows = [
             ["1. Signal Red and Overlap Occupied", "", "Y / N", "", ""],
             ["Available Mode", "CM/AUTO", "Y / N", "", ""],
-            ["Localisation", "Loc Max (1)", "m", "", ""],
-            ["", "Target Distance (2)", "m", "", ""],
-            ["", "Abscissa (3)", "m", "", ""],
+           [
+                "Localisation",
+                "Loc Max (1)",
+                "m",
+                participate_value(row),
+                anticipate_value(row),
+            ],
+            [
+                "",
+                "Target Distance (2)",
+                "m",
+                "",
+                "",
+            ],
+            [
+                "",
+                "Abscissa (3)",
+                "m",
+                participate_value(row),
+                anticipate_value(row),
+            ],
             ["OMAP Target Speed", "Equal 0", "kph", "", ""],
             ["Speedometer Target Speed", "Equal 0", "kph", "", ""],
             ["Signal and Overlap Variants", "Restrictive", "Y / N", "", ""],
@@ -572,31 +810,91 @@ def add_stopping_point_body(
         rows = [
             ["1. Point Uncontrolled", "", "Y / N", "", ""],
             ["Available Mode", "CM/AM", "Y / N", "", ""],
-            ["Localisation", "Loc Max (1)", "m", "", ""],
-            ["", "Target Distance (2)", "m", "", ""],
-            ["", "Abscissa (3)", "m", "", ""],
+            [
+                "Localisation",
+                "Loc Max (1)",
+                "m",
+                participate_value(row),
+                anticipate_value(row),
+            ],
+            [
+                "",
+                "Target Distance (2)",
+                "m",
+                "",
+                "",
+            ],
+            [
+                "",
+                "Abscissa (3)",
+                "m",
+                participate_value(row),
+                anticipate_value(row),
+            ],
             ["", "(1) + (2) = (3), ±0.75 m where applicable", "Y/N/N/A", "", ""],
             ["OMAP Target Speed", "Equal 0", "kph", "", ""],
             ["Speedometer Target Speed", "Equal 0", "kph", "", ""],
-            ["Associated Variant", "Restrictive", "Y / N", "", ""],
+            [
+                "Associated Variant",
+                "Restrictive",
+                "Y / N",
+                safe_text(row.get("participating_variant")),
+                safe_text(row.get("anticipated_variant")),
+            ],
             ["2. Point Controlled", "", "Y / N", "", ""],
             ["Target Distance", ">= restrictive target", "m", "", ""],
             ["OMAP Target Speed", "Record", "kph", "", ""],
             ["Speedometer Target Speed", "> 0", "kph", "", ""],
-            ["Associated Variant", "Permissive", "Y / N", "", ""],
+            [
+                "Associated Variant",
+                "Permissive",
+                "Y / N",
+                safe_text(row.get("participating_variant")),
+                safe_text(row.get("anticipated_variant")),
+            ],
         ]
 
     else:
         rows = [
-            ["1. ESZ Condition Active", "Associated Variant Restrictive", "Y / N", "", ""],
+            [
+                "1. ESZ Condition Active",
+                "Associated Variant Restrictive",
+                "Y / N",
+                safe_text(row.get("participating_variant")),
+                safe_text(row.get("anticipated_variant")),
+            ],
             ["Available Mode", "CM/AUTO", "Y / N", "", ""],
-            ["Localisation", "Loc Max (1)", "m", "", ""],
-            ["", "Target Distance (2)", "m", "", ""],
-            ["", "Abscissa (3)", "m", "", ""],
+            [
+                "Localisation",
+                "Loc Max (1)",
+                "m",
+                participate_value(row),
+                anticipate_value(row),
+            ],
+            [
+                "",
+                "Target Distance (2)",
+                "m",
+                "",
+                "",
+            ],
+            [
+                "",
+                "Abscissa (3)",
+                "m",
+                participate_value(row),
+                anticipate_value(row),
+            ],
             ["", "(1) + (2) = (3), ±8.25 m where applicable", "Y/N/N/A", "", ""],
             ["OMAP Target Speed", "Equal 0", "kph", "", ""],
             ["Speedometer Target Speed", "Equal 0", "kph", "", ""],
-            ["2. ESZ Condition Resumed", "Associated Variant Permissive", "Y / N", "", ""],
+            [
+                "2. ESZ Condition Resumed",
+                "Associated Variant Permissive",
+                "Y / N",
+                safe_text(row.get("participating_variant")),
+                safe_text(row.get("anticipated_variant")),
+            ],
             ["Target Distance", ">= restrictive target", "m", "", ""],
             ["OMAP Target Speed", "Record", "kph", "", ""],
             ["Speedometer Target Speed", "> 0", "kph", "", ""],
@@ -1027,6 +1325,7 @@ def create_docx_test_sheet(
 
     document.styles["Normal"].font.name = "Arial"
     document.styles["Normal"].font.size = Pt(8)
+    document.styles["Normal"].font.color.rgb = RGBColor(0, 0, 0)
 
     add_appendix_a_header(
         document=document,
@@ -1039,6 +1338,7 @@ def create_docx_test_sheet(
 
     add_location_information(document, row)
     document.add_paragraph()
+    add_variant_execution_plan(document, row)
 
     if test_code == "LS01":
         add_mtib_body(document, row)
@@ -1084,7 +1384,11 @@ def create_docx_test_sheet(
 
     add_comments_and_approval(document, row)
     add_footer(document)
-
+    
+    force_document_black_font(document)
+    document.styles["Normal"].font.name = "Arial"
+    document.styles["Normal"].font.size = Pt(8)
+    document.styles["Normal"].font.color.rgb = RGBColor(0, 0, 0)
     output = io.BytesIO()
     document.save(output)
 
@@ -1140,6 +1444,31 @@ def create_text_test_sheet(
         f"{safe_text(row.get('participating_branches'))}",
         f"Anticipated Branch(es): "
         f"{safe_text(row.get('anticipated_branches'))}",
+        f"Participating Variant Rank: "
+        f"{safe_text(row.get('participating_variant_rank'))}",
+        f"Participating Variant Number: "
+        f"{safe_text(row.get('participating_variant_number'))}",
+        f"Participating Variant Hex: "
+        f"{safe_text(row.get('participating_variant_hex'))}",
+        f"Participating Abscissa: "
+        f"{format_distance(row.get('participating_abscissa_m'))}",
+        f"Participating Branch: "
+        f"{safe_text(row.get('participating_branch'))}",
+        "",
+        f"Anticipated Variant Rank: "
+        f"{safe_text(row.get('anticipated_variant_rank'))}",
+        f"Anticipated Variant Number: "
+        f"{safe_text(row.get('anticipated_variant_number'))}",
+        f"Anticipated Variant Hex: "
+        f"{safe_text(row.get('anticipated_variant_hex'))}",
+        f"Anticipated Abscissa: "
+        f"{format_distance(row.get('anticipated_abscissa_m'))}",
+        f"Anticipated Branch: "
+        f"{safe_text(row.get('anticipated_branch'))}",
+        "",
+        f"Planning Source: {safe_text(row.get('planning_source'))}",
+        f"Planning Result: {safe_text(row.get('planning_confidence'))}",
+        f"Planning Review: {safe_text(row.get('planning_review_status'))}",
         "",
         "-" * 100,
         "SOURCE TRACEABILITY",
