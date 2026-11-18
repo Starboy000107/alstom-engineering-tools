@@ -7,13 +7,9 @@ import zipfile
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
 import fitz  # PyMuPDF
-import numpy as np
 import pandas as pd
-import pytesseract
 import streamlit as st
-from PIL import Image
 import os
 import tempfile
 import threading
@@ -27,18 +23,6 @@ PROCEDURE_TITLE_DEFAULT = "Trackside ATC Low-Speed Dynamic Test Procedure"
 
 MAX_PDF_SIZE_MB = 100
 MAX_EVIDENCE_LENGTH = 3000
-
-# OCR rendering quality.
-# 450 DPI is suitable for small engineering-table text.
-OCR_DPI = 300
-
-# Retained for compatibility. Native PDF text is still used if available.
-OCR_MIN_TEXT_CHARS = 80
-
-# Do NOT discard low-confidence words from source/audit OCR.
-# OCR confidence may be low for red text, grid-overlaid text and tiny labels.
-OCR_CONFIDENCE_MIN = -1
-
 
 # =============================================================================
 # TEST DEFINITIONS
@@ -408,24 +392,17 @@ TRANSMISSION_CALCULATION_COLUMNS = [
 # MARKER-PDF CONFIGURATION
 # =============================================================================
 
-# Marker is the preferred extraction engine for scanned engineering drawings,
-# tables and layout-heavy PDFs. Tesseract remains as a fallback only.
+# Marker-PDF is the only extraction engine used by this application.
 USE_MARKER_PDF = True
+MARKER_REQUIRED = True
 
-# Set to True if you want extraction to fail instead of using the old OCR
-# fallback when Marker is unavailable.
-MARKER_REQUIRED = False
-
-# Marker models are large. They are loaded once with st.cache_resource.
-# Do not create a converter per page.
+# Optional values: cpu, cuda, mps.
 MARKER_DEVICE = os.getenv("MARKER_DEVICE", "").strip()
 
-# Marker may be slow for a 27-page engineering schedule. This keeps progress
-# feedback responsive while converting page-by-page.
+# Process each page independently to preserve original page references.
 MARKER_PAGE_BY_PAGE = True
 
-# Synchronise converter use. A cached Marker converter/model should not be
-# used by two Streamlit sessions at exactly the same time.
+# Cached converter/model instances must not be used concurrently.
 MARKER_CONVERTER_LOCK = threading.RLock()
 
 
@@ -500,883 +477,6 @@ def normalise_subsection(value: str) -> str:
     sector, section, subsection = match.groups()
 
     return f"{int(sector):02d}-{int(section):02d}-{int(subsection)}"
-
-
-# =============================================================================
-# OCR AND PDF EXTRACTION
-# =============================================================================
-
-def page_has_meaningful_text(page_text: str) -> bool:
-    compact = re.sub(r"\s+", "", safe_text(page_text))
-    return len(compact) >= OCR_MIN_TEXT_CHARS
-
-
-def compact_ocr_text(value: Any) -> str:
-    """
-    OCR-safe compact text for matching headings.
-
-    Examples:
-        'S I N G U L A R I T I E S' -> 'SINGULARITIES'
-        'S A F E T Y V A R I A N T S' -> 'SAFETYVARIANTS'
-        'K . P .' -> 'KP'
-    """
-    return re.sub(
-        r"[^A-Z0-9]+",
-        "",
-        safe_text(value).upper(),
-    )
-
-
-def make_spaced_word_pattern(word: str) -> str:
-    """
-    Build a regex that matches OCR-separated letters.
-
-    Examples matched for SINGULARITIES:
-        SINGULARITIES
-        S I N G U L A R I T I E S
-        S.I.N.G.U.L.A.R.I.T.I.E.S
-        S-I-N-G-U-L-A-R-I-T-I-E-S
-    """
-    clean_word = re.sub(r"[^A-Z0-9]", "", word.upper())
-
-    if not clean_word:
-        return r"$^"
-
-    return (
-        r"(?<![A-Z0-9])"
-        + r"[\s._|/-]*".join(
-            re.escape(character)
-            for character in clean_word
-        )
-        + r"(?![A-Z0-9])"
-    )
-
-
-def repair_known_ocr_headings(text: str) -> str:
-    """
-    Repair common OCR-spaced engineering headings.
-
-    This deliberately repairs only known labels. It does NOT globally remove
-    spaces because table spacing, branch identifiers and numerical columns
-    must remain readable.
-    """
-    repaired = safe_text(text)
-
-    repairs = {
-        "SINGULARITIES": "SINGULARITIES",
-        "SINGULARITY": "SINGULARITY",
-        "SAFETYVARIANTS": "SAFETY VARIANTS",
-        "SAFETYVARIANTSMESSAGE": "SAFETY VARIANTS MESSAGE",
-        "SAFETYVARIANTSMESSAGES": "SAFETY VARIANTS MESSAGES",
-        "VARIANTSCOMPOSITION": "VARIANTS COMPOSITION",
-        "VARIANTCOMPOSITION": "VARIANT COMPOSITION",
-        "TRANSMISSIONTIME": "TRANSMISSION TIME",
-        "ANTICIPATIONDISTANCE": "ANTICIPATION DISTANCE",
-        "SUBSECTION": "SUB SECTION",
-        "SUBSECT": "SUB-SECT.",
-        "INTERSINGUL": "INTER SINGUL.",
-        "TESTABSC": "TEST ABSC.",
-        "NORMALDIRECTION": "NORMAL DIRECTION",
-        "UPTRACK": "UP TRACK",
-        "DOWNTRACK": "DOWN TRACK",
-        "DNTRACK": "DN TRACK",
-        "PERMANENTSPEEDRESTRICTION": "PERMANENT SPEED RESTRICTION",
-        "SPACINGSTOPPINGPOINT": "SPACING STOPPING POINT",
-        "SPECIALSTOPPINGPOINT": "SPECIAL STOPPING POINT",
-        "COMPLEXSTOPPINGPOINT": "COMPLEX STOPPING POINT",
-        "MOVINGTRAININITIALISATION": "MOVING TRAIN INITIALISATION",
-        "MOVINGTRAININITIALIZATION": "MOVING TRAIN INITIALIZATION",
-        "STATIONARYTRAININITIALISATION": "STATIONARY TRAIN INITIALISATION",
-        "STATIONARYTRAININITIALIZATION": "STATIONARY TRAIN INITIALIZATION",
-        "EMERGENCYZONE": "EMERGENCY ZONE",
-        "RETURNCHANNEL": "RETURN CHANNEL",
-        "EXITSACEMROUTE": "EXIT SACEM ROUTE",
-        "SUBSECTIONEND": "SUB SECTION END",
-        "ASSOCIATEDVARIANT": "ASSOCIATED VARIANT",
-        "ASSOCIATEDVARIANTS": "ASSOCIATED VARIANTS",
-        "FIXEDCHARACTERISTICS": "FIXED CHARACTERISTICS",
-        "STATIONCHARACTERISTICS": "STATION CHARACTERISTICS",
-        "COMPENSATEDGRADIENT": "COMPENSATED GRADIENT",
-        "GRADIENTVARIATION": "GRADIENT VARIATION",
-        "BEACONTYPE": "BEACON TYPE",
-        "MINIMUMVISIBILITYDISTANCE": "MINIMUM VISIBILITY DISTANCE",
-        "SECTIONBRAKINGDISTANCE": "SECTION BRAKING DISTANCE",
-        "DOWNSTREAMREQUEST": "DOWNSTREAM REQUEST",
-        "CURRENTCOMPUTED": "CURRENT COMPUTED",
-    }
-
-    for compact_word, replacement in repairs.items():
-        repaired = re.sub(
-            make_spaced_word_pattern(compact_word),
-            replacement,
-            repaired,
-            flags=re.IGNORECASE,
-        )
-
-    return repaired
-
-
-def repair_ocr_page_text(text: str) -> str:
-    """
-    Apply conservative OCR cleanup to each output line.
-
-    Raw OCR is preserved separately in the audit log. This cleaned output is
-    intended for page recognition and structured extraction.
-    """
-    repaired_lines: List[str] = []
-
-    for raw_line in safe_text(text).splitlines():
-        line = normalise_spaces(raw_line)
-
-        if not line:
-            continue
-
-        line = repair_known_ocr_headings(line)
-
-        # OCR commonly inserts spaces around punctuation in headings.
-        line = re.sub(r"\s+:", ":", line)
-        line = re.sub(r"\(\s+", "(", line)
-        line = re.sub(r"\s+\)", ")", line)
-
-        repaired_lines.append(line)
-
-    return "\n".join(repaired_lines)
-
-
-def pixmap_to_rgb_array(pixmap: fitz.Pixmap) -> np.ndarray:
-    """Convert PyMuPDF pixmap to RGB NumPy array."""
-    image = Image.frombytes(
-        "RGB",
-        [pixmap.width, pixmap.height],
-        pixmap.samples,
-    )
-
-    return np.array(image)
-
-
-def deskew_image(gray: np.ndarray) -> np.ndarray:
-    """
-    Correct minor scan rotation.
-
-    Engineering schedule tables are sensitive to small skew because horizontal
-    rules can interfere with OCR line segmentation.
-    """
-    inverted = cv2.bitwise_not(gray)
-
-    coordinates = np.column_stack(
-        np.where(inverted > 0)
-    )
-
-    if len(coordinates) < 100:
-        return gray
-
-    angle = cv2.minAreaRect(coordinates)[-1]
-
-    if angle < -45:
-        angle = -(90 + angle)
-    else:
-        angle = -angle
-
-    # Ignore insignificant rotation.
-    if abs(angle) < 0.15 or abs(angle) > 5:
-        return gray
-
-    height, width = gray.shape[:2]
-
-    rotation_matrix = cv2.getRotationMatrix2D(
-        (width / 2, height / 2),
-        angle,
-        1.0,
-    )
-
-    return cv2.warpAffine(
-        gray,
-        rotation_matrix,
-        (width, height),
-        flags=cv2.INTER_CUBIC,
-        borderMode=cv2.BORDER_REPLICATE,
-    )
-
-
-def preprocess_gray_for_ocr(
-    rgb_array: np.ndarray,
-) -> Dict[str, Image.Image]:
-    """
-    Create several OCR image variants.
-
-    Do NOT remove table lines in the primary OCR path. On this document,
-    line-removal can also erase letters touching grid lines.
-    """
-    gray = cv2.cvtColor(
-        rgb_array,
-        cv2.COLOR_RGB2GRAY,
-    )
-
-    gray = deskew_image(gray)
-
-    clahe = cv2.createCLAHE(
-        clipLimit=2.0,
-        tileGridSize=(8, 8),
-    )
-
-    enhanced = clahe.apply(gray)
-
-    _, otsu = cv2.threshold(
-        enhanced,
-        0,
-        255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
-    )
-
-    adaptive = cv2.adaptiveThreshold(
-        enhanced,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        41,
-        11,
-    )
-
-    return {
-        "colour": Image.fromarray(rgb_array),
-        "gray": Image.fromarray(gray),
-        "clahe": Image.fromarray(enhanced),
-        "otsu": Image.fromarray(otsu),
-        "adaptive": Image.fromarray(adaptive),
-    }
-
-
-def extract_red_text_image(
-    rgb_array: np.ndarray,
-) -> Image.Image:
-    """
-    Isolate red/orange engineering annotation text.
-
-    The PDF contains important red annotations such as:
-    - Sub Section
-    - Associated Variant
-    - PSR
-    - Station Characteristics
-    - Speed restrictions
-    - End-of-subsection descriptions
-    """
-    hsv = cv2.cvtColor(
-        rgb_array,
-        cv2.COLOR_RGB2HSV,
-    )
-
-    lower_red_1 = np.array([0, 25, 30])
-    upper_red_1 = np.array([18, 255, 255])
-
-    lower_red_2 = np.array([155, 25, 30])
-    upper_red_2 = np.array([180, 255, 255])
-
-    mask_1 = cv2.inRange(
-        hsv,
-        lower_red_1,
-        upper_red_1,
-    )
-
-    mask_2 = cv2.inRange(
-        hsv,
-        lower_red_2,
-        upper_red_2,
-    )
-
-    mask = cv2.bitwise_or(
-        mask_1,
-        mask_2,
-    )
-
-    # Remove small isolated noise.
-    kernel = np.ones((2, 2), np.uint8)
-
-    mask = cv2.morphologyEx(
-        mask,
-        cv2.MORPH_OPEN,
-        kernel,
-        iterations=1,
-    )
-
-    # Tesseract convention: dark text on light background.
-    output = np.full(
-        mask.shape,
-        255,
-        dtype=np.uint8,
-    )
-
-    output[mask > 0] = 0
-
-    return Image.fromarray(output)
-
-
-def ocr_image_to_string(
-    image: Image.Image,
-    psm: int,
-) -> str:
-    """
-    OCR one prepared image.
-
-    No confidence filtering is applied. This is source/audit OCR.
-    """
-    try:
-        text = pytesseract.image_to_string(
-            image,
-            lang="eng",
-            config=f"--oem 3 --psm {psm}",
-        )
-
-        return safe_text(text)
-
-    except Exception:
-        return ""
-
-
-def ocr_crop(
-    page: fitz.Page,
-    top_ratio: float,
-    bottom_ratio: float,
-    left_ratio: float = 0.0,
-    right_ratio: float = 1.0,
-    dpi: int = 600,
-    psm: int = 6,
-) -> str:
-    """
-    OCR a predictable page region at high DPI.
-
-    Crops are essential for headings because full-page table OCR can lose
-    text that touches grid lines or is surrounded by dense columns.
-    """
-    rect = page.rect
-
-    crop_rect = fitz.Rect(
-        rect.x0 + rect.width * left_ratio,
-        rect.y0 + rect.height * top_ratio,
-        rect.x0 + rect.width * right_ratio,
-        rect.y0 + rect.height * bottom_ratio,
-    )
-
-    matrix = fitz.Matrix(
-        dpi / 72,
-        dpi / 72,
-    )
-
-    pixmap = page.get_pixmap(
-        matrix=matrix,
-        clip=crop_rect,
-        alpha=False,
-        colorspace=fitz.csRGB,
-    )
-
-    rgb_array = pixmap_to_rgb_array(pixmap)
-
-    variants = preprocess_gray_for_ocr(rgb_array)
-
-    results: List[str] = []
-
-    for image in [
-        variants["colour"],
-        variants["gray"],
-        variants["otsu"],
-        variants["adaptive"],
-    ]:
-        text = ocr_image_to_string(
-            image=image,
-            psm=psm,
-        )
-
-        if text:
-            results.append(text)
-
-    if not results:
-        return ""
-
-    def crop_score(text: str) -> int:
-        compact = compact_ocr_text(text)
-
-        markers = [
-            "SINGULARITIES",
-            "SAFETYVARIANTS",
-            "VARIANTSCOMPOSITION",
-            "SUBSECTION",
-            "TRANSMISSIONTIME",
-            "ANTICIPATIONDISTANCE",
-            "SECTION",
-            "SECTOR",
-            "NORMALDIRECTION",
-        ]
-
-        return (
-            len(text)
-            + sum(
-                1000
-                for marker in markers
-                if marker in compact
-            )
-        )
-
-    return repair_ocr_page_text(
-        max(
-            results,
-            key=crop_score,
-        )
-    )
-
-
-def score_ocr_result(
-    text: str,
-) -> int:
-    """
-    Score OCR results using known document terminology.
-
-    This is better than selecting the longest OCR result, because long noisy
-    OCR is less valuable than a shorter correctly structured result.
-    """
-    compact = compact_ocr_text(text)
-
-    score = len(text)
-
-    expected_markers = [
-        "TUNGCHUNG",
-        "SACEM",
-        "SECTOR",
-        "SECTION",
-        "SINGULARITIES",
-        "SUBSECTION",
-        "ASSOCIATEDVARIANT",
-        "BEACONTYPE",
-        "SAFETYVARIANTS",
-        "VARIANTSCOMPOSITION",
-        "TRANSMISSIONTIME",
-        "ANTICIPATIONDISTANCE",
-        "CURRENTCOMPUTED",
-        "DOWNSTREAMREQUEST",
-    ]
-
-    for marker in expected_markers:
-        if marker in compact:
-            score += 1000
-
-    # Reward engineering numeric data.
-    score += len(
-        re.findall(
-            r"\b-?\d[\d,]*(?:\.\d+)?\b",
-            text,
-        )
-    ) * 4
-
-    # Penalise obvious OCR table/noise artefacts lightly.
-    score -= text.count("�") * 100
-    score -= text.count("|") * 1
-
-    return score
-
-
-def ocr_pdf_page_detailed(
-    page: fitz.Page,
-) -> Dict[str, str]:
-    """
-    Multi-pass OCR for dense SACEM engineering schedule pages.
-
-    Returns:
-        parser_text:
-            Selected full-page OCR plus high-quality cropped headings.
-            This is used by extraction logic.
-
-        audit_text:
-            Full selected OCR and every alternative OCR pass.
-            This is exported for human review.
-    """
-    scale = OCR_DPI / 72
-
-    pixmap = page.get_pixmap(
-        matrix=fitz.Matrix(scale, scale),
-        alpha=False,
-        colorspace=fitz.csRGB,
-    )
-
-    rgb_array = pixmap_to_rgb_array(pixmap)
-
-    image_variants = preprocess_gray_for_ocr(rgb_array)
-
-    all_results: List[Dict[str, str]] = []
-
-    # PSM 3: automatic layout.
-    # PSM 4: single column.
-    # PSM 6: dense uniform text/table area.
-    # PSM 11: sparse text, useful for headings and labels.
-    for image_name, image in image_variants.items():
-        for psm in [3, 4, 6, 11]:
-            text = ocr_image_to_string(
-                image=image,
-                psm=psm,
-            )
-
-            if text:
-                all_results.append(
-                    {
-                        "source": f"{image_name} / PSM {psm}",
-                        "text": text,
-                    }
-                )
-
-    # Separate OCR pass for red annotations.
-    red_text_image = extract_red_text_image(rgb_array)
-
-    for psm in [6, 11]:
-        text = ocr_image_to_string(
-            image=red_text_image,
-            psm=psm,
-        )
-
-        if text:
-            all_results.append(
-                {
-                    "source": f"red-text / PSM {psm}",
-                    "text": text,
-                }
-            )
-
-    if not all_results:
-        return {
-            "parser_text": "",
-            "audit_text": "",
-        }
-
-    selected_result = max(
-        all_results,
-        key=lambda item: score_ocr_result(item["text"]),
-    )
-
-    selected_clean_text = repair_ocr_page_text(
-        selected_result["text"]
-    )
-
-    # High-resolution OCR crops.
-    #
-    # These cover the regions where headings usually appear in this document:
-    # - Project name / Line / Sector / Section
-    # - Track normal direction
-    # - SINGULARITIES heading
-    # - Variant Composition / Safety Variants Messages heading
-    #
-    # Exact crop ratios are deliberately broad because page layouts differ.
-    header_crop = ocr_crop(
-        page=page,
-        top_ratio=0.08,
-        bottom_ratio=0.28,
-        left_ratio=0.03,
-        right_ratio=0.97,
-        dpi=600,
-        psm=6,
-    )
-
-    schedule_heading_crop = ocr_crop(
-        page=page,
-        top_ratio=0.18,
-        bottom_ratio=0.38,
-        left_ratio=0.03,
-        right_ratio=0.97,
-        dpi=600,
-        psm=6,
-    )
-
-    variant_heading_crop = ocr_crop(
-        page=page,
-        top_ratio=0.15,
-        bottom_ratio=0.55,
-        left_ratio=0.02,
-        right_ratio=0.98,
-        dpi=600,
-        psm=11,
-    )
-
-    parser_text_parts = [
-        "===== SELECTED FULL PAGE OCR =====",
-        selected_clean_text,
-    ]
-
-    if header_crop:
-        parser_text_parts.extend(
-            [
-                "",
-                "===== HIGH RESOLUTION HEADER OCR =====",
-                header_crop,
-            ]
-        )
-
-    if schedule_heading_crop:
-        parser_text_parts.extend(
-            [
-                "",
-                "===== HIGH RESOLUTION SCHEDULE HEADING OCR =====",
-                schedule_heading_crop,
-            ]
-        )
-
-    if variant_heading_crop:
-        parser_text_parts.extend(
-            [
-                "",
-                "===== HIGH RESOLUTION VARIANT HEADING OCR =====",
-                variant_heading_crop,
-            ]
-        )
-
-    parser_text = "\n".join(parser_text_parts)
-
-    audit_parts = [
-        "===== SELECTED OCR RESULT =====",
-        f"Selected Source: {selected_result['source']}",
-        "",
-        repair_ocr_page_text(selected_result["text"]),
-        "",
-        "===== HIGH RESOLUTION HEADER OCR =====",
-        header_crop or "[No text recognised]",
-        "",
-        "===== HIGH RESOLUTION SCHEDULE HEADING OCR =====",
-        schedule_heading_crop or "[No text recognised]",
-        "",
-        "===== HIGH RESOLUTION VARIANT HEADING OCR =====",
-        variant_heading_crop or "[No text recognised]",
-        "",
-        "===== ALL FULL-PAGE OCR ALTERNATIVES =====",
-    ]
-
-    for result in all_results:
-        audit_parts.extend(
-            [
-                "",
-                "=" * 90,
-                f"OCR SOURCE: {result['source']}",
-                "=" * 90,
-                result["text"],
-            ]
-        )
-
-    audit_text = "\n".join(audit_parts)
-
-    return {
-        "parser_text": parser_text,
-        "audit_text": audit_text,
-    }
-
-
-def ocr_pdf_page(page: fitz.Page) -> str:
-    """
-    Compatibility wrapper.
-
-    Existing code may call ocr_pdf_page(page). It receives parser-oriented
-    OCR text, including heading crops.
-    """
-    result = ocr_pdf_page_detailed(page)
-
-    return result["parser_text"]
-
-
-def group_ocr_words_into_visual_lines(
-    ocr_data: Dict[str, List[Any]],
-    y_tolerance: int = 24,
-) -> List[str]:
-    """
-    Compatibility function retained for any downstream use.
-
-    This function does NOT delete low-confidence OCR tokens.
-
-    Note:
-    It should not be used as the main page OCR source. Full page OCR now uses
-    pytesseract.image_to_string(), which preserves Tesseract's own layout
-    decisions more reliably than rebuilding all text word-by-word.
-    """
-    words: List[Dict[str, Any]] = []
-
-    for index, raw_word in enumerate(ocr_data.get("text", [])):
-        word = normalise_spaces(raw_word)
-
-        if not word:
-            continue
-
-        try:
-            confidence = float(ocr_data["conf"][index])
-        except (TypeError, ValueError, KeyError):
-            confidence = -1.0
-
-        try:
-            left = int(ocr_data["left"][index])
-            top = int(ocr_data["top"][index])
-            width = int(ocr_data["width"][index])
-            height = int(ocr_data["height"][index])
-        except (TypeError, ValueError, KeyError):
-            continue
-
-        # Important: retain even low-confidence words.
-        words.append(
-            {
-                "text": word,
-                "confidence": confidence,
-                "left": left,
-                "top": top,
-                "width": width,
-                "height": height,
-                "right": left + width,
-            }
-        )
-
-    words.sort(key=lambda item: (item["top"], item["left"]))
-
-    line_groups: List[List[Dict[str, Any]]] = []
-
-    for word in words:
-        if not line_groups:
-            line_groups.append([word])
-            continue
-
-        previous_line = line_groups[-1]
-
-        average_y = sum(
-            item["top"] + item["height"] / 2
-            for item in previous_line
-        ) / len(previous_line)
-
-        current_y = word["top"] + word["height"] / 2
-
-        if abs(current_y - average_y) <= y_tolerance:
-            previous_line.append(word)
-        else:
-            line_groups.append([word])
-
-    lines: List[str] = []
-
-    for line_words in line_groups:
-        line_words.sort(key=lambda item: item["left"])
-
-        output_parts: List[str] = []
-        previous: Optional[Dict[str, Any]] = None
-
-        for word in line_words:
-            if previous is None:
-                output_parts.append(word["text"])
-                previous = word
-                continue
-
-            gap = word["left"] - previous["right"]
-
-            previous_character_width = max(
-                previous["width"] / max(len(previous["text"]), 1),
-                1.0,
-            )
-
-            both_single_letters = (
-                len(previous["text"]) == 1
-                and len(word["text"]) == 1
-                and previous["text"].isalpha()
-                and word["text"].isalpha()
-            )
-
-            # Join physically close single-letter OCR fragments.
-            if (
-                both_single_letters
-                and gap <= previous_character_width * 3
-            ):
-                output_parts.append(word["text"])
-            else:
-                output_parts.append(" ")
-                output_parts.append(word["text"])
-
-            previous = word
-
-        line = repair_known_ocr_headings(
-            normalise_spaces("".join(output_parts))
-        )
-
-        if line:
-            lines.append(line)
-
-    return lines
-
-
-def create_pdf_text_log(
-    extracted_pages: List[Dict[str, Any]],
-) -> str:
-    """
-    Create a full OCR/native text audit log.
-
-    `audit_text` contains selected OCR plus all OCR alternatives.
-    `text` contains parser-oriented text.
-    """
-    lines = [
-        "=" * 110,
-        "PDF TEXT EXTRACTION / OCR AUDIT LOG",
-        "=" * 110,
-        "",
-        "This file includes all available native PDF text and OCR output.",
-        "OCR is multi-pass: colour, grayscale, OTSU, adaptive threshold,",
-        "red-text OCR, and high-resolution heading crops.",
-        "",
-    ]
-
-    for page_data in extracted_pages:
-        page_number = page_data["page_number"]
-        extraction_method = page_data["extraction_method"]
-
-        parser_text = safe_text(
-            page_data.get("text", "")
-        )
-
-        audit_text = safe_text(
-            page_data.get("audit_text", parser_text)
-        )
-
-        lines.extend(
-            [
-                "=" * 110,
-                f"PDF PAGE {page_number}",
-                "=" * 110,
-                f"Extraction Method: {extraction_method}",
-                f"Parser Text Character Count: {len(parser_text)}",
-                f"Parser Text Word Count: {len(parser_text.split())}",
-                "",
-                "PARSER-ORIENTED OCR / NATIVE TEXT",
-                "-" * 110,
-                parser_text or "[NO TEXT EXTRACTED]",
-                "",
-                "FULL OCR AUDIT OUTPUT",
-                "-" * 110,
-                audit_text or "[NO OCR AUDIT TEXT EXTRACTED]",
-                "",
-            ]
-        )
-
-    return "\n".join(lines)
-
-
-def create_pdf_extraction_summary(
-    extracted_pages: List[Dict[str, Any]],
-) -> pd.DataFrame:
-    """Create per-page extraction summary for Streamlit/Excel."""
-    records: List[Dict[str, Any]] = []
-
-    for page_data in extracted_pages:
-        parser_text = safe_text(
-            page_data.get("text", "")
-        )
-
-        audit_text = safe_text(
-            page_data.get("audit_text", parser_text)
-        )
-
-        records.append(
-            {
-                "pdf_page": page_data["page_number"],
-                "extraction_method": page_data["extraction_method"],
-                "character_count": len(parser_text),
-                "word_count": len(parser_text.split()),
-                "audit_character_count": len(audit_text),
-                "text_preview": parser_text[:700],
-            }
-        )
-
-    return pd.DataFrame(records)
 
 # =============================================================================
 # MARKER-PDF EXTRACTION BACKEND
@@ -1639,15 +739,15 @@ def extract_one_page_with_marker(
                 pass
 
 
+@st.cache_data(show_spinner=False, max_entries=4)
 def extract_pdf_text_pages_with_marker(
     pdf_bytes: bytes,
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
     """
-    Extract every page using marker-pdf.
+    Extract every PDF page using Marker-PDF only.
 
-    Native PDF text is retained as supplementary source evidence. Marker is
-    still used for every page because the first schedule pages are images and
-    contain engineering tables which native PDF extraction cannot read.
+    No PyMuPDF native text extraction, Tesseract OCR, OpenCV preprocessing,
+    image thresholding, or alternate OCR fallback is used.
     """
     source_document = fitz.open(
         stream=pdf_bytes,
@@ -1660,11 +760,6 @@ def extract_pdf_text_pages_with_marker(
     try:
         for page_index in range(source_document.page_count):
             page_number = page_index + 1
-            source_page = source_document.load_page(page_index)
-
-            native_text = safe_text(
-                source_page.get_text("text")
-            )
 
             single_page_pdf = create_single_page_pdf_bytes(
                 source_document=source_document,
@@ -1676,166 +771,27 @@ def extract_pdf_text_pages_with_marker(
                 original_page_number=page_number,
             )
 
-            marker_parser_text = safe_text(
+            parser_text = safe_text(
                 marker_result.get("parser_text", "")
             )
 
-            marker_audit_text = safe_text(
+            audit_text = safe_text(
                 marker_result.get("audit_text", "")
             )
 
-            # Keep both native and Marker extraction. Marker is primary for
-            # scanned tables, while native text is often excellent for pages
-            # 22-27 containing the transmission calculation sheets.
-            if native_text and marker_parser_text:
-                parser_text = "\n".join(
-                    [
-                        "===== NATIVE PDF TEXT =====",
-                        native_text,
-                        "",
-                        "===== MARKER-PDF TEXT =====",
-                        marker_parser_text,
-                    ]
-                )
-                extraction_method = "Marker-PDF + Native PDF Text"
-
-            elif marker_parser_text:
-                parser_text = marker_parser_text
-                extraction_method = "Marker-PDF"
-
-            else:
-                parser_text = native_text
-                extraction_method = "Native PDF Text"
-
-            audit_parts: List[str] = []
-
-            if native_text:
-                audit_parts.extend(
-                    [
-                        "===== NATIVE PDF TEXT =====",
-                        native_text,
-                        "",
-                    ]
-                )
-
-            audit_parts.extend(
-                [
-                    "===== MARKER-PDF AUDIT =====",
-                    marker_audit_text or "[NO MARKER OUTPUT]",
-                ]
-            )
-
             pages.append(parser_text)
 
             extracted_pages.append(
                 {
                     "page_number": page_number,
-                    "extraction_method": extraction_method,
-                    "text": parser_text,
-                    "audit_text": "\n".join(audit_parts),
-                }
-            )
-
-    finally:
-        source_document.close()
-
-    return pages, extracted_pages
-
-    
-@st.cache_data(show_spinner=False, max_entries=4)
-def extract_pdf_text_pages_tesseract_fallback(
-    pdf_bytes: bytes,
-) -> Tuple[List[str], List[Dict[str, Any]]]:
-    """
-    Extract native text plus multi-pass OCR from every PDF page.
-
-    Returns:
-        pages:
-            Parser-oriented page text. This is used by the extraction logic.
-
-        extracted_pages:
-            Full audit data, including OCR alternatives.
-    """
-    document = fitz.open(
-        stream=pdf_bytes,
-        filetype="pdf",
-    )
-
-    pages: List[str] = []
-    extracted_pages: List[Dict[str, Any]] = []
-
-    try:
-        for page_number, page in enumerate(document, start=1):
-            native_text = page.get_text("text") or ""
-
-            # Always OCR because pages 1-21 contain scanned/image table content.
-            ocr_result = ocr_pdf_page_detailed(page)
-
-            parser_ocr_text = safe_text(
-                ocr_result.get("parser_text", "")
-            )
-
-            audit_ocr_text = safe_text(
-                ocr_result.get("audit_text", "")
-            )
-
-            native_clean = normalise_spaces(native_text)
-            ocr_clean = normalise_spaces(parser_ocr_text)
-
-            # For parsing: keep native text and selected OCR/crops together.
-            if native_clean and ocr_clean:
-                parser_text = (
-                    "===== NATIVE PDF TEXT =====\n"
-                    f"{native_text}\n\n"
-                    "===== OCR TEXT =====\n"
-                    f"{parser_ocr_text}"
-                )
-
-                extraction_method = "Native PDF Text + Multi-Pass OCR"
-
-            elif ocr_clean:
-                parser_text = parser_ocr_text
-                extraction_method = "Multi-Pass OCR"
-
-            else:
-                parser_text = native_text
-                extraction_method = "Native PDF Text"
-
-            # For audit: preserve native text plus every OCR alternative.
-            audit_text_parts = []
-
-            if native_clean:
-                audit_text_parts.extend(
-                    [
-                        "===== NATIVE PDF TEXT =====",
-                        native_text,
-                        "",
-                    ]
-                )
-
-            if audit_ocr_text:
-                audit_text_parts.extend(
-                    [
-                        "===== MULTI-PASS OCR AUDIT =====",
-                        audit_ocr_text,
-                    ]
-                )
-
-            audit_text = "\n".join(audit_text_parts)
-
-            pages.append(parser_text)
-
-            extracted_pages.append(
-                {
-                    "page_number": page_number,
-                    "extraction_method": extraction_method,
+                    "extraction_method": "Marker-PDF Only",
                     "text": parser_text,
                     "audit_text": audit_text,
                 }
             )
 
     finally:
-        document.close()
+        source_document.close()
 
     return pages, extracted_pages
 
@@ -1845,58 +801,26 @@ def extract_pdf_text_pages(
     pdf_bytes: bytes,
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
     """
-    Primary PDF extraction entry point.
+    Marker-PDF-only extraction entry point.
 
-    Extraction order:
-    1. marker-pdf for layout-aware OCR, tables and scanned schedules.
-    2. Existing PyMuPDF/Tesseract extraction only if Marker cannot run.
-
-    Set MARKER_REQUIRED = True if you want to prohibit fallback behaviour.
+    Marker is mandatory. No Tesseract, OpenCV, PIL image OCR, or native PDF
+    text extraction fallback is permitted.
     """
-    if USE_MARKER_PDF:
-        if marker_is_installed():
-            try:
-                return extract_pdf_text_pages_with_marker(pdf_bytes)
+    if not marker_is_installed():
+        raise RuntimeError(
+            "marker-pdf is required but is not installed. "
+            "Install it with: pip install marker-pdf"
+        )
 
-            except Exception as marker_error:
-                if MARKER_REQUIRED:
-                    raise RuntimeError(
-                        "Marker-PDF extraction failed and MARKER_REQUIRED=True. "
-                        f"Underlying error: {type(marker_error).__name__}: "
-                        f"{marker_error}"
-                    ) from marker_error
+    try:
+        return extract_pdf_text_pages_with_marker(pdf_bytes)
 
-                fallback_pages, fallback_extracted_pages = (
-                    extract_pdf_text_pages_tesseract_fallback(pdf_bytes)
-                )
-
-                for page_data in fallback_extracted_pages:
-                    page_data["extraction_method"] = (
-                        "Tesseract Fallback "
-                        f"(Marker failed: {type(marker_error).__name__})"
-                    )
-
-                    page_data["audit_text"] = "\n".join(
-                        [
-                            "=" * 100,
-                            "MARKER-PDF FAILURE / TESSERACT FALLBACK",
-                            "=" * 100,
-                            f"Marker error: {type(marker_error).__name__}: "
-                            f"{marker_error}",
-                            "",
-                            safe_text(page_data.get("audit_text", "")),
-                        ]
-                    )
-
-                return fallback_pages, fallback_extracted_pages
-
-        if MARKER_REQUIRED:
-            raise RuntimeError(
-                "marker-pdf is required but is not installed. "
-                "Install it with: pip install marker-pdf"
-            )
-
-    return extract_pdf_text_pages_tesseract_fallback(pdf_bytes)
+    except Exception as exc:
+        raise RuntimeError(
+            "Marker-PDF extraction failed. No fallback extraction engine is "
+            "configured because this application is Marker-PDF only. "
+            f"Underlying error: {type(exc).__name__}: {exc}"
+        ) from exc
 
 # =============================================================================
 # SOURCE PAGE IDENTIFICATION
@@ -1905,6 +829,111 @@ def extract_pdf_text_pages(
 # =============================================================================
 # PAGE TYPE IDENTIFICATION
 # =============================================================================
+def compact_ocr_text(value: Any) -> str:
+    """
+    Create compact uppercase text for robust heading matching.
+
+    The name is retained for compatibility with existing parsers, although
+    Marker-PDF is now the sole extraction engine.
+    """
+    return re.sub(
+        r"[^A-Z0-9]+",
+        "",
+        safe_text(value).upper(),
+    )
+
+
+def make_spaced_word_pattern(word: str) -> str:
+    clean_word = re.sub(r"[^A-Z0-9]", "", word.upper())
+
+    if not clean_word:
+        return r"$^"
+
+    return (
+        r"(?<![A-Z0-9])"
+        + r"[\s._|/-]*".join(
+            re.escape(character)
+            for character in clean_word
+        )
+        + r"(?![A-Z0-9])"
+    )
+
+
+def repair_known_ocr_headings(text: str) -> str:
+    """
+    Conservative heading repair retained for imperfect Marker extraction.
+    """
+    repaired = safe_text(text)
+
+    repairs = {
+        "SINGULARITIES": "SINGULARITIES",
+        "SINGULARITY": "SINGULARITY",
+        "SAFETYVARIANTS": "SAFETY VARIANTS",
+        "SAFETYVARIANTSMESSAGE": "SAFETY VARIANTS MESSAGE",
+        "SAFETYVARIANTSMESSAGES": "SAFETY VARIANTS MESSAGES",
+        "VARIANTSCOMPOSITION": "VARIANTS COMPOSITION",
+        "VARIANTCOMPOSITION": "VARIANT COMPOSITION",
+        "TRANSMISSIONTIME": "TRANSMISSION TIME",
+        "ANTICIPATIONDISTANCE": "ANTICIPATION DISTANCE",
+        "SUBSECTION": "SUB SECTION",
+        "SUBSECT": "SUB-SECT.",
+        "INTERSINGUL": "INTER SINGUL.",
+        "TESTABSC": "TEST ABSC.",
+        "NORMALDIRECTION": "NORMAL DIRECTION",
+        "UPTRACK": "UP TRACK",
+        "DOWNTRACK": "DOWN TRACK",
+        "DNTRACK": "DN TRACK",
+        "SPACINGSTOPPINGPOINT": "SPACING STOPPING POINT",
+        "SPECIALSTOPPINGPOINT": "SPECIAL STOPPING POINT",
+        "COMPLEXSTOPPINGPOINT": "COMPLEX STOPPING POINT",
+        "MOVINGTRAININITIALISATION": "MOVING TRAIN INITIALISATION",
+        "MOVINGTRAININITIALIZATION": "MOVING TRAIN INITIALIZATION",
+        "STATIONARYTRAININITIALISATION": "STATIONARY TRAIN INITIALISATION",
+        "STATIONARYTRAININITIALIZATION": "STATIONARY TRAIN INITIALIZATION",
+        "EMERGENCYZONE": "EMERGENCY ZONE",
+        "RETURNCHANNEL": "RETURN CHANNEL",
+        "EXITSACEMROUTE": "EXIT SACEM ROUTE",
+        "SUBSECTIONEND": "SUB SECTION END",
+        "ASSOCIATEDVARIANT": "ASSOCIATED VARIANT",
+        "ASSOCIATEDVARIANTS": "ASSOCIATED VARIANTS",
+        "FIXEDCHARACTERISTICS": "FIXED CHARACTERISTICS",
+        "STATIONCHARACTERISTICS": "STATION CHARACTERISTICS",
+        "CURRENTCOMPUTED": "CURRENT COMPUTED",
+    }
+
+    for compact_word, replacement in repairs.items():
+        repaired = re.sub(
+            make_spaced_word_pattern(compact_word),
+            replacement,
+            repaired,
+            flags=re.IGNORECASE,
+        )
+
+    return repaired
+
+
+def repair_ocr_page_text(text: str) -> str:
+    """
+    Compatibility name retained for downstream parsing.
+
+    Applies conservative cleanup to Marker-PDF output.
+    """
+    repaired_lines: List[str] = []
+
+    for raw_line in safe_text(text).splitlines():
+        line = normalise_spaces(raw_line)
+
+        if not line:
+            continue
+
+        line = repair_known_ocr_headings(line)
+        line = re.sub(r"\s+:", ":", line)
+        line = re.sub(r"\(\s+", "(", line)
+        line = re.sub(r"\s+\)", ")", line)
+
+        repaired_lines.append(line)
+
+    return "\n".join(repaired_lines)
 
 def is_singularity_schedule_page(page_text: str) -> bool:
     """
@@ -4034,7 +3063,7 @@ def create_docx_test_sheet(
         f"Singularity Row: {safe_text(row.get('row_number'))}\n"
         f"Singularity Code: {safe_text(row.get('singularity_code'))}\n"
         f"Calculation: {safe_text(row.get('calculation_log'))}\n\n"
-        f"PDF/OCR Source Evidence:\n"
+        f"Marker-PDF Source Evidence:\n"
         f"{safe_text(row.get('source_evidence'))}\n\n"
         f"Engineering Remarks:\n"
         f"{safe_text(row.get('remarks'))}"
@@ -4196,7 +3225,7 @@ def create_excel_bytes(
                 ["Procedure Title", project_info["procedure_title"]],
                 ["Generated Date", str(date.today())],
                 ["Test Register Rows", len(register)],
-                ["Extraction Method", "Native PDF text + OCR fallback"],
+                ["Extraction Method", "Marker-PDF only"],
                 [
                     "Abscissa Calculation",
                     "Local Abscissa = Absolute Chainage - Sub-section Start Chainage",
@@ -4325,8 +3354,8 @@ def render_test_sheet_generator_app() -> None:
     )
 
     st.info(
-        "The extractor supports selectable PDF text and scanned/image-only "
-        "Subdivision schedule pages. Image-only schedule pages are OCR processed."
+        "This application uses Marker-PDF only for layout-aware extraction of "
+        "native-text and scanned/image-only Subdivision schedule pages."
     )
 
     with st.expander("Project Information", expanded=True):
@@ -4439,7 +3468,7 @@ def render_test_sheet_generator_app() -> None:
 
         try:
             progress_text.info(
-                "Reading PDF pages. Scanned/image-only pages will be OCR processed..."
+                "Reading PDF pages with Marker-PDF..."
             )
 
             # -----------------------------------------------------------------
@@ -4562,15 +3591,6 @@ def render_test_sheet_generator_app() -> None:
                     f"Extraction completed successfully. {summary_message}"
                 )
 
-        except pytesseract.TesseractNotFoundError:
-            progress_bar.empty()
-
-            progress_text.error(
-                "Tesseract OCR is not installed or is not available in PATH. "
-                "Install tesseract-ocr in the deployment environment and "
-                "restart the application."
-            )
-
         except fitz.FileDataError:
             progress_bar.empty()
 
@@ -4626,7 +3646,7 @@ def render_test_sheet_generator_app() -> None:
 
     if pdf_text_log:
         st.divider()
-        st.markdown("### Extracted PDF Text / OCR Log")
+        st.markdown("### Extracted Marker-PDF Text Log")
 
         st.caption(
             "This section shows the complete text extracted from the uploaded "
@@ -4742,7 +3762,7 @@ def render_test_sheet_generator_app() -> None:
             )
 
         st.download_button(
-            "Download Full Extracted PDF Text / OCR Log",
+            "Download Full Marker-PDF Extraction Log",
             data=pdf_text_log.encode("utf-8"),
             file_name=clean_filename(
                 f"{project_info['sheet_prefix']}_PDF_Text_Extraction_Log.txt"
