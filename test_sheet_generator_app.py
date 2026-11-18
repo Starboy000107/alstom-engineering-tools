@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import re
-import zipfile
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -14,6 +12,12 @@ import os
 import tempfile
 import threading
 from pathlib import Path
+
+from exports.test_sheet_export import (
+    create_excel_bytes,
+    create_test_sheet_export_zip,
+)
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -302,6 +306,13 @@ REGISTER_COLUMNS = [
     "test_code",
     "test_id",
     "test_name",
+
+    # Appendix-A document control fields.
+    "trackside_version",
+    "atp_version",
+    "ato_version",
+
+    # Location and chainage.
     "sector",
     "section",
     "subsection",
@@ -311,11 +322,34 @@ REGISTER_COLUMNS = [
     "absolute_abscissa_m",
     "subsection_start_abscissa_m",
     "inter_singularity_m",
+
+    # Source singularity.
     "row_number",
     "singularity_code",
     "event_name",
     "associated_variant",
     "location_name",
+
+    # Participate / anticipate planning fields.
+    "participating_variant",
+    "anticipated_variant",
+    "participating_subsections",
+    "anticipated_subsections",
+    "participating_branches",
+    "anticipated_branches",
+
+    # Test-specific pre-fill fields.
+    "track_circuit",
+    "signal_reference",
+    "point_reference",
+    "station_number",
+    "platform",
+    "return_channel_number",
+    "change_of_end_reference",
+    "shunt_route_name",
+    "tsr_value_kph",
+
+    # Traceability / control.
     "source_page",
     "source_evidence",
     "calculation_log",
@@ -505,45 +539,25 @@ def marker_is_installed() -> bool:
 
 @st.cache_resource(show_spinner=False)
 def get_marker_converter() -> Any:
-    """
-    Load Marker models once per Streamlit server process.
+    from marker.converters.pdf import PdfConverter
+    from marker.models import create_model_dict
 
-    Marker can use GPU automatically where available. The optional
-    MARKER_DEVICE environment variable may be used by deployment environments,
-    for example:
+    config: Dict[str, Any] = {
+        "paginate_output": True,
+    }
 
-        MARKER_DEVICE=cpu
-        MARKER_DEVICE=cuda
-        MARKER_DEVICE=mps
-    """
-    try:
-        from marker.converters.pdf import PdfConverter
-        from marker.models import create_model_dict
-    except Exception as exc:
-        raise RuntimeError(
-            "marker-pdf is not installed correctly. "
-            "Install it with: pip install marker-pdf"
-        ) from exc
-
-    config: Dict[str, Any] = {}
-
-    # Marker versions differ slightly. These values are optional and safely
-    # ignored by versions that do not use them.
     if MARKER_DEVICE:
         config["device"] = MARKER_DEVICE
 
     try:
-        converter = PdfConverter(
+        return PdfConverter(
             artifact_dict=create_model_dict(),
             config=config,
         )
     except TypeError:
-        # Compatibility with Marker versions where config is not accepted.
-        converter = PdfConverter(
+        return PdfConverter(
             artifact_dict=create_model_dict(),
         )
-
-    return converter
 
 
 def marker_rendered_to_markdown(rendered: Any) -> str:
@@ -750,10 +764,10 @@ def extract_pdf_text_pages_with_marker(
     pdf_bytes: bytes,
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
     """
-    Extract every PDF page using Marker-PDF only.
+    Extract every page individually with Marker-PDF.
 
-    No PyMuPDF native text extraction, Tesseract OCR, OpenCV preprocessing,
-    image thresholding, or alternate OCR fallback is used.
+    This is slower than whole-document conversion, but source page references
+    remain reliable for engineering traceability.
     """
     source_document = fitz.open(
         stream=pdf_bytes,
@@ -1351,6 +1365,46 @@ def extract_location_name(text: str) -> str:
 
     return ""
 
+def extract_return_channel_number(text: str) -> str:
+    match = re.search(
+        r"\bRETU?R?N\s+CHANNEL\s+(?:NUMBER\s*)?[:=]?\s*(\d+)",
+        safe_text(text),
+        flags=re.IGNORECASE,
+    )
+
+    return match.group(1) if match else ""
+
+
+def extract_station_number(text: str) -> str:
+    match = re.search(
+        r"\bSTATION\s*:\s*(\d+)",
+        safe_text(text),
+        flags=re.IGNORECASE,
+    )
+
+    return match.group(1) if match else ""
+
+
+def extract_track_circuit_reference(text: str) -> str:
+    match = re.search(
+        r"\b([A-Z]{2,5}\s+[A-Z0-9]{1,8}\s+T\s*/?\s*C)\b",
+        safe_text(text).upper(),
+    )
+
+    return normalise_spaces(match.group(1)) if match else ""
+
+
+def extract_change_of_end_reference(text: str) -> str:
+    match = re.search(
+        r"("
+        r"CHANGE\s+OF\s+ENDS?.{0,300}|"
+        r"REVERSE\s+SUB\s*-?\s*SECTION.{0,300}"
+        r")",
+        safe_text(text),
+        flags=re.IGNORECASE,
+    )
+
+    return normalise_spaces(match.group(1)) if match else ""
 def extract_route_reference(text: str) -> str:
     """
     Extract route / route name from Variant Composition or schedule pages.
@@ -2557,6 +2611,134 @@ def extract_transmission_calculation_table(
     return dataframe[TRANSMISSION_CALCULATION_COLUMNS]
 
 # =============================================================================
+# REGISTER ENRICHMENT FROM TRANSMISSION / ANTICIPATION TABLES
+# =============================================================================
+
+def join_unique_values(values: pd.Series) -> str:
+    cleaned = [
+        safe_text(value)
+        for value in values
+        if safe_text(value)
+    ]
+
+    return ", ".join(dict.fromkeys(cleaned))
+
+
+def branch_matches_subsection(
+    branch_list: str,
+    subsection: str,
+) -> bool:
+    """
+    Example:
+        subsection: 09-01-2
+        branch:     09-01-2-0
+    """
+    subsection = safe_text(subsection)
+
+    if not subsection:
+        return False
+
+    prefix = f"{subsection}-"
+
+    return any(
+        safe_text(branch).strip().startswith(prefix)
+        for branch in safe_text(branch_list).split(",")
+    )
+
+
+def branches_to_subsections(branch_list: str) -> str:
+    """
+    Convert a comma-separated branch list such as:
+
+        09-01-0-0, 09-01-1-0, 09-03-0-2
+
+    into:
+
+        09-01-0, 09-01-1, 09-03-0
+    """
+    subsections: List[str] = []
+
+    for branch in safe_text(branch_list).split(","):
+        parts = safe_text(branch).strip().split("-")
+
+        if len(parts) != 4:
+            continue
+
+        subsection = "-".join(parts[:3])
+
+        if subsection not in subsections:
+            subsections.append(subsection)
+
+    return ", ".join(subsections)
+
+
+def enrich_register_with_transmission_data(
+    register: pd.DataFrame,
+    transmission_calculations: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Populate participating and anticipated branches/sub-sections by matching
+    a register row's sub-section to Appendix J route calculations.
+
+    This is a planning aid only. The output requires engineering review.
+    """
+    output = register.copy()
+
+    if output.empty or transmission_calculations.empty:
+        return output
+
+    for index, register_row in output.iterrows():
+        subsection = safe_text(register_row.get("subsection"))
+
+        if not subsection:
+            continue
+
+        matching_rows = transmission_calculations[
+            transmission_calculations.apply(
+                lambda route_row: (
+                    branch_matches_subsection(
+                        route_row.get("route_branches", ""),
+                        subsection,
+                    )
+                    or branch_matches_subsection(
+                        route_row.get("anticipated_branches", ""),
+                        subsection,
+                    )
+                ),
+                axis=1,
+            )
+        ]
+
+        if matching_rows.empty:
+            continue
+
+        participating_branches = join_unique_values(
+            matching_rows["route_branches"]
+        )
+
+        anticipated_branches = join_unique_values(
+            matching_rows["anticipated_branches"]
+        )
+
+        output.at[index, "participating_branches"] = (
+            participating_branches
+        )
+
+        output.at[index, "anticipated_branches"] = (
+            anticipated_branches
+        )
+
+        output.at[index, "participating_subsections"] = (
+            branches_to_subsections(participating_branches)
+        )
+
+        output.at[index, "anticipated_subsections"] = (
+            branches_to_subsections(anticipated_branches)
+        )
+
+    return output
+
+# =============================================================================
 # MAIN REGISTER EXTRACTION
 # =============================================================================
 
@@ -2643,7 +2825,7 @@ def extract_test_register_from_pdf(
                         "sector": sector,
                         "section": section,
                         "subsection": current_subsection,
-                        "branch": current_subsection,
+                        "branch": "",
                         "direction": metadata["direction"],
 
                         # Test-sheet-local calculated abscissa.
@@ -2677,6 +2859,26 @@ def extract_test_register_from_pdf(
                             "Generated from Subdivision PDF/OCR. "
                             "Engineering verification is mandatory before use."
                         ),
+                        "trackside_version": "",
+                        "atp_version": "",
+                        "ato_version": "",
+
+                        "participating_variant": "",
+                        "anticipated_variant": "",
+                        "participating_subsections": "",
+                        "anticipated_subsections": "",
+                        "participating_branches": "",
+                        "anticipated_branches": "",
+
+                        "track_circuit": extract_track_circuit_reference(context),
+                        "signal_reference": "",
+                        "point_reference": "",
+                        "station_number": extract_station_number(context),
+                        "platform": "",
+                        "return_channel_number": extract_return_channel_number(context),
+                        "change_of_end_reference": extract_change_of_end_reference(context),
+                        "shunt_route_name": "",
+                        "tsr_value_kph": "",
                     }
                 )
 
@@ -2726,109 +2928,9 @@ def apply_test_details(register: pd.DataFrame) -> pd.DataFrame:
 
     return output
 
-
 # =============================================================================
-# TEXT EXPORT
+# REGISTER TXT EXPORT
 # =============================================================================
-
-def create_text_test_sheet(
-    row: pd.Series,
-    project_info: Dict[str, str],
-    sheet_number: str,
-) -> str:
-    test_code = safe_text(row.get("test_code"))
-    test_rule = TEST_RULES.get(test_code)
-
-    if test_rule is None:
-        raise ValueError(f"Unknown test code: {test_code}")
-
-    lines = [
-        "=" * 90,
-        "ALSTOM",
-        project_info["procedure_title"],
-        "",
-        f"{test_rule['name']} ({test_rule['id']})",
-        "=" * 90,
-        "",
-        f"Project / Contract: {project_info['project']}",
-        f"Procedure Reference: {project_info['procedure_reference']}",
-        f"Test Sheet No.: {sheet_number}",
-        f"Review Status: {safe_text(row.get('review_status'))}",
-        "",
-        "-" * 90,
-        "LOCATION / SOURCE DATA",
-        "-" * 90,
-        f"Test Code: {test_code}",
-        f"Sector: {safe_text(row.get('sector'))}",
-        f"Section: {safe_text(row.get('section'))}",
-        f"Sub-section: {safe_text(row.get('subsection'))}",
-        f"Branch Reference: {safe_text(row.get('branch'))}",
-        f"Direction: {safe_text(row.get('direction'))}",
-        f"Event: {safe_text(row.get('event_name'))}",
-        f"Location / Asset: {safe_text(row.get('location_name'))}",
-        f"Associated Variant: {safe_text(row.get('associated_variant'))}",
-        f"Source PDF Page: {safe_text(row.get('source_page'))}",
-        f"Singularity Row: {safe_text(row.get('row_number'))}",
-        f"Singularity Code: {safe_text(row.get('singularity_code'))}",
-        "",
-        "-" * 90,
-        "ABSCISSA CALCULATION",
-        "-" * 90,
-        f"Absolute Schedule Chainage: {format_distance(row.get('absolute_abscissa_m'))}",
-        f"Sub-section Start Chainage: {format_distance(row.get('subsection_start_abscissa_m'))}",
-        f"Calculated Local Abscissa: {format_distance(row.get('abscissa_m'))}",
-        f"Calculation Log: {safe_text(row.get('calculation_log'))}",
-        "",
-        "-" * 90,
-        "TEST CHECKS",
-        "-" * 90,
-    ]
-
-    for sequence, (action, expected, unit) in enumerate(
-        test_rule["checks"],
-        start=1,
-    ):
-        lines.extend(
-            [
-                f"{sequence}. Check / Test Action: {action}",
-                f"   Expected Requirement: {expected}",
-                f"   Actual Result / Record ({unit}): ______________________________",
-                "   Result: [ ] Y   [ ] N   [ ] N/A",
-                "",
-            ]
-        )
-
-    lines.extend(
-        [
-            "-" * 90,
-            "SOURCE EVIDENCE",
-            "-" * 90,
-            safe_text(row.get("source_evidence")),
-            "",
-            "-" * 90,
-            "ENGINEERING REMARKS",
-            "-" * 90,
-            safe_text(row.get("remarks")),
-            "",
-            "-" * 90,
-            "APPROVAL",
-            "-" * 90,
-            "Test Result: [ ] Passed   [ ] Failed",
-            "",
-            "Alstom Name: __________________________",
-            "Alstom Signature: _____________________",
-            "Alstom Date: __________________________",
-            "",
-            "MTR Name: _____________________________",
-            "MTR Signature: ________________________",
-            "MTR Date: _____________________________",
-            "",
-            "UNCONTROLLED WHEN PRINTED – Verify approved project-specific data before use.",
-        ]
-    )
-
-    return "\n".join(lines)
-
 
 def create_register_text(
     register: pd.DataFrame,
@@ -2838,9 +2940,9 @@ def create_register_text(
         "=" * 110,
         "ATC LOW-SPEED DYNAMIC TEST REGISTER",
         "=" * 110,
-        f"Project / Contract: {project_info['project']}",
-        f"Procedure Reference: {project_info['procedure_reference']}",
-        f"Procedure Title: {project_info['procedure_title']}",
+        f"Project / Contract: {project_info.get('project', '')}",
+        f"Procedure Reference: {project_info.get('procedure_reference', '')}",
+        f"Procedure Title: {project_info.get('procedure_title', '')}",
         f"Generated Date: {date.today()}",
         f"Number of Records: {len(register)}",
         "",
@@ -2856,448 +2958,66 @@ def create_register_text(
                 f"Test Code: {safe_text(row.get('test_code'))}",
                 f"Test ID: {safe_text(row.get('test_id'))}",
                 f"Review Status: {safe_text(row.get('review_status'))}",
-                f"Sector / Section / Sub-section: "
-                f"{safe_text(row.get('sector'))} / "
-                f"{safe_text(row.get('section'))} / "
-                f"{safe_text(row.get('subsection'))}",
+                "",
+                "LOCATION",
+                f"Sector: {safe_text(row.get('sector'))}",
+                f"Section: {safe_text(row.get('section'))}",
+                f"Sub-section: {safe_text(row.get('subsection'))}",
+                f"Branch: {safe_text(row.get('branch'))}",
                 f"Direction: {safe_text(row.get('direction'))}",
                 f"Event: {safe_text(row.get('event_name'))}",
-                f"Associated Variant: {safe_text(row.get('associated_variant'))}",
+                f"Location / Asset: {safe_text(row.get('location_name'))}",
+                "",
+                "CHAINAGE",
+                f"Absolute Chainage: "
+                f"{format_distance(row.get('absolute_abscissa_m'))}",
+                f"Sub-section Start Chainage: "
+                f"{format_distance(row.get('subsection_start_abscissa_m'))}",
+                f"Calculated Local Abscissa: "
+                f"{format_distance(row.get('abscissa_m'))}",
+                "",
+                "VARIANT / ROUTE PLANNING",
+                f"Associated Variant: "
+                f"{safe_text(row.get('associated_variant'))}",
+                f"Participating Variant: "
+                f"{safe_text(row.get('participating_variant'))}",
+                f"Anticipated Variant: "
+                f"{safe_text(row.get('anticipated_variant'))}",
+                f"Participating Sub-section(s): "
+                f"{safe_text(row.get('participating_subsections'))}",
+                f"Anticipated Sub-section(s): "
+                f"{safe_text(row.get('anticipated_subsections'))}",
+                f"Participating Branch(es): "
+                f"{safe_text(row.get('participating_branches'))}",
+                f"Anticipated Branch(es): "
+                f"{safe_text(row.get('anticipated_branches'))}",
+                "",
+                "TEST-SPECIFIC INFORMATION",
+                f"Track Circuit: {safe_text(row.get('track_circuit'))}",
+                f"Station Number: {safe_text(row.get('station_number'))}",
+                f"Return Channel Number: "
+                f"{safe_text(row.get('return_channel_number'))}",
+                f"Change of End Reference: "
+                f"{safe_text(row.get('change_of_end_reference'))}",
+                "",
+                "SOURCE TRACEABILITY",
                 f"Source Page / Row: "
                 f"{safe_text(row.get('source_page'))} / "
                 f"{safe_text(row.get('row_number'))}",
-                f"Absolute Chainage: {format_distance(row.get('absolute_abscissa_m'))}",
-                f"Sub-section Start Chainage: "
-                f"{format_distance(row.get('subsection_start_abscissa_m'))}",
-                f"Calculated Local Abscissa: {format_distance(row.get('abscissa_m'))}",
+                f"Singularity Code: "
+                f"{safe_text(row.get('singularity_code'))}",
                 f"Calculation: {safe_text(row.get('calculation_log'))}",
                 "",
                 "Source Evidence:",
                 safe_text(row.get("source_evidence")),
                 "",
+                "Engineering Remarks:",
+                safe_text(row.get("remarks")),
+                "",
             ]
         )
 
     return "\n".join(lines)
-
-
-# =============================================================================
-# DOCX EXPORT
-# =============================================================================
-
-def set_cell_text(cell: Any, value: Any, bold: bool = False) -> None:
-    cell.text = ""
-    paragraph = cell.paragraphs[0]
-    run = paragraph.add_run(safe_text(value))
-    run.bold = bold
-
-
-def add_docx_row(table: Any, values: List[Any], bold: bool = False) -> None:
-    cells = table.add_row().cells
-
-    for index, value in enumerate(values):
-        set_cell_text(cells[index], value, bold=bold)
-
-
-def set_table_font_size(table: Any, point_size: int = 8) -> None:
-    from docx.shared import Pt
-
-    for row in table.rows:
-        for cell in row.cells:
-            for paragraph in cell.paragraphs:
-                for run in paragraph.runs:
-                    run.font.size = Pt(point_size)
-
-
-def create_docx_test_sheet(
-    row: pd.Series,
-    project_info: Dict[str, str],
-    sheet_number: str,
-) -> bytes:
-    try:
-        from docx import Document
-        from docx.enum.text import WD_ALIGN_PARAGRAPH
-        from docx.shared import Inches, Pt
-    except ImportError as exc:
-        raise RuntimeError(
-            "Missing python-docx. Install python-docx>=1.1.2."
-        ) from exc
-
-    test_code = safe_text(row.get("test_code"))
-    test_rule = TEST_RULES.get(test_code)
-
-    if test_rule is None:
-        raise ValueError(f"Unknown test code: {test_code}")
-
-    document = Document()
-
-    section = document.sections[0]
-    section.top_margin = Inches(0.35)
-    section.bottom_margin = Inches(0.35)
-    section.left_margin = Inches(0.35)
-    section.right_margin = Inches(0.35)
-
-    document.styles["Normal"].font.name = "Arial"
-    document.styles["Normal"].font.size = Pt(8)
-
-    header = document.add_paragraph()
-    header.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    run = header.add_run("ALSTOM\n")
-    run.bold = True
-    run.font.size = Pt(16)
-
-    run = header.add_run(project_info["procedure_title"])
-    run.bold = True
-    run.font.size = Pt(10)
-
-    title = document.add_paragraph()
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    run = title.add_run(f"{test_rule['name']} ({test_rule['id']})")
-    run.bold = True
-    run.font.size = Pt(12)
-
-    information_table = document.add_table(rows=0, cols=6)
-    information_table.style = "Table Grid"
-
-    add_docx_row(
-        information_table,
-        [
-            "Project / Contract:",
-            project_info["project"],
-            "Procedure Ref:",
-            project_info["procedure_reference"],
-            "Sheet No.:",
-            sheet_number,
-        ],
-    )
-
-    add_docx_row(
-        information_table,
-        [
-            "Test Code:",
-            test_code,
-            "Test ID:",
-            test_rule["id"],
-            "Review Status:",
-            safe_text(row.get("review_status")),
-        ],
-    )
-
-    set_table_font_size(information_table)
-
-    document.add_paragraph()
-
-    location_table = document.add_table(rows=0, cols=4)
-    location_table.style = "Table Grid"
-
-    location_rows = [
-        ["Sector:", row.get("sector"), "Direction:", row.get("direction")],
-        ["Section:", row.get("section"), "Sub-section:", row.get("subsection")],
-        ["Branch:", row.get("branch"), "Event:", row.get("event_name")],
-        ["Location / Asset:", row.get("location_name"), "Variant:", row.get("associated_variant")],
-        ["Absolute Chainage:", format_distance(row.get("absolute_abscissa_m")), "Sub-section Start:", format_distance(row.get("subsection_start_abscissa_m"))],
-        ["Calculated Abscissa:", format_distance(row.get("abscissa_m")), "Source Page:", row.get("source_page")],
-    ]
-
-    for values in location_rows:
-        add_docx_row(location_table, values)
-
-    set_table_font_size(location_table)
-
-    document.add_paragraph()
-
-    calculation_title = document.add_paragraph()
-    calculation_title.add_run("Abscissa Calculation / Audit Log").bold = True
-
-    calculation_table = document.add_table(rows=1, cols=1)
-    calculation_table.style = "Table Grid"
-
-    set_cell_text(
-        calculation_table.rows[0].cells[0],
-        safe_text(row.get("calculation_log")),
-    )
-
-    set_table_font_size(calculation_table)
-
-    document.add_paragraph()
-
-    test_table = document.add_table(rows=1, cols=4)
-    test_table.style = "Table Grid"
-
-    headers = [
-        "Check / Test Action",
-        "Expected Requirement",
-        "Actual Result / Record",
-        "OK?",
-    ]
-
-    for index, header_text in enumerate(headers):
-        set_cell_text(test_table.rows[0].cells[index], header_text, bold=True)
-
-    for action, expected, unit in test_rule["checks"]:
-        add_docx_row(
-            test_table,
-            [
-                action,
-                expected,
-                f"{unit}: ",
-                "☐ Y   ☐ N   ☐ N/A",
-            ],
-        )
-
-    set_table_font_size(test_table)
-
-    document.add_paragraph()
-
-    evidence_title = document.add_paragraph()
-    evidence_title.add_run("Source Evidence / Engineering Remarks").bold = True
-
-    evidence_table = document.add_table(rows=1, cols=1)
-    evidence_table.style = "Table Grid"
-
-    evidence = (
-        f"Source PDF Page: {safe_text(row.get('source_page'))}\n"
-        f"Singularity Row: {safe_text(row.get('row_number'))}\n"
-        f"Singularity Code: {safe_text(row.get('singularity_code'))}\n"
-        f"Calculation: {safe_text(row.get('calculation_log'))}\n\n"
-        f"Marker-PDF Source Evidence:\n"
-        f"{safe_text(row.get('source_evidence'))}\n\n"
-        f"Engineering Remarks:\n"
-        f"{safe_text(row.get('remarks'))}"
-    )
-
-    set_cell_text(evidence_table.rows[0].cells[0], evidence)
-    set_table_font_size(evidence_table)
-
-    document.add_paragraph()
-
-    approval_table = document.add_table(rows=0, cols=3)
-    approval_table.style = "Table Grid"
-
-    add_docx_row(
-        approval_table,
-        [
-            "The test covered by this Test Sheet is considered:",
-            "☐ Passed",
-            "☐ Failed",
-        ],
-    )
-
-    add_docx_row(approval_table, ["", "Alstom", "MTR"])
-    add_docx_row(approval_table, ["Name:", "", ""])
-    add_docx_row(approval_table, ["Signature:", "", ""])
-    add_docx_row(approval_table, ["Date:", "", ""])
-
-    set_table_font_size(approval_table)
-
-    footer = document.add_paragraph()
-    footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    run = footer.add_run(
-        "UNCONTROLLED WHEN PRINTED – Verify approved project-specific data before use."
-    )
-    run.italic = True
-    run.font.size = Pt(7)
-
-    output = io.BytesIO()
-    document.save(output)
-
-    return output.getvalue()
-
-
-def create_export_zip(
-    register: pd.DataFrame,
-    project_info: Dict[str, str],
-    pdf_text_log: str,
-    singularities: pd.DataFrame,
-    variant_composition: pd.DataFrame,
-    transmission_calculations: pd.DataFrame,
-    organised_source_log: str,
-    progress_bar: Any,
-    progress_text: Any,
-) -> bytes:
-    """
-    ZIP contains:
-    - DOCX test sheets
-    - equivalent TXT test sheets
-    - full register TXT export
-    - CSV register
-    """
-    output = io.BytesIO()
-    total = len(register)
-
-    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
-            "PDF_Text_Extraction_Log.txt",
-            safe_text(pdf_text_log),
-        )
-        archive.writestr(
-            "Organised_Source_Extraction_Log.txt",
-            safe_text(organised_source_log),
-        )
-
-        archive.writestr(
-            "Singularities.csv",
-            singularities.to_csv(index=False),
-        )
-
-        archive.writestr(
-            "Variant_Composition.csv",
-            variant_composition.to_csv(index=False),
-        )
-        archive.writestr(
-            "Transmission_Anticipation_Calculations.csv",
-            transmission_calculations.to_csv(index=False),
-        )
-        archive.writestr(
-            "ATC_Low_Speed_Test_Register.txt",
-            create_register_text(register, project_info),
-        )
-
-        archive.writestr(
-            "ATC_Low_Speed_Test_Register.csv",
-            register.to_csv(index=False),
-        )
-
-        for sequence, (_, row) in enumerate(register.iterrows(), start=1):
-            test_code = safe_text(row.get("test_code"))
-            subsection = safe_text(row.get("subsection")) or "NO_SUBSECTION"
-
-            sheet_number = f"{project_info['sheet_prefix']}-{sequence:03d}"
-
-            progress_text.info(
-                f"Generating export {sequence} of {total}: "
-                f"{test_code} / {subsection}"
-            )
-
-            basename = clean_filename(
-                f"{sheet_number}_{test_code}_{subsection}_"
-                f"KP_{safe_text(row.get('abscissa_m'))}"
-            )
-
-            text_sheet = create_text_test_sheet(
-                row=row,
-                project_info=project_info,
-                sheet_number=sheet_number,
-            )
-
-            archive.writestr(f"{basename}.txt", text_sheet)
-
-            document_bytes = create_docx_test_sheet(
-                row=row,
-                project_info=project_info,
-                sheet_number=sheet_number,
-            )
-
-            archive.writestr(f"{basename}.docx", document_bytes)
-
-            progress_bar.progress(int(sequence / total * 100))
-
-    progress_bar.progress(100)
-    progress_text.success(
-        f"Export completed: {total} DOCX and TXT test sheet(s)."
-    )
-
-    return output.getvalue()
-
-
-# =============================================================================
-# EXCEL EXPORT
-# =============================================================================
-
-def create_excel_bytes(
-    register: pd.DataFrame,
-    project_info: Dict[str, str],
-    singularities: Optional[pd.DataFrame] = None,
-    variant_composition: Optional[pd.DataFrame] = None,
-    transmission_calculations: Optional[pd.DataFrame] = None,
-) -> bytes:
-    output = io.BytesIO()
-
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        cover = pd.DataFrame(
-            [
-                ["Project / Contract", project_info["project"]],
-                ["Procedure Reference", project_info["procedure_reference"]],
-                ["Procedure Title", project_info["procedure_title"]],
-                ["Generated Date", str(date.today())],
-                ["Test Register Rows", len(register)],
-                ["Extraction Method", "Marker-PDF only"],
-                [
-                    "Abscissa Calculation",
-                    "Local Abscissa = Absolute Chainage - Sub-section Start Chainage",
-                ],
-            ],
-            columns=["Field", "Value"],
-        )
-
-        cover.to_excel(writer, sheet_name="Cover", index=False)
-        register.to_excel(writer, sheet_name="Test Register", index=False)
-
-        calculation_columns = [
-            "test_code",
-            "test_name",
-            "subsection",
-            "source_page",
-            "row_number",
-            "absolute_abscissa_m",
-            "subsection_start_abscissa_m",
-            "abscissa_m",
-            "calculation_log",
-            "source_evidence",
-        ]
-
-        available_columns = [
-            column
-            for column in calculation_columns
-            if column in register.columns
-        ]
-
-        register[available_columns].to_excel(
-            writer,
-            sheet_name="Calculation Log",
-            index=False,
-        )
-
-        if singularities is not None:
-            singularities.to_excel(
-                writer,
-                sheet_name="Singularities",
-                index=False,
-            )
-
-        if variant_composition is not None:
-            variant_composition.to_excel(
-                writer,
-                sheet_name="Variant Composition",
-                index=False,
-            )
-
-        if transmission_calculations is not None:
-            transmission_calculations.to_excel(
-                writer,
-                sheet_name="Transmission Calculation",
-                index=False,
-            )
-
-        for worksheet in writer.book.worksheets:
-            worksheet.freeze_panes = "A2"
-            worksheet.auto_filter.ref = worksheet.dimensions
-
-            for column_cells in worksheet.columns:
-                maximum_length = max(
-                    len(safe_text(cell.value))
-                    for cell in column_cells
-                )
-
-                worksheet.column_dimensions[
-                    column_cells[0].column_letter
-                ].width = min(max(maximum_length + 2, 12), 70)
-
-    return output.getvalue()
-
 
 # =============================================================================
 # STREAMLIT APPLICATION
@@ -3637,6 +3357,11 @@ def render_test_sheet_generator_app() -> None:
                 progress_text=progress_text,
             )
 
+            register = enrich_register_with_transmission_data(
+                register=register,
+                transmission_calculations=transmission_calculations,
+            )
+
             st.session_state["test_sheet_register"] = register
             st.session_state["test_sheet_export_zip"] = None
 
@@ -3929,6 +3654,57 @@ def render_test_sheet_generator_app() -> None:
                 "Engineering Remarks",
                 width="large",
             ),
+            "branch": st.column_config.TextColumn(
+                "Branch Number",
+                width="medium",
+            ),
+
+            "participating_variant": st.column_config.TextColumn(
+                "Participating Variant",
+                width="large",
+            ),
+
+            "anticipated_variant": st.column_config.TextColumn(
+                "Anticipated Variant",
+                width="large",
+            ),
+
+            "participating_subsections": st.column_config.TextColumn(
+                "Participating Sub-section(s)",
+                width="large",
+            ),
+
+            "anticipated_subsections": st.column_config.TextColumn(
+                "Anticipated Sub-section(s)",
+                width="large",
+            ),
+
+            "participating_branches": st.column_config.TextColumn(
+                "Participating Branch(es)",
+                width="large",
+            ),
+
+            "anticipated_branches": st.column_config.TextColumn(
+                "Anticipated Branch(es)",
+                width="large",
+            ),
+
+            "track_circuit": st.column_config.TextColumn(
+                "Track Circuit",
+            ),
+
+            "station_number": st.column_config.TextColumn(
+                "Station Number",
+            ),
+
+            "return_channel_number": st.column_config.TextColumn(
+                "Return Channel Number",
+            ),
+
+            "change_of_end_reference": st.column_config.TextColumn(
+                "Change of End Reference",
+                width="large",
+            ),
         },
     )
 
@@ -4039,7 +3815,7 @@ def render_test_sheet_generator_app() -> None:
                 progress_bar = st.progress(0)
 
                 try:
-                    export_zip = create_export_zip(
+                    export_zip = create_test_sheet_export_zip(
                         register=approved_register,
                         project_info=project_info,
                         pdf_text_log=st.session_state.get(
