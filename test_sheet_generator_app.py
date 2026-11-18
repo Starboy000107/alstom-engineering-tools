@@ -14,8 +14,6 @@ import pandas as pd
 import pytesseract
 import streamlit as st
 from PIL import Image
-
-
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -330,6 +328,40 @@ REGISTER_COLUMNS = [
     "remarks",
 ]
 
+SINGULARITY_COLUMNS = [
+    "pdf_page",
+    "sector",
+    "section",
+    "direction",
+    "subsection",
+    "route",
+    "row_number",
+    "inter_singularity_m",
+    "absolute_abscissa_m",
+    "subsection_start_abscissa_m",
+    "calculated_local_abscissa_m",
+    "singularity_code",
+    "singularity_name",
+    "associated_variant",
+    "calculation_log",
+    "source_evidence",
+]
+
+VARIANT_COMPOSITION_COLUMNS = [
+    "pdf_page",
+    "sector",
+    "section",
+    "direction",
+    "subsection",
+    "route",
+    "rank",
+    "participating_rank",
+    "anticipated_rank",
+    "participating_variants",
+    "anticipated_variants",
+    "all_variants",
+    "source_evidence",
+]
 
 # =============================================================================
 # BASIC HELPERS
@@ -774,6 +806,115 @@ def extract_location_name(text: str) -> str:
 
     return ""
 
+def extract_route_reference(text: str) -> str:
+    """
+    Extract route / route name from Variant Composition or schedule pages.
+
+    Examples supported:
+        Route: ABC
+        Route Name = ABC
+        Route No. 12
+        Shunt Route XYZ
+    """
+    patterns = [
+        r"\bROUTE\s+NAME\s*[:=]?\s*([A-Z0-9/_ -]+)",
+        r"\bROUTE\s+NO\.?\s*[:=]?\s*([A-Z0-9/_ -]+)",
+        r"\bROUTE\s*[:=]\s*([A-Z0-9/_ -]+)",
+        r"\bSHUNT\s+ROUTE\s*[:=]?\s*([A-Z0-9/_ -]+)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, normalise_spaces(text), flags=re.IGNORECASE)
+
+        if match:
+            return normalise_spaces(match.group(1)).strip(" -:")
+
+    return ""
+
+
+def extract_rank_value(text: str, rank_type: str = "") -> str:
+    """
+    Extract a rank value from Variant Composition pages.
+
+    Supports wording such as:
+        Rank: 4
+        Rank of First Participating Variant: 4
+        Rank of First Anticipated Variant: 7
+        Number of Anticipated Variants: 3
+    """
+    type_expression = ""
+
+    if rank_type:
+        type_expression = rf"(?:{rank_type}\s+)?"
+
+    patterns = [
+        rf"\bRANK\s+(?:OF\s+)?(?:FIRST\s+)?{type_expression}"
+        rf"(?:VARIANT\s+)?(?:NUMBER\s*)?[:=]?\s*(\d+)",
+
+        rf"\b{type_expression}RANK\s*[:=]?\s*(\d+)",
+
+        rf"\bNUMBER\s+OF\s+{type_expression}VARIANTS?\s*[:=]?\s*(\d+)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, normalise_spaces(text), flags=re.IGNORECASE)
+
+        if match:
+            return safe_text(match.group(1))
+
+    return ""
+
+
+def extract_variants_by_type(text: str, variant_type: str) -> str:
+    """
+    Extract variant references such as:
+
+        Participating Variants: TUC KM T/C, TUC KF T/C
+        Anticipated Variants = 15.4 / 15.5
+    """
+    pattern = (
+        rf"\b{variant_type}\s+VARIANTS?"
+        rf"(?:\s+(?:NUMBER|NO\.?))?"
+        rf"\s*[:=]?\s*"
+        rf"(.+?)"
+        rf"(?="
+        rf"$|"
+        rf"RANK\b|"
+        rf"NUMBER\s+OF\b|"
+        rf"SUB\s*-?\s*SECTION\b|"
+        rf"ROUTE\b|"
+        rf"FIXED\s+CHARACTERISTICS\b|"
+        rf"ASSOCIATED\s+VARIANTS?\b"
+        rf")"
+    )
+
+    match = re.search(
+        pattern,
+        normalise_spaces(text),
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return ""
+
+    return normalise_spaces(match.group(1)).strip("() ,;:-")[:500]
+
+
+def is_variant_composition_page(page_text: str) -> bool:
+    upper = safe_text(page_text).upper()
+
+    markers = [
+        "VARIANT COMPOSITION",
+        "VARIANTS COMPOSITION",
+        "COMPOSITION OF VARIANTS",
+        "PARTICIPATING VARIANT",
+        "ANTICIPATED VARIANT",
+        "RANK OF FIRST PARTICIPATING",
+        "RANK OF FIRST ANTICIPATED",
+    ]
+
+    return any(marker in upper for marker in markers)
+
 
 def infer_event_name(text: str) -> str:
     upper = text.upper()
@@ -922,7 +1063,367 @@ def calculate_local_abscissa(
 
     return local_abscissa, log
 
+def extract_singularities_table(pages: List[str]) -> pd.DataFrame:
+    """
+    Extract every parsed singularity schedule row.
 
+    Important:
+    - Absolute K.P. remains preserved in absolute_abscissa_m.
+    - The sub-section start K.P. is used as local zero.
+    - Calculated local abscissa =
+          absolute singularity K.P. - sub-section start K.P.
+    """
+    records: List[Dict[str, Any]] = []
+
+    for page_number, page_text in enumerate(pages, start=1):
+        if not is_subdivision_page(page_text):
+            continue
+
+        metadata = page_metadata(page_text)
+
+        lines = [
+            normalise_spaces(line)
+            for line in page_text.splitlines()
+            if normalise_spaces(line)
+        ]
+
+        current_subsection = ""
+        current_route = ""
+        current_subsection_start_abscissa: Optional[float] = None
+
+        for line_index, line in enumerate(lines):
+            parsed_row = parse_singularity_row(line)
+
+            # Use nearby text only for supporting information.
+            context_start = max(0, line_index - 2)
+            context_end = min(len(lines), line_index + 4)
+
+            context = normalise_spaces(
+                " ".join(lines[context_start:context_end])
+            )
+
+            explicit_subsection = ""
+
+            if re.search(
+                r"\bSUB\s*-?\s*SECTION\b",
+                line,
+                flags=re.IGNORECASE,
+            ):
+                explicit_subsection = extract_subsection_reference(line)
+
+            if explicit_subsection:
+                current_subsection = explicit_subsection
+
+            detected_route = extract_route_reference(f"{line} {context}")
+
+            if detected_route:
+                current_route = detected_route
+
+            if parsed_row is None:
+                continue
+
+            # A schedule row explicitly containing "Sub Section" establishes
+            # the local zero K.P. for the following singularity rows.
+            if explicit_subsection:
+                current_subsection_start_abscissa = parsed_row["abscissa_m"]
+
+            local_abscissa, calculation_log = calculate_local_abscissa(
+                absolute_abscissa_m=parsed_row["abscissa_m"],
+                subsection_start_abscissa_m=current_subsection_start_abscissa,
+                subsection=current_subsection,
+            )
+
+            sector = metadata["sector"]
+            section = metadata["section"]
+
+            if current_subsection:
+                subsection_parts = current_subsection.split("-")
+
+                if len(subsection_parts) == 3:
+                    sector = subsection_parts[0]
+                    section = subsection_parts[1]
+
+            records.append(
+                {
+                    "pdf_page": page_number,
+                    "sector": sector,
+                    "section": section,
+                    "direction": metadata["direction"],
+                    "subsection": current_subsection,
+                    "route": current_route,
+                    "row_number": parsed_row["row_number"],
+                    "inter_singularity_m": parsed_row[
+                        "inter_singularity_m"
+                    ],
+                    "absolute_abscissa_m": parsed_row["abscissa_m"],
+                    "subsection_start_abscissa_m": (
+                        current_subsection_start_abscissa
+                    ),
+                    "calculated_local_abscissa_m": local_abscissa,
+                    "singularity_code": parsed_row["singularity_code"],
+                    "singularity_name": parsed_row["remaining"],
+                    "associated_variant": extract_associated_variant(context),
+                    "calculation_log": calculation_log,
+                    "source_evidence": context[:MAX_EVIDENCE_LENGTH],
+                }
+            )
+
+    if not records:
+        return pd.DataFrame(columns=SINGULARITY_COLUMNS)
+
+    dataframe = pd.DataFrame(records)
+
+    dataframe = dataframe.drop_duplicates(
+        subset=[
+            "pdf_page",
+            "row_number",
+            "absolute_abscissa_m",
+            "singularity_code",
+        ]
+    )
+
+    dataframe = dataframe.sort_values(
+        by=[
+            "sector",
+            "section",
+            "subsection",
+            "absolute_abscissa_m",
+        ],
+        na_position="last",
+    ).reset_index(drop=True)
+
+    return dataframe[SINGULARITY_COLUMNS]
+
+
+def extract_variant_composition_table(pages: List[str]) -> pd.DataFrame:
+    """
+    Extract structured information from Variant Composition pages.
+
+    Expected information:
+    - Sub-section
+    - Route
+    - Rank
+    - Participating rank / variants
+    - Anticipated rank / variants
+    """
+    records: List[Dict[str, Any]] = []
+
+    for page_number, page_text in enumerate(pages, start=1):
+        if not is_variant_composition_page(page_text):
+            continue
+
+        metadata = page_metadata(page_text)
+
+        lines = [
+            normalise_spaces(line)
+            for line in page_text.splitlines()
+            if normalise_spaces(line)
+        ]
+
+        current_subsection = ""
+        current_route = ""
+
+        for line_index, line in enumerate(lines):
+            detected_subsection = extract_subsection_reference(line)
+
+            if detected_subsection:
+                current_subsection = detected_subsection
+
+            detected_route = extract_route_reference(line)
+
+            if detected_route:
+                current_route = detected_route
+
+            context_start = max(0, line_index - 3)
+            context_end = min(len(lines), line_index + 5)
+
+            context = normalise_spaces(
+                " ".join(lines[context_start:context_end])
+            )
+
+            context_upper = context.upper()
+
+            relevant_markers = [
+                "RANK",
+                "PARTICIPATING",
+                "ANTICIPATED",
+                "ASSOCIATED VARIANT",
+                "VARIANT COMPOSITION",
+                "VARIANTS COMPOSITION",
+            ]
+
+            if not any(marker in context_upper for marker in relevant_markers):
+                continue
+
+            rank = extract_rank_value(context)
+
+            participating_rank = extract_rank_value(
+                context,
+                rank_type="PARTICIPATING",
+            )
+
+            anticipated_rank = extract_rank_value(
+                context,
+                rank_type="ANTICIPATED",
+            )
+
+            participating_variants = extract_variants_by_type(
+                context,
+                "PARTICIPATING",
+            )
+
+            anticipated_variants = extract_variants_by_type(
+                context,
+                "ANTICIPATED",
+            )
+
+            all_variants = extract_associated_variant(context)
+
+            # Do not add meaningless heading-only rows.
+            if not any(
+                [
+                    rank,
+                    participating_rank,
+                    anticipated_rank,
+                    participating_variants,
+                    anticipated_variants,
+                    all_variants,
+                ]
+            ):
+                continue
+
+            sector = metadata["sector"]
+            section = metadata["section"]
+
+            if current_subsection:
+                subsection_parts = current_subsection.split("-")
+
+                if len(subsection_parts) == 3:
+                    sector = subsection_parts[0]
+                    section = subsection_parts[1]
+
+            records.append(
+                {
+                    "pdf_page": page_number,
+                    "sector": sector,
+                    "section": section,
+                    "direction": metadata["direction"],
+                    "subsection": current_subsection,
+                    "route": current_route,
+                    "rank": rank,
+                    "participating_rank": participating_rank,
+                    "anticipated_rank": anticipated_rank,
+                    "participating_variants": participating_variants,
+                    "anticipated_variants": anticipated_variants,
+                    "all_variants": all_variants,
+                    "source_evidence": context[:MAX_EVIDENCE_LENGTH],
+                }
+            )
+
+    if not records:
+        return pd.DataFrame(columns=VARIANT_COMPOSITION_COLUMNS)
+
+    dataframe = pd.DataFrame(records)
+
+    dataframe = dataframe.drop_duplicates(
+        subset=[
+            "pdf_page",
+            "subsection",
+            "route",
+            "rank",
+            "participating_rank",
+            "anticipated_rank",
+            "participating_variants",
+            "anticipated_variants",
+        ]
+    )
+
+    dataframe = dataframe.sort_values(
+        by=[
+            "sector",
+            "section",
+            "subsection",
+            "route",
+            "pdf_page",
+        ],
+        na_position="last",
+    ).reset_index(drop=True)
+
+    return dataframe[VARIANT_COMPOSITION_COLUMNS]
+
+
+def create_organised_source_log(
+    singularities: pd.DataFrame,
+    variant_composition: pd.DataFrame,
+) -> str:
+    lines = [
+        "=" * 120,
+        "ORGANISED SUBDIVISION / VARIANT COMPOSITION EXTRACTION LOG",
+        "=" * 120,
+        "",
+        "LOCAL ABSCISSA CALCULATION",
+        "Local Abscissa = Absolute Singularity K.P. - Sub-section Start K.P.",
+        "",
+        "=" * 120,
+        "TABLE 1 - SINGULARITIES",
+        "=" * 120,
+    ]
+
+    if singularities.empty:
+        lines.append("[No singularity rows extracted]")
+    else:
+        display_columns = [
+            "pdf_page",
+            "subsection",
+            "route",
+            "row_number",
+            "absolute_abscissa_m",
+            "subsection_start_abscissa_m",
+            "calculated_local_abscissa_m",
+            "singularity_code",
+            "singularity_name",
+            "associated_variant",
+        ]
+
+        lines.append(
+            singularities[display_columns].to_string(
+                index=False,
+                max_colwidth=80,
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "=" * 120,
+            "TABLE 2 - VARIANT COMPOSITION",
+            "=" * 120,
+        ]
+    )
+
+    if variant_composition.empty:
+        lines.append("[No Variant Composition rows extracted]")
+    else:
+        display_columns = [
+            "pdf_page",
+            "subsection",
+            "route",
+            "rank",
+            "participating_rank",
+            "anticipated_rank",
+            "participating_variants",
+            "anticipated_variants",
+            "all_variants",
+        ]
+
+        lines.append(
+            variant_composition[display_columns].to_string(
+                index=False,
+                max_colwidth=80,
+            )
+        )
+
+    return "\n".join(lines)
 # =============================================================================
 # MAIN REGISTER EXTRACTION
 # =============================================================================
@@ -1569,6 +2070,8 @@ def create_export_zip(
 def create_excel_bytes(
     register: pd.DataFrame,
     project_info: Dict[str, str],
+    singularities: Optional[pd.DataFrame] = None,
+    variant_composition: Optional[pd.DataFrame] = None,
 ) -> bytes:
     output = io.BytesIO()
 
@@ -1617,6 +2120,20 @@ def create_excel_bytes(
             index=False,
         )
 
+        if singularities is not None:
+            singularities.to_excel(
+                writer,
+                sheet_name="Singularities",
+                index=False,
+            )
+
+        if variant_composition is not None:
+            variant_composition.to_excel(
+                writer,
+                sheet_name="Variant Composition",
+                index=False,
+            )
+
         for worksheet in writer.book.worksheets:
             worksheet.freeze_panes = "A2"
             worksheet.auto_filter.ref = worksheet.dimensions
@@ -1644,11 +2161,8 @@ def initialise_test_sheet_state() -> None:
         "test_sheet_register": pd.DataFrame(columns=REGISTER_COLUMNS),
         "test_sheet_page_count": 0,
         "test_sheet_export_zip": None,
-
-        # Full native/OCR text extracted from every PDF page.
         "test_sheet_pdf_text_log": "",
 
-        # Per-page extraction summary.
         "test_sheet_pdf_extraction_summary": pd.DataFrame(
             columns=[
                 "pdf_page",
@@ -1658,6 +2172,14 @@ def initialise_test_sheet_state() -> None:
                 "text_preview",
             ]
         ),
+
+        "test_sheet_singularities": pd.DataFrame(
+            columns=SINGULARITY_COLUMNS
+        ),
+        "test_sheet_variant_composition": pd.DataFrame(
+            columns=VARIANT_COMPOSITION_COLUMNS
+        ),
+        "test_sheet_organised_source_log": "",
     }
 
     for key, value in defaults.items():
@@ -1754,7 +2276,15 @@ def render_test_sheet_generator_app() -> None:
         st.session_state["test_sheet_page_count"] = 0
         st.session_state["test_sheet_export_zip"] = None
         st.session_state["test_sheet_pdf_text_log"] = ""
+        st.session_state["test_sheet_singularities"] = pd.DataFrame(
+            columns=SINGULARITY_COLUMNS
+        )
 
+        st.session_state["test_sheet_variant_composition"] = pd.DataFrame(
+            columns=VARIANT_COMPOSITION_COLUMNS
+        )
+
+        st.session_state["test_sheet_organised_source_log"] = ""
         st.session_state["test_sheet_pdf_extraction_summary"] = pd.DataFrame(
             columns=[
                 "pdf_page",
@@ -1782,30 +2312,38 @@ def render_test_sheet_generator_app() -> None:
                 "Reading PDF pages. Scanned singularity pages will be OCR processed..."
             )
 
-            pages, extracted_pages = extract_pdf_text_pages(pdf_bytes)
-
             st.session_state["test_sheet_page_count"] = len(pages)
 
-            # Save the complete extracted text log for display below.
             st.session_state["test_sheet_pdf_text_log"] = create_pdf_text_log(
                 extracted_pages
             )
 
-            # Save concise page-by-page summary.
             st.session_state["test_sheet_pdf_extraction_summary"] = (
                 create_pdf_extraction_summary(extracted_pages)
             )
 
-            progress_text.info(
-                f"PDF loaded: {len(pages)} page(s). "
-                "Extracting test points and calculating local abscissae..."
+            # New source-table extraction
+            singularities = extract_singularities_table(pages)
+
+            variant_composition = extract_variant_composition_table(pages)
+
+            st.session_state["test_sheet_singularities"] = singularities
+            st.session_state["test_sheet_variant_composition"] = variant_composition
+
+            st.session_state["test_sheet_organised_source_log"] = (
+                create_organised_source_log(
+                    singularities=singularities,
+                    variant_composition=variant_composition,
+                )
             )
 
+            # Existing low-speed test-sheet extraction
             register = extract_test_register_from_pdf(
                 pages=pages,
                 progress_bar=progress_bar,
                 progress_text=progress_text,
             )
+            
 
             st.session_state["test_sheet_register"] = register
             st.session_state["test_sheet_export_zip"] = None
@@ -1867,6 +2405,92 @@ def render_test_sheet_generator_app() -> None:
                 pdf_extraction_summary,
                 use_container_width=True,
                 hide_index=True,
+            )
+        st.markdown("### Organised Source Tables")
+
+        singularities = st.session_state.get(
+            "test_sheet_singularities",
+            pd.DataFrame(columns=SINGULARITY_COLUMNS),
+        )
+
+        variant_composition = st.session_state.get(
+            "test_sheet_variant_composition",
+            pd.DataFrame(columns=VARIANT_COMPOSITION_COLUMNS),
+        )
+
+        organised_source_log = st.session_state.get(
+            "test_sheet_organised_source_log",
+            "",
+        )
+
+        tab_1, tab_2, tab_3 = st.tabs(
+            [
+                "Singularities",
+                "Variant Composition",
+                "Organised TXT Log",
+            ]
+        )
+
+        with tab_1:
+            st.caption(
+                "Each singularity is shown with original absolute K.P., "
+                "detected sub-section start K.P. and calculated local abscissa."
+            )
+
+            st.dataframe(
+                singularities,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.download_button(
+                "Download Singularities CSV",
+                data=singularities.to_csv(index=False).encode("utf-8"),
+                file_name=clean_filename(
+                    f"{project_info['sheet_prefix']}_Singularities.csv"
+                ),
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        with tab_2:
+            st.caption(
+                "Variant Composition records are grouped using the detected "
+                "sub-section, route, rank, participating and anticipated variant data."
+            )
+
+            st.dataframe(
+                variant_composition,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.download_button(
+                "Download Variant Composition CSV",
+                data=variant_composition.to_csv(index=False).encode("utf-8"),
+                file_name=clean_filename(
+                    f"{project_info['sheet_prefix']}_Variant_Composition.csv"
+                ),
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        with tab_3:
+            st.text_area(
+                "Organised source extraction log",
+                value=organised_source_log,
+                height=600,
+                disabled=True,
+            )
+
+            st.download_button(
+                "Download Organised Source Log",
+                data=organised_source_log.encode("utf-8"),
+                file_name=clean_filename(
+                    f"{project_info['sheet_prefix']}_Organised_Source_Log.txt"
+                ),
+                mime="text/plain",
+                use_container_width=True,
             )
 
         st.download_button(
@@ -2008,6 +2632,8 @@ def render_test_sheet_generator_app() -> None:
     excel_bytes = create_excel_bytes(
         register=reviewed_register,
         project_info=project_info,
+        singularities=singularities,
+        variant_composition=variant_composition,
     )
 
     full_register_text = create_register_text(
