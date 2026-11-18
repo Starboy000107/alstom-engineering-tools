@@ -24,7 +24,7 @@ PROCEDURE_TITLE_DEFAULT = "Trackside ATC Low-Speed Dynamic Test Procedure"
 MAX_PDF_SIZE_MB = 100
 MAX_EVIDENCE_LENGTH = 3000
 
-OCR_DPI = 400
+OCR_DPI = 300
 OCR_MIN_TEXT_CHARS = 80
 OCR_CONFIDENCE_MIN = 25
 
@@ -598,6 +598,17 @@ def group_ocr_words_into_visual_lines(
 
     return lines
 
+def compact_ocr_text(value: str) -> str:
+    """
+    Make OCR page detection more robust.
+
+    Example:
+        'S I N G U L A R I T I E S' -> 'SINGULARITIES'
+        'K . P .' -> 'KP'
+        'VARIANTS COMPOSITION' -> 'VARIANTSCOMPOSITION'
+    """
+    return re.sub(r"[^A-Z0-9]+", "", safe_text(value).upper())
+
 
 def ocr_pdf_page(page: fitz.Page) -> str:
     scale = OCR_DPI / 72
@@ -611,14 +622,53 @@ def ocr_pdf_page(page: fitz.Page) -> str:
 
     image = preprocess_for_ocr(pixmap)
 
-    ocr_data = pytesseract.image_to_data(
-        image,
-        lang="eng",
-        config="--oem 3 --psm 6",
-        output_type=pytesseract.Output.DICT,
-    )
+    results: List[str] = []
 
-    return "\n".join(group_ocr_words_into_visual_lines(ocr_data))
+    for psm in [6, 11]:
+        try:
+            ocr_data = pytesseract.image_to_data(
+                image,
+                lang="eng",
+                config=f"--oem 3 --psm {psm}",
+                output_type=pytesseract.Output.DICT,
+            )
+
+            text = "\n".join(
+                group_ocr_words_into_visual_lines(
+                    ocr_data,
+                    y_tolerance=24,
+                )
+            )
+
+            if text:
+                results.append(text)
+
+        except Exception:
+            continue
+
+    if not results:
+        return ""
+
+    # Prefer result containing important engineering table markers.
+    preferred_markers = [
+        "SINGULAR",
+        "VARIANT",
+        "SUB SECTION",
+        "K.P",
+        "TRANSMISSION",
+        "ANTICIPATED",
+    ]
+
+    def score(value: str) -> int:
+        upper = value.upper()
+
+        marker_score = sum(
+            100 for marker in preferred_markers if marker in upper
+        )
+
+        return marker_score + len(value)
+
+    return max(results, key=score)
 
 def create_pdf_text_log(
     extracted_pages: List[Dict[str, Any]],
@@ -693,19 +743,7 @@ def create_pdf_extraction_summary(
 def extract_pdf_text_pages(
     pdf_bytes: bytes,
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
-    """
-    Extract text from every PDF page.
 
-    Native/selectable text is used where sufficient text exists.
-    OCR is used for image-only/scanned pages.
-
-    Returns:
-        pages:
-            List of text strings used by the test-point extraction logic.
-
-        extracted_pages:
-            Detailed audit data for each PDF page, including extraction method.
-    """
     document = fitz.open(stream=pdf_bytes, filetype="pdf")
 
     pages: List[str] = []
@@ -715,13 +753,27 @@ def extract_pdf_text_pages(
         for page_number, page in enumerate(document, start=1):
             native_text = page.get_text("text") or ""
 
-            if page_has_meaningful_text(native_text):
+            # Always OCR this document because it contains table images.
+            # Native text is retained because pages 22-27 extract well natively.
+            ocr_text = ocr_pdf_page(page)
+
+            native_clean = normalise_spaces(native_text)
+            ocr_clean = normalise_spaces(ocr_text)
+
+            if native_clean and ocr_clean:
+                extracted_text = (
+                    "=== NATIVE PDF TEXT ===\n"
+                    f"{native_text}\n\n"
+                    "=== OCR TEXT ===\n"
+                    f"{ocr_text}"
+                )
+                extraction_method = "Native PDF Text + OCR"
+            elif ocr_clean:
+                extracted_text = ocr_text
+                extraction_method = "OCR (image/scanned page)"
+            else:
                 extracted_text = native_text
                 extraction_method = "Native PDF Text"
-
-            else:
-                extracted_text = ocr_pdf_page(page)
-                extraction_method = "OCR (image/scanned page)"
 
             pages.append(extracted_text)
 
@@ -748,128 +800,66 @@ def extract_pdf_text_pages(
 # =============================================================================
 
 def is_singularity_schedule_page(page_text: str) -> bool:
-    """
-    Identify only Singularities schedule pages.
-
-    Typical page markers:
-    - SINGULARITIES
-    - K.P.
-    - Inter singul.
-    - Test Absc.
-    - Remarks
-
-    Excludes Variant Composition, invariant and transmission pages.
-    """
     upper = normalise_spaces(page_text).upper()
+    compact = compact_ocr_text(page_text)
 
-    required_markers = [
-        "SINGULARITIES",
-        "K.P.",
-    ]
-
-    schedule_markers = [
-        "INTER SINGUL",
-        "TEST ABSC",
-        "REMARKS",
-        "CODE",
-    ]
-
-    excluded_markers = [
-        "VARIANTS COMPOSITION",
-        "SAFETY VARIANTS",
-        "TRANSMISSION TIME",
-        "ANTICIPATION DISTANCE CALCULATION",
-        "FORMULA USED",
-        "INVARIANTS EMISSION",
-        "EMISSION ON LOOP",
-    ]
-
-    has_required_markers = all(
-        marker in upper
-        for marker in required_markers
+    has_singularities = (
+        "SINGULARITIES" in upper
+        or "SINGULARITY" in upper
+        or "SINGULARITIES" in compact
+        or "SINGULARITY" in compact
     )
 
-    has_schedule_marker = any(
-        marker in upper
-        for marker in schedule_markers
+    has_kp = (
+        bool(re.search(r"\bK\s*\.?\s*P\s*\.?\b", upper))
+        or "KP" in compact
     )
 
-    has_excluded_marker = any(
+    has_table_structure = any(
         marker in upper
-        for marker in excluded_markers
+        for marker in [
+            "INTER SINGUL",
+            "TEST ABSC",
+            "REMARKS",
+            "CODE",
+            "SUB SECTION",
+            "SUB-SECTION",
+        ]
+    ) or any(
+        marker in compact
+        for marker in [
+            "INTERSINGUL",
+            "TESTABSC",
+            "SUBSECTION",
+        ]
+    )
+
+    is_transmission_page = (
+        "TRANSMISSIONTIME" in compact
+        and "ANTICIPATIONDISTANCE" in compact
+    )
+
+    is_invariant_page = any(
+        marker in compact
+        for marker in [
+            "INVARIANTSEMISSION",
+            "EMISSIONONLOOP",
+            "INVARIANTMESSAGES",
+        ]
+    )
+
+    is_variant_page = (
+        "VARIANTSCOMPOSITION" in compact
+        or "VARIANTCOMPOSITION" in compact
     )
 
     return (
-        has_required_markers
-        and has_schedule_marker
-        and not has_excluded_marker
-    )
-
-
-def is_variant_composition_page(page_text: str) -> bool:
-    """
-    Identify only the Safety Variants / Variants Composition pages.
-
-    Typical page markers:
-    - VARIANTS COMPOSITION
-    - Rank
-    - Sub-sect.
-    - Antic. dist.
-    - Safety variants messages
-
-    This deliberately excludes the transmission calculation pages, which
-    contain the phrase 'Anticipated branches to be run' but are NOT variant
-    composition tables.
-    """
-    upper = normalise_spaces(page_text).upper()
-
-    required_markers = [
-        "VARIANTS COMPOSITION",
-        "RANK",
-    ]
-
-    supporting_markers = [
-        "ANTIC. DIST",
-        "ANTICIPATION DIST",
-        "SAFETY VARIANTS",
-        "SAFETY VARIANTS MESSAGES",
-        "TUC SECTOR",
-        "SUB-SECT",
-        "SUB SECT",
-    ]
-
-    excluded_markers = [
-        "TRANSMISSION TIME",
-        "ANTICIPATION DISTANCE CALCULATION",
-        "FORMULA USED",
-        "TRAIN SECTION RUNNING TIME",
-        "MINIMUM VISIBILITY DISTANCE",
-        "SECTION BRAKING DISTANCE",
-        "INVARIANTS EMISSION",
-        "EMISSION ON LOOP",
-        "SINGULARITIES",
-        "TEST ABSC",
-    ]
-
-    has_required_markers = all(
-        marker in upper
-        for marker in required_markers
-    )
-
-    has_supporting_marker = any(
-        marker in upper
-        for marker in supporting_markers
-    )
-
-    has_excluded_marker = any(
-        marker in upper
-        for marker in excluded_markers
-    )
-
-    return (
-        has_required_markers
-        and has_supporting_marker
-        and not has_excluded_marker
+        has_singularities
+        and has_kp
+        and has_table_structure
+        and not is_transmission_page
+        and not is_invariant_page
+        and not is_variant_page
     )
 
 
@@ -899,6 +889,63 @@ def is_transmission_calculation_page(page_text: str) -> bool:
     return (
         all(marker in upper for marker in required_markers)
         and any(marker in upper for marker in route_markers)
+    )
+
+def is_variant_composition_page(page_text: str) -> bool:
+    upper = normalise_spaces(page_text).upper()
+    compact = compact_ocr_text(page_text)
+
+    has_variants_composition = (
+        "VARIANTS COMPOSITION" in upper
+        or "VARIANT COMPOSITION" in upper
+        or "VARIANTSCOMPOSITION" in compact
+        or "VARIANTCOMPOSITION" in compact
+    )
+
+    has_rank = (
+        bool(re.search(r"\bRANK\b", upper))
+        or "RANK" in compact
+    )
+
+    has_subsection_or_safety_text = any(
+        marker in compact
+        for marker in [
+            "SUBSECT",
+            "SUBSECTION",
+            "SAFETYVARIANTS",
+            "SAFETYVARIANTSMESSAGES",
+            "ANTICDIST",
+            "ANTICIPATIONDIST",
+            "TUCSECTOR",
+        ]
+    )
+
+    is_transmission_page = (
+        "TRANSMISSIONTIME" in compact
+        and "ANTICIPATIONDISTANCE" in compact
+    )
+
+    is_singularity_page = (
+        "SINGULARITIES" in compact
+        and "KP" in compact
+    )
+
+    is_invariant_page = any(
+        marker in compact
+        for marker in [
+            "INVARIANTSEMISSION",
+            "EMISSIONONLOOP",
+            "INVARIANTMESSAGES",
+        ]
+    )
+
+    return (
+        has_variants_composition
+        and has_rank
+        and has_subsection_or_safety_text
+        and not is_transmission_page
+        and not is_singularity_page
+        and not is_invariant_page
     )
 
 
@@ -1277,49 +1324,113 @@ def identify_tests(source_text: str) -> List[str]:
 
 def parse_singularity_row(line: str) -> Optional[Dict[str, Any]]:
     """
-    Parse a singularity-schedule row.
+    Parse a SACEM Singularities schedule row.
 
-    Expected source structure:
+    Source table structure normally is:
 
-        row | inter singularity | absolute k.p. | code | remarks
+        N | Test Absc. | Inter singul. | K.P. | Code | Remarks
 
-    Examples OCR may produce:
+    OCR examples may be:
 
-        20 8.4 m 1,611.4 15.7 Sub section end...
-        26 3.0 m 1,788.0 15.4 Associated variant : (TUC KM T/C)
+        13 1 14.0 m 1460.0 15.1 Beacon type...
+        20 8.4 m 1611.4 15.7 Sub section end...
+        1 0.0 m 1177.5 1 Sub Section : 9-1-0...
     """
     text = normalise_spaces(line)
 
-    pattern = re.compile(
-        r"^\s*"
-        r"(?P<row>\d{1,3})\s+"
-        r"(?:!\s*)?"
-        r"(?:(?P<inter>-?\d+(?:[,.]\d+)?)\s*m?\s+)?"
-        r"(?P<abscissa>-?\d+(?:[,.]\d+)?)\s+"
-        r"(?P<code>\d+(?:[._-]\d+)?)\s+"
-        r"(?P<remaining>.+)$",
-        flags=re.IGNORECASE,
+    # Must begin with row number.
+    row_match = re.match(r"^\s*(\d{1,3})\b", text)
+
+    if not row_match:
+        return None
+
+    row_number = row_match.group(1)
+
+    remainder = text[row_match.end():].strip()
+
+    # Numeric tokens, including:
+    # 1177.5
+    # 1,177.5
+    # -170.5
+    # 15.1
+    numeric_matches = list(
+        re.finditer(
+            r"(?<![A-Z0-9])"
+            r"-?\d[\d,]*(?:\.\d+)?"
+            r"(?![A-Z0-9])",
+            remainder,
+            flags=re.IGNORECASE,
+        )
     )
 
-    match = pattern.match(text)
-
-    if not match:
+    if len(numeric_matches) < 3:
         return None
 
-    abscissa = to_float(match.group("abscissa"))
+    numeric_values: List[Tuple[float, str, int, int]] = []
 
-    if abscissa is None:
+    for match in numeric_matches:
+        value = to_float(match.group(0))
+
+        if value is None:
+            continue
+
+        numeric_values.append(
+            (
+                value,
+                match.group(0),
+                match.start(),
+                match.end(),
+            )
+        )
+
+    if len(numeric_values) < 3:
         return None
 
-    if abscissa < -10000 or abscissa > 100000:
+    # Find probable K.P.:
+    # K.P. values are normally substantially larger than row number,
+    # test abscissa and singularity code.
+    kp_index = None
+
+    for index, (value, raw, start, end) in enumerate(numeric_values):
+        # Typical SACEM K.P. values: approx. -200 to 5000.
+        # Require an immediately following small singularity code.
+        if abs(value) >= 20 and index + 1 < len(numeric_values):
+            next_value = numeric_values[index + 1][0]
+
+            # Codes are normally values such as 1, 2, 9, 10, 11, 15.1, 15.7.
+            if -1 <= next_value <= 30:
+                kp_index = index
+                break
+
+    if kp_index is None:
         return None
+
+    absolute_abscissa = numeric_values[kp_index][0]
+    singularity_code = numeric_values[kp_index + 1][1]
+
+    # Inter-singularity is normally the number directly before K.P.
+    inter_singularity = None
+
+    if kp_index >= 1:
+        inter_candidate = numeric_values[kp_index - 1][0]
+
+        # Avoid treating a likely Test Abscissa flag as inter-singularity.
+        if -1000 <= inter_candidate <= 1000:
+            inter_singularity = inter_candidate
+
+    # Everything after singularity code is remarks.
+    code_end_position = numeric_values[kp_index + 1][3]
+    remaining = remainder[code_end_position:].strip(" ,;:-")
+
+    if not remaining:
+        remaining = ""
 
     return {
-        "row_number": safe_text(match.group("row")),
-        "inter_singularity_m": to_float(match.group("inter")),
-        "abscissa_m": abscissa,
-        "singularity_code": safe_text(match.group("code")),
-        "remaining": normalise_spaces(match.group("remaining")),
+        "row_number": row_number,
+        "inter_singularity_m": inter_singularity,
+        "abscissa_m": absolute_abscissa,
+        "singularity_code": singularity_code,
+        "remaining": normalise_spaces(remaining),
     }
 
 
@@ -1559,6 +1670,97 @@ def extract_singularities_table(pages: List[str]) -> pd.DataFrame:
 
     return dataframe[SINGULARITY_COLUMNS]
 
+def parse_variant_visual_row(
+    line: str,
+) -> Optional[Dict[str, str]]:
+    """
+    Fallback parser for OCR lines from visual Variants Composition tables.
+
+    Typical OCR-like rows:
+        0 09-01-0 TUC KF T/C
+        2 09-01-1 TUC KF T/C
+        8 09-01-2 TUC KF T/C
+        14 09-03-0 TUC DN TCL PEP(1) ...
+    """
+    text = normalise_spaces(line)
+
+    match = re.match(
+        r"^(?P<rank>\d{1,2})\s+"
+        r"(?:(?P<subsection>\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,2})\s+)?"
+        r"(?P<variant>.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return None
+
+    rank = safe_text(match.group("rank"))
+    subsection_raw = safe_text(match.group("subsection"))
+    variant = normalise_spaces(match.group("variant"))
+
+    # Ignore headings and empty grid lines.
+    variant_upper = variant.upper()
+
+    if not variant or variant_upper in {
+        "VARIANTS COMPOSITION",
+        "VARIANT COMPOSITION",
+        "ANTIC DIST",
+        "ANTIC. DIST",
+        "SUB SECT",
+        "SUB-SECT",
+        "RANK",
+        "P",
+        "A",
+    }:
+        return None
+
+    # Require meaningful variant-related wording.
+    # This avoids treating page numbers or table grid OCR as variants.
+    has_variant_signal = any(
+        marker in variant_upper
+        for marker in [
+            "TUC",
+            "THW",
+            "TCE",
+            "STATION",
+            "PEP",
+            "PSD",
+            "POINT",
+            "ESA",
+            "SP",
+            "T/C",
+            "RP",
+            "NP",
+            "REPEAT",
+            "EMERGENCY",
+            "SIG",
+        ]
+    )
+
+    if not has_variant_signal:
+        return None
+
+    subsection = ""
+
+    if subsection_raw:
+        try:
+            parts = re.split(r"\s*-\s*", subsection_raw)
+
+            subsection = normalise_subsection_parts(
+                parts[0],
+                parts[1],
+                parts[2],
+            )
+        except (ValueError, IndexError):
+            subsection = ""
+
+    return {
+        "rank": rank,
+        "subsection": subsection,
+        "variant": variant,
+    }
+
 
 def extract_variant_composition_table(pages: List[str]) -> pd.DataFrame:
     """
@@ -1607,7 +1809,44 @@ def extract_variant_composition_table(pages: List[str]) -> pd.DataFrame:
             )
 
             context_upper = context.upper()
+            visual_row = parse_variant_visual_row(line)
 
+            if visual_row:
+                if visual_row["subsection"]:
+                    current_subsection = visual_row["subsection"]
+
+                sector = metadata["sector"]
+                section = metadata["section"]
+
+                if current_subsection:
+                    subsection_parts = current_subsection.split("-")
+
+                    if len(subsection_parts) == 3:
+                        sector = subsection_parts[0]
+                        section = subsection_parts[1]
+
+                records.append(
+                    {
+                        "pdf_page": page_number,
+                        "sector": sector,
+                        "section": section,
+                        "direction": metadata["direction"],
+                        "subsection": current_subsection,
+                        "route": current_route,
+                        "rank": visual_row["rank"],
+                        "participating_rank": "",
+                        "anticipated_rank": "",
+                        "participating_variants": "",
+                        "anticipated_variants": "",
+                        "all_variants": visual_row["variant"],
+                        "source_evidence": context[:MAX_EVIDENCE_LENGTH],
+                    }
+                )
+
+                # Important: do not process this same row again
+                # using the paragraph/label-based parser below.
+                continue
+                
             relevant_markers = [
                 "RANK",
                 "PARTICIPATING",
@@ -1700,6 +1939,7 @@ def extract_variant_composition_table(pages: List[str]) -> pd.DataFrame:
             "anticipated_rank",
             "participating_variants",
             "anticipated_variants",
+            "all_variants",
         ]
     )
 
@@ -1943,12 +2183,12 @@ def extract_transmission_calculation_table(
 
             entry_speed_kph = extract_number_after_label(
                 route_block,
-                r"ENTRY\s+SPEED\s*:\s*VE\s*=",
+                r"ENTRY\s+SPEED.*?V\s*[Ee]\s*=",
             )
 
             initialisation_distance_m = extract_number_after_label(
                 route_block,
-                r"INITIALISATION\s+DISTANCE\s+AT\s+22\s*KM/H\s*=",
+                r"INITIALI[ZS]ATION\s+DISTANCE.*?22\s*KM\s*/?\s*H\s*=",
             )
 
             running_time_s = extract_number_after_label(
@@ -1963,17 +2203,17 @@ def extract_transmission_calculation_table(
 
             loop_count = extract_number_after_label(
                 route_block,
-                r"LOOPS?\s+(?:NBER|NUMBER)\s*:\s*LN",
+                r"LOOPS?\s+(?:NBER|NUMBER|NO\.?)\s*:\s*L[NH]",
             )
 
             message_elements = extract_number_after_label(
                 route_block,
-                r"ELTS?\s+(?:NBER|NUMBER)\s*:\s*N",
+                r"ELTS?\s+(?:NBER|NUMBER|NO\.?)\s*:\s*N",
             )
 
             transmission_time_s = extract_number_after_label(
                 route_block,
-                r"\bTRI\s*",
+                r"\bTR[I1]\b",
             )
 
             visibility_invariant, visibility_variant = (
