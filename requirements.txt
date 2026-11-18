@@ -11,6 +11,5 @@ python-calamine
 xlrd
 pypdf>=4.0.0
 pytesseract>=0.3.10
-Pillow>=10.0.0
 pdfplumber
-marker-pdf==1.10.1
+marker-pdf>=1.10.0
