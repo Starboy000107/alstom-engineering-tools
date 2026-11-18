@@ -3340,7 +3340,81 @@ def initialise_test_sheet_state() -> None:
         if key not in st.session_state:
             st.session_state[key] = value
 
+# =============================================================================
+# MARKER-PDF AUDIT LOG / SUMMARY
+# =============================================================================
 
+def create_pdf_text_log(
+    extracted_pages: List[Dict[str, Any]],
+) -> str:
+    """
+    Create a complete Marker-PDF extraction audit log.
+    """
+    lines = [
+        "=" * 110,
+        "MARKER-PDF EXTRACTION AUDIT LOG",
+        "=" * 110,
+        "",
+        "Extraction engine: Marker-PDF only.",
+        "No Tesseract, OpenCV preprocessing, native-text fallback, or "
+        "alternative OCR engine is used.",
+        "",
+    ]
+
+    for page_data in extracted_pages:
+        page_number = page_data["page_number"]
+        extraction_method = page_data["extraction_method"]
+        parser_text = safe_text(page_data.get("text", ""))
+        audit_text = safe_text(page_data.get("audit_text", parser_text))
+
+        lines.extend(
+            [
+                "=" * 110,
+                f"PDF PAGE {page_number}",
+                "=" * 110,
+                f"Extraction Method: {extraction_method}",
+                f"Parser Text Character Count: {len(parser_text)}",
+                f"Parser Text Word Count: {len(parser_text.split())}",
+                "",
+                "PARSER-NORMALISED MARKER TEXT",
+                "-" * 110,
+                parser_text or "[NO TEXT EXTRACTED]",
+                "",
+                "MARKER-PDF RAW / AUDIT OUTPUT",
+                "-" * 110,
+                audit_text or "[NO AUDIT TEXT EXTRACTED]",
+                "",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+def create_pdf_extraction_summary(
+    extracted_pages: List[Dict[str, Any]],
+) -> pd.DataFrame:
+    """
+    Create a concise per-page Marker-PDF extraction summary.
+    """
+    records: List[Dict[str, Any]] = []
+
+    for page_data in extracted_pages:
+        parser_text = safe_text(page_data.get("text", ""))
+        audit_text = safe_text(page_data.get("audit_text", parser_text))
+
+        records.append(
+            {
+                "pdf_page": page_data["page_number"],
+                "extraction_method": page_data["extraction_method"],
+                "character_count": len(parser_text),
+                "word_count": len(parser_text.split()),
+                "audit_character_count": len(audit_text),
+                "text_preview": parser_text[:700],
+            }
+        )
+
+    return pd.DataFrame(records)
+    
 def render_test_sheet_generator_app() -> None:
     initialise_test_sheet_state()
 
