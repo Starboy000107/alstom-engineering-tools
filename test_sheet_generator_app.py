@@ -24,7 +24,7 @@ PROCEDURE_TITLE_DEFAULT = "Trackside ATC Low-Speed Dynamic Test Procedure"
 MAX_PDF_SIZE_MB = 100
 MAX_EVIDENCE_LENGTH = 3000
 
-OCR_DPI = 300
+OCR_DPI = 400
 OCR_MIN_TEXT_CHARS = 80
 OCR_CONFIDENCE_MIN = 25
 
@@ -624,7 +624,7 @@ def ocr_pdf_page(page: fitz.Page) -> str:
 
     results: List[str] = []
 
-    for psm in [6, 11]:
+    for psm in [6, 11, 12]:
         try:
             ocr_data = pytesseract.image_to_data(
                 image,
