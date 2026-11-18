@@ -14,6 +14,10 @@ import pandas as pd
 import pytesseract
 import streamlit as st
 from PIL import Image
+import os
+import tempfile
+import threading
+from pathlib import Path
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -400,6 +404,30 @@ TRANSMISSION_CALCULATION_COLUMNS = [
     "comments",
     "source_evidence",
 ]
+# =============================================================================
+# MARKER-PDF CONFIGURATION
+# =============================================================================
+
+# Marker is the preferred extraction engine for scanned engineering drawings,
+# tables and layout-heavy PDFs. Tesseract remains as a fallback only.
+USE_MARKER_PDF = True
+
+# Set to True if you want extraction to fail instead of using the old OCR
+# fallback when Marker is unavailable.
+MARKER_REQUIRED = False
+
+# Marker models are large. They are loaded once with st.cache_resource.
+# Do not create a converter per page.
+MARKER_DEVICE = os.getenv("MARKER_DEVICE", "").strip()
+
+# Marker may be slow for a 27-page engineering schedule. This keeps progress
+# feedback responsive while converting page-by-page.
+MARKER_PAGE_BY_PAGE = True
+
+# Synchronise converter use. A cached Marker converter/model should not be
+# used by two Streamlit sessions at exactly the same time.
+MARKER_CONVERTER_LOCK = threading.RLock()
+
 
 # =============================================================================
 # BASIC HELPERS
@@ -1350,9 +1378,372 @@ def create_pdf_extraction_summary(
 
     return pd.DataFrame(records)
 
+# =============================================================================
+# MARKER-PDF EXTRACTION BACKEND
+# =============================================================================
 
+def marker_is_installed() -> bool:
+    """
+    Return True when marker-pdf is installed and importable.
+
+    Importing lazily is important so the whole Streamlit app can still start
+    and show a helpful message if Marker is not installed correctly.
+    """
+    try:
+        from marker.converters.pdf import PdfConverter  # noqa: F401
+        from marker.models import create_model_dict  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+@st.cache_resource(show_spinner=False)
+def get_marker_converter() -> Any:
+    """
+    Load Marker models once per Streamlit server process.
+
+    Marker can use GPU automatically where available. The optional
+    MARKER_DEVICE environment variable may be used by deployment environments,
+    for example:
+
+        MARKER_DEVICE=cpu
+        MARKER_DEVICE=cuda
+        MARKER_DEVICE=mps
+    """
+    try:
+        from marker.converters.pdf import PdfConverter
+        from marker.models import create_model_dict
+    except Exception as exc:
+        raise RuntimeError(
+            "marker-pdf is not installed correctly. "
+            "Install it with: pip install marker-pdf"
+        ) from exc
+
+    config: Dict[str, Any] = {}
+
+    # Marker versions differ slightly. These values are optional and safely
+    # ignored by versions that do not use them.
+    if MARKER_DEVICE:
+        config["device"] = MARKER_DEVICE
+
+    try:
+        converter = PdfConverter(
+            artifact_dict=create_model_dict(),
+            config=config,
+        )
+    except TypeError:
+        # Compatibility with Marker versions where config is not accepted.
+        converter = PdfConverter(
+            artifact_dict=create_model_dict(),
+        )
+
+    return converter
+
+
+def marker_rendered_to_markdown(rendered: Any) -> str:
+    """
+    Extract Markdown/text from multiple marker-pdf API versions.
+
+    Different Marker releases return slightly different result objects. This
+    compatibility function supports the common variants without tying the
+    Streamlit app to only one Marker release.
+    """
+    if rendered is None:
+        return ""
+
+    if isinstance(rendered, str):
+        return rendered.strip()
+
+    for attribute_name in [
+        "markdown",
+        "text",
+        "html",
+        "output",
+    ]:
+        value = getattr(rendered, attribute_name, None)
+
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    # Marker commonly exposes text_from_rendered().
+    try:
+        from marker.output import text_from_rendered
+
+        output = text_from_rendered(rendered)
+
+        if isinstance(output, str):
+            return output.strip()
+
+        if isinstance(output, tuple) and output:
+            first_value = output[0]
+
+            if isinstance(first_value, str):
+                return first_value.strip()
+
+    except Exception:
+        pass
+
+    return safe_text(rendered)
+
+
+def marker_text_to_parser_text(markdown_text: str) -> str:
+    """
+    Convert Marker Markdown into parser-friendly engineering schedule text.
+
+    The existing singularity parser is line-oriented. Marker often produces
+    Markdown tables such as:
+
+        | 1 | 0.0 m | 1177.5 | 1 | Sub Section: 9-1-0 |
+
+    This function intentionally keeps each table row on its own line while
+    removing Markdown-only symbols. Therefore your existing row parser can
+    read the data as:
+
+        1 0.0 m 1177.5 1 Sub Section: 9-1-0
+
+    It does not remove hyphens because they are required for subsection and
+    branch identifiers such as 09-01-0-0.
+    """
+    output_lines: List[str] = []
+
+    for raw_line in safe_text(markdown_text).splitlines():
+        line = safe_text(raw_line)
+
+        if not line:
+            continue
+
+        # Remove Markdown headings only.
+        line = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)
+
+        # Remove common Markdown emphasis marks.
+        line = line.replace("**", "")
+        line = line.replace("__", "")
+        line = line.replace("`", "")
+
+        # Convert Markdown tables into whitespace-separated schedule rows.
+        line = re.sub(r"\s*\|\s*", " ", line)
+
+        # Ignore Markdown separator rows such as: --- | --- | ---
+        compact_line = re.sub(r"[\s:|_-]", "", line)
+
+        if compact_line == "":
+            continue
+
+        # Ignore image links but retain their alt text when useful.
+        line = re.sub(
+            r"!\[([^\]]*)\]\([^)]+\)",
+            r"\1",
+            line,
+        )
+
+        # Convert ordinary Markdown links to visible link labels.
+        line = re.sub(
+            r"\[([^\]]+)\]\([^)]+\)",
+            r"\1",
+            line,
+        )
+
+        line = normalise_spaces(line)
+
+        if line:
+            output_lines.append(line)
+
+    parser_text = "\n".join(output_lines)
+
+    return repair_ocr_page_text(parser_text)
+
+
+def create_single_page_pdf_bytes(
+    source_document: fitz.Document,
+    page_index: int,
+) -> bytes:
+    """
+    Make a one-page PDF for Marker.
+
+    Processing page-by-page has two important benefits for this application:
+    1. Every extracted text block keeps its original PDF page number.
+    2. Schedule pages, Variant Composition pages and calculation pages are
+       not merged into one large Markdown document.
+    """
+    output_document = fitz.open()
+
+    try:
+        output_document.insert_pdf(
+            source_document,
+            from_page=page_index,
+            to_page=page_index,
+        )
+
+        return output_document.tobytes(
+            garbage=4,
+            deflate=True,
+        )
+
+    finally:
+        output_document.close()
+
+
+def extract_one_page_with_marker(
+    single_page_pdf_bytes: bytes,
+    original_page_number: int,
+) -> Dict[str, str]:
+    """
+    Extract one PDF page through Marker.
+
+    A temporary file is used because Marker PdfConverter normally expects a
+    file path rather than raw uploaded bytes.
+    """
+    converter = get_marker_converter()
+
+    temporary_path = ""
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=f"_page_{original_page_number}.pdf",
+            delete=False,
+        ) as temporary_file:
+            temporary_file.write(single_page_pdf_bytes)
+            temporary_path = temporary_file.name
+
+        with MARKER_CONVERTER_LOCK:
+            rendered = converter(temporary_path)
+
+        marker_markdown = marker_rendered_to_markdown(rendered)
+
+        parser_text = marker_text_to_parser_text(marker_markdown)
+
+        audit_text = "\n".join(
+            [
+                "=" * 100,
+                f"MARKER-PDF OUTPUT - ORIGINAL PDF PAGE {original_page_number}",
+                "=" * 100,
+                "",
+                "----- RAW MARKER MARKDOWN / TEXT -----",
+                marker_markdown or "[NO MARKER TEXT EXTRACTED]",
+                "",
+                "----- PARSER-NORMALISED MARKER TEXT -----",
+                parser_text or "[NO PARSER TEXT EXTRACTED]",
+            ]
+        )
+
+        return {
+            "parser_text": parser_text,
+            "audit_text": audit_text,
+        }
+
+    finally:
+        if temporary_path:
+            try:
+                Path(temporary_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def extract_pdf_text_pages_with_marker(
+    pdf_bytes: bytes,
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """
+    Extract every page using marker-pdf.
+
+    Native PDF text is retained as supplementary source evidence. Marker is
+    still used for every page because the first schedule pages are images and
+    contain engineering tables which native PDF extraction cannot read.
+    """
+    source_document = fitz.open(
+        stream=pdf_bytes,
+        filetype="pdf",
+    )
+
+    pages: List[str] = []
+    extracted_pages: List[Dict[str, Any]] = []
+
+    try:
+        for page_index in range(source_document.page_count):
+            page_number = page_index + 1
+            source_page = source_document.load_page(page_index)
+
+            native_text = safe_text(
+                source_page.get_text("text")
+            )
+
+            single_page_pdf = create_single_page_pdf_bytes(
+                source_document=source_document,
+                page_index=page_index,
+            )
+
+            marker_result = extract_one_page_with_marker(
+                single_page_pdf_bytes=single_page_pdf,
+                original_page_number=page_number,
+            )
+
+            marker_parser_text = safe_text(
+                marker_result.get("parser_text", "")
+            )
+
+            marker_audit_text = safe_text(
+                marker_result.get("audit_text", "")
+            )
+
+            # Keep both native and Marker extraction. Marker is primary for
+            # scanned tables, while native text is often excellent for pages
+            # 22-27 containing the transmission calculation sheets.
+            if native_text and marker_parser_text:
+                parser_text = "\n".join(
+                    [
+                        "===== NATIVE PDF TEXT =====",
+                        native_text,
+                        "",
+                        "===== MARKER-PDF TEXT =====",
+                        marker_parser_text,
+                    ]
+                )
+                extraction_method = "Marker-PDF + Native PDF Text"
+
+            elif marker_parser_text:
+                parser_text = marker_parser_text
+                extraction_method = "Marker-PDF"
+
+            else:
+                parser_text = native_text
+                extraction_method = "Native PDF Text"
+
+            audit_parts: List[str] = []
+
+            if native_text:
+                audit_parts.extend(
+                    [
+                        "===== NATIVE PDF TEXT =====",
+                        native_text,
+                        "",
+                    ]
+                )
+
+            audit_parts.extend(
+                [
+                    "===== MARKER-PDF AUDIT =====",
+                    marker_audit_text or "[NO MARKER OUTPUT]",
+                ]
+            )
+
+            pages.append(parser_text)
+
+            extracted_pages.append(
+                {
+                    "page_number": page_number,
+                    "extraction_method": extraction_method,
+                    "text": parser_text,
+                    "audit_text": "\n".join(audit_parts),
+                }
+            )
+
+    finally:
+        source_document.close()
+
+    return pages, extracted_pages
+
+    
 @st.cache_data(show_spinner=False, max_entries=4)
-def extract_pdf_text_pages(
+def extract_pdf_text_pages_tesseract_fallback(
     pdf_bytes: bytes,
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
     """
@@ -1447,6 +1838,66 @@ def extract_pdf_text_pages(
         document.close()
 
     return pages, extracted_pages
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def extract_pdf_text_pages(
+    pdf_bytes: bytes,
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """
+    Primary PDF extraction entry point.
+
+    Extraction order:
+    1. marker-pdf for layout-aware OCR, tables and scanned schedules.
+    2. Existing PyMuPDF/Tesseract extraction only if Marker cannot run.
+
+    Set MARKER_REQUIRED = True if you want to prohibit fallback behaviour.
+    """
+    if USE_MARKER_PDF:
+        if marker_is_installed():
+            try:
+                return extract_pdf_text_pages_with_marker(pdf_bytes)
+
+            except Exception as marker_error:
+                if MARKER_REQUIRED:
+                    raise RuntimeError(
+                        "Marker-PDF extraction failed and MARKER_REQUIRED=True. "
+                        f"Underlying error: {type(marker_error).__name__}: "
+                        f"{marker_error}"
+                    ) from marker_error
+
+                fallback_pages, fallback_extracted_pages = (
+                    extract_pdf_text_pages_tesseract_fallback(pdf_bytes)
+                )
+
+                for page_data in fallback_extracted_pages:
+                    page_data["extraction_method"] = (
+                        "Tesseract Fallback "
+                        f"(Marker failed: {type(marker_error).__name__})"
+                    )
+
+                    page_data["audit_text"] = "\n".join(
+                        [
+                            "=" * 100,
+                            "MARKER-PDF FAILURE / TESSERACT FALLBACK",
+                            "=" * 100,
+                            f"Marker error: {type(marker_error).__name__}: "
+                            f"{marker_error}",
+                            "",
+                            safe_text(page_data.get("audit_text", "")),
+                        ]
+                    )
+
+                return fallback_pages, fallback_extracted_pages
+
+        if MARKER_REQUIRED:
+            raise RuntimeError(
+                "marker-pdf is required but is not installed. "
+                "Install it with: pip install marker-pdf"
+            )
+
+    return extract_pdf_text_pages_tesseract_fallback(pdf_bytes)
+
 # =============================================================================
 # SOURCE PAGE IDENTIFICATION
 # =============================================================================
@@ -2024,33 +2475,35 @@ def parse_singularity_row(line: str) -> Optional[Dict[str, Any]]:
     """
     Parse a SACEM Singularities schedule row.
 
-    Source table structure normally is:
+    Supports OCR text and Marker table extraction.
 
-        N | Test Absc. | Inter singul. | K.P. | Code | Remarks
-
-    OCR examples may be:
-
+    Typical source row:
         13 1 14.0 m 1460.0 15.1 Beacon type...
-        20 8.4 m 1611.4 15.7 Sub section end...
-        1 0.0 m 1177.5 1 Sub Section : 9-1-0...
-    """
-    text = normalise_spaces(line)
 
-    # Must begin with row number.
+    Typical Marker Markdown table row:
+        | 13 | 1 | 14.0 m | 1460.0 | 15.1 | Beacon type... |
+    """
+    text = safe_text(line)
+
+    # Marker commonly returns Markdown table separators.
+    text = text.replace("**", "")
+    text = text.replace("`", "")
+    text = re.sub(r"\s*\|\s*", " ", text)
+    text = normalise_spaces(text)
+
+    # Reject Markdown separator rows.
+    if not text or re.fullmatch(r"[-:\s]+", text):
+        return None
+
+    # Must begin with a schedule row number.
     row_match = re.match(r"^\s*(\d{1,3})\b", text)
 
     if not row_match:
         return None
 
     row_number = row_match.group(1)
-
     remainder = text[row_match.end():].strip()
 
-    # Numeric tokens, including:
-    # 1177.5
-    # 1,177.5
-    # -170.5
-    # 15.1
     numeric_matches = list(
         re.finditer(
             r"(?<![A-Z0-9])"
@@ -2084,18 +2537,14 @@ def parse_singularity_row(line: str) -> Optional[Dict[str, Any]]:
     if len(numeric_values) < 3:
         return None
 
-    # Find probable K.P.:
-    # K.P. values are normally substantially larger than row number,
-    # test abscissa and singularity code.
-    kp_index = None
+    kp_index: Optional[int] = None
 
     for index, (value, raw, start, end) in enumerate(numeric_values):
-        # Typical SACEM K.P. values: approx. -200 to 5000.
-        # Require an immediately following small singularity code.
         if abs(value) >= 20 and index + 1 < len(numeric_values):
             next_value = numeric_values[index + 1][0]
 
-            # Codes are normally values such as 1, 2, 9, 10, 11, 15.1, 15.7.
+            # SACEM singularity codes are normally 1, 2, 9, 10, 11,
+            # 15.1, 15.7, etc.
             if -1 <= next_value <= 30:
                 kp_index = index
                 break
@@ -2106,22 +2555,16 @@ def parse_singularity_row(line: str) -> Optional[Dict[str, Any]]:
     absolute_abscissa = numeric_values[kp_index][0]
     singularity_code = numeric_values[kp_index + 1][1]
 
-    # Inter-singularity is normally the number directly before K.P.
-    inter_singularity = None
+    inter_singularity: Optional[float] = None
 
     if kp_index >= 1:
         inter_candidate = numeric_values[kp_index - 1][0]
 
-        # Avoid treating a likely Test Abscissa flag as inter-singularity.
         if -1000 <= inter_candidate <= 1000:
             inter_singularity = inter_candidate
 
-    # Everything after singularity code is remarks.
     code_end_position = numeric_values[kp_index + 1][3]
-    remaining = remainder[code_end_position:].strip(" ,;:-")
-
-    if not remaining:
-        remaining = ""
+    remaining = remainder[code_end_position:].strip(" ,;:-|")
 
     return {
         "row_number": row_number,
@@ -2372,15 +2815,23 @@ def parse_variant_visual_row(
     line: str,
 ) -> Optional[Dict[str, str]]:
     """
-    Fallback parser for OCR lines from visual Variants Composition tables.
+    Parse OCR or Marker-extracted rows from Variant Composition tables.
 
-    Typical OCR-like rows:
+    Examples:
         0 09-01-0 TUC KF T/C
-        2 09-01-1 TUC KF T/C
-        8 09-01-2 TUC KF T/C
+        | 0 | 09-01-0 | TUC KF T/C |
         14 09-03-0 TUC DN TCL PEP(1) ...
     """
-    text = normalise_spaces(line)
+    text = safe_text(line)
+
+    # Normalise Marker Markdown table rows.
+    text = text.replace("**", "")
+    text = text.replace("`", "")
+    text = re.sub(r"\s*\|\s*", " ", text)
+    text = normalise_spaces(text)
+
+    if not text or re.fullmatch(r"[-:\s]+", text):
+        return None
 
     match = re.match(
         r"^(?P<rank>\d{1,2})\s+"
@@ -2397,7 +2848,6 @@ def parse_variant_visual_row(
     subsection_raw = safe_text(match.group("subsection"))
     variant = normalise_spaces(match.group("variant"))
 
-    # Ignore headings and empty grid lines.
     variant_upper = variant.upper()
 
     if not variant or variant_upper in {
@@ -2413,8 +2863,6 @@ def parse_variant_visual_row(
     }:
         return None
 
-    # Require meaningful variant-related wording.
-    # This avoids treating page numbers or table grid OCR as variants.
     has_variant_signal = any(
         marker in variant_upper
         for marker in [
