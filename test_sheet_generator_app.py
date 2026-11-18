@@ -24,7 +24,7 @@ PROCEDURE_TITLE_DEFAULT = "Trackside ATC Low-Speed Dynamic Test Procedure"
 MAX_PDF_SIZE_MB = 100
 MAX_EVIDENCE_LENGTH = 3000
 
-OCR_DPI = 300
+OCR_DPI = 400
 OCR_MIN_TEXT_CHARS = 80
 OCR_CONFIDENCE_MIN = 25
 
@@ -363,6 +363,37 @@ VARIANT_COMPOSITION_COLUMNS = [
     "source_evidence",
 ]
 
+TRANSMISSION_CALCULATION_COLUMNS = [
+    "pdf_page",
+    "sector",
+    "section",
+    "route_number",
+    "route_name",
+    "direction",
+    "route_branches",
+    "anticipated_branches",
+    "entry_speed_kph",
+    "initialisation_distance_m",
+    "running_time_s",
+    "dwell_time_s",
+    "total_running_time_s",
+    "loop_count",
+    "message_elements",
+    "transmission_time_s",
+    "minimum_visibility_invariant_m",
+    "minimum_visibility_variant_m",
+    "braking_distance_invariant_m",
+    "braking_distance_variant_m",
+    "total_anticipation_invariant_m",
+    "total_anticipation_variant_m",
+    "downstream_request_invariant_m",
+    "downstream_request_variant_m",
+    "current_computed_invariant_m",
+    "current_computed_variant_m",
+    "comments",
+    "source_evidence",
+]
+
 # =============================================================================
 # BASIC HELPERS
 # =============================================================================
@@ -446,6 +477,18 @@ def page_has_meaningful_text(page_text: str) -> bool:
 
 
 def preprocess_for_ocr(pixmap: fitz.Pixmap) -> Image.Image:
+    """
+    OCR preprocessing for scanned engineering tables.
+
+    Includes:
+    - Enlargement
+    - Grayscale conversion
+    - Local contrast enhancement
+    - Adaptive thresholding
+
+    The goal is to improve small schedule/table text without destroying
+    thin characters such as 0, 1, 5, 8, decimal points and hyphens.
+    """
     mode = "RGB" if pixmap.n >= 3 else "L"
 
     image = Image.frombytes(
@@ -457,26 +500,41 @@ def preprocess_for_ocr(pixmap: fitz.Pixmap) -> Image.Image:
     image_array = np.array(image)
 
     if image_array.ndim == 3:
-        gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
+        gray = cv2.cvtColor(
+            image_array,
+            cv2.COLOR_RGB2GRAY,
+        )
     else:
         gray = image_array
 
+    # Increase small table text size before OCR.
     gray = cv2.resize(
         gray,
         None,
-        fx=1.4,
-        fy=1.4,
+        fx=2.0,
+        fy=2.0,
         interpolation=cv2.INTER_CUBIC,
     )
 
-    cleaned = cv2.threshold(
-        gray,
-        0,
-        255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
-    )[1]
+    # Improve contrast in faint scanned documents.
+    clahe = cv2.createCLAHE(
+        clipLimit=2.5,
+        tileGridSize=(8, 8),
+    )
 
-    return Image.fromarray(cleaned)
+    gray = clahe.apply(gray)
+
+    # Adaptive threshold performs better than OTSU for uneven scan shading.
+    binary = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        41,
+        11,
+    )
+
+    return Image.fromarray(binary)
 
 
 def group_ocr_words_into_visual_lines(
@@ -685,23 +743,163 @@ def extract_pdf_text_pages(
 # SOURCE PAGE IDENTIFICATION
 # =============================================================================
 
-def is_subdivision_page(page_text: str) -> bool:
-    upper = page_text.upper()
+# =============================================================================
+# PAGE TYPE IDENTIFICATION
+# =============================================================================
 
-    markers = [
+def is_singularity_schedule_page(page_text: str) -> bool:
+    """
+    Identify only Singularities schedule pages.
+
+    Typical page markers:
+    - SINGULARITIES
+    - K.P.
+    - Inter singul.
+    - Test Absc.
+    - Remarks
+
+    Excludes Variant Composition, invariant and transmission pages.
+    """
+    upper = normalise_spaces(page_text).upper()
+
+    required_markers = [
         "SINGULARITIES",
-        "SINGULARITY",
-        "INTER SINGUL",
-        "TEST ABSC",
-        "SUB SECTION",
-        "SUB-SECTION",
-        "UP TRACK NORMAL DIRECTION",
-        "DN TRACK NORMAL DIRECTION",
-        "DOWN TRACK NORMAL DIRECTION",
         "K.P.",
     ]
 
-    return any(marker in upper for marker in markers)
+    schedule_markers = [
+        "INTER SINGUL",
+        "TEST ABSC",
+        "REMARKS",
+        "CODE",
+    ]
+
+    excluded_markers = [
+        "VARIANTS COMPOSITION",
+        "SAFETY VARIANTS",
+        "TRANSMISSION TIME",
+        "ANTICIPATION DISTANCE CALCULATION",
+        "FORMULA USED",
+        "INVARIANTS EMISSION",
+        "EMISSION ON LOOP",
+    ]
+
+    has_required_markers = all(
+        marker in upper
+        for marker in required_markers
+    )
+
+    has_schedule_marker = any(
+        marker in upper
+        for marker in schedule_markers
+    )
+
+    has_excluded_marker = any(
+        marker in upper
+        for marker in excluded_markers
+    )
+
+    return (
+        has_required_markers
+        and has_schedule_marker
+        and not has_excluded_marker
+    )
+
+
+def is_variant_composition_page(page_text: str) -> bool:
+    """
+    Identify only the Safety Variants / Variants Composition pages.
+
+    Typical page markers:
+    - VARIANTS COMPOSITION
+    - Rank
+    - Sub-sect.
+    - Antic. dist.
+    - Safety variants messages
+
+    This deliberately excludes the transmission calculation pages, which
+    contain the phrase 'Anticipated branches to be run' but are NOT variant
+    composition tables.
+    """
+    upper = normalise_spaces(page_text).upper()
+
+    required_markers = [
+        "VARIANTS COMPOSITION",
+        "RANK",
+    ]
+
+    supporting_markers = [
+        "ANTIC. DIST",
+        "ANTICIPATION DIST",
+        "SAFETY VARIANTS",
+        "SAFETY VARIANTS MESSAGES",
+        "TUC SECTOR",
+        "SUB-SECT",
+        "SUB SECT",
+    ]
+
+    excluded_markers = [
+        "TRANSMISSION TIME",
+        "ANTICIPATION DISTANCE CALCULATION",
+        "FORMULA USED",
+        "TRAIN SECTION RUNNING TIME",
+        "MINIMUM VISIBILITY DISTANCE",
+        "SECTION BRAKING DISTANCE",
+        "INVARIANTS EMISSION",
+        "EMISSION ON LOOP",
+        "SINGULARITIES",
+        "TEST ABSC",
+    ]
+
+    has_required_markers = all(
+        marker in upper
+        for marker in required_markers
+    )
+
+    has_supporting_marker = any(
+        marker in upper
+        for marker in supporting_markers
+    )
+
+    has_excluded_marker = any(
+        marker in upper
+        for marker in excluded_markers
+    )
+
+    return (
+        has_required_markers
+        and has_supporting_marker
+        and not has_excluded_marker
+    )
+
+
+def is_transmission_calculation_page(page_text: str) -> bool:
+    """
+    Identify pages such as Appendix J pages 22 to 27:
+
+        Transmission time and anticipation distance calculation sheet
+
+    These pages contain route branches, anticipated branches, speed,
+    transmission time and calculated anticipation distances.
+    """
+    upper = normalise_spaces(page_text).upper()
+
+    required_markers = [
+        "TRANSMISSION TIME",
+        "ANTICIPATION DISTANCE",
+    ]
+
+    route_markers = [
+        "FIRST ROUTE",
+        "SECOND ROUTE",
+        "THIRD ROUTE",
+        "ANTICIPATED BRANCHES",
+    ]
+
+    return (
+        all(marker in upper for marker in required_markers)
+        and any(marker in upper for marker in route_markers)
+    )
 
 
 def page_metadata(page_text: str) -> Dict[str, str]:
@@ -737,28 +935,151 @@ def page_metadata(page_text: str) -> Dict[str, str]:
 # EVENT EXTRACTION
 # =============================================================================
 
-def extract_subsection_reference(text: str) -> str:
-    """
-    Extract generic subsection references.
+# =============================================================================
+# SUB-SECTION AND BRANCH IDENTIFIERS
+# =============================================================================
 
-    Examples:
-        9-1-1
-        09-01-1
-        09-01-1-0
-        Sub Section 09-01-1
+def normalise_subsection_parts(
+    sector: str,
+    section: str,
+    subsection: str,
+) -> str:
     """
+    Standard format:
+
+        09-01-0
+        09-03-1
+    """
+    return (
+        f"{int(sector):02d}-"
+        f"{int(section):02d}-"
+        f"{int(subsection)}"
+    )
+
+
+def normalise_branch_parts(
+    sector: str,
+    section: str,
+    subsection: str,
+    branch: str,
+) -> str:
+    """
+    Standard full branch format:
+
+        09-01-0-0
+        09-03-0-2
+        14-04-1-4
+    """
+    return (
+        f"{int(sector):02d}-"
+        f"{int(section):02d}-"
+        f"{int(subsection)}-"
+        f"{int(branch)}"
+    )
+
+
+def extract_explicit_subsection_reference(text: str) -> str:
+    """
+    Extract a subsection only when explicitly prefixed by 'Sub Section'.
+
+    Valid source examples:
+        Sub Section : 9-1-0
+        Sub Section: 09-01-1
+        Sub-section 09-01-2 / 65 kHz
+        Sub Section : 09-01-1-0
+
+    Returned values:
+        09-01-0
+        09-01-1
+        09-01-2
+
+    The fourth component is deliberately ignored because it is a branch
+    reference, not the subsection identifier.
+    """
+    text = normalise_spaces(text)
+
     match = re.search(
-        r"(?:SUB\s*-?\s*SECTION(?:\s*(?:NUMBER|NO\.?))?\s*[:=]?\s*)?"
-        r"\b(\d{1,2}\s*[- ]\s*\d{1,2}\s*[- ]\s*\d{1,2})"
-        r"(?:\s*[- ]\s*\d{1,2})?\b",
-        safe_text(text),
+        r"\bSUB\s*-?\s*SECTION"
+        r"(?:\s+(?:NUMBER|NO\.?))?"
+        r"\s*[:=]?\s*"
+        r"(?P<sector>\d{1,2})\s*[- ]\s*"
+        r"(?P<section>\d{1,2})\s*[- ]\s*"
+        r"(?P<subsection>\d{1,2})"
+        r"(?:\s*[- ]\s*\d{1,2})?",
+        text,
         flags=re.IGNORECASE,
     )
 
     if not match:
         return ""
 
-    return normalise_subsection(match.group(1))
+    try:
+        return normalise_subsection_parts(
+            sector=match.group("sector"),
+            section=match.group("section"),
+            subsection=match.group("subsection"),
+        )
+    except ValueError:
+        return ""
+
+
+def extract_branch_references(text: str) -> List[str]:
+    """
+    Extract four-part branch identifiers.
+
+    Source examples:
+        09-01-0-0, 09-01-1-0, 09-01-2-0
+        09-03-0-0, 09-03-0-2, 09-03-0-3
+        14-04-1-4
+
+    Returned:
+        [
+            '09-01-0-0',
+            '09-01-1-0',
+            '09-01-2-0',
+        ]
+    """
+    text = normalise_spaces(text)
+
+    matches = re.finditer(
+        r"\b"
+        r"(?P<sector>\d{1,2})\s*[- ]\s*"
+        r"(?P<section>\d{1,2})\s*[- ]\s*"
+        r"(?P<subsection>\d{1,2})\s*[- ]\s*"
+        r"(?P<branch>\d{1,2})"
+        r"\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    results: List[str] = []
+
+    for match in matches:
+        try:
+            branch_reference = normalise_branch_parts(
+                sector=match.group("sector"),
+                section=match.group("section"),
+                subsection=match.group("subsection"),
+                branch=match.group("branch"),
+            )
+        except ValueError:
+            continue
+
+        if branch_reference not in results:
+            results.append(branch_reference)
+
+    return results
+
+
+def extract_subsection_reference(text: str) -> str:
+    """
+    Compatibility wrapper.
+
+    Existing code may still call extract_subsection_reference(). It now only
+    returns explicitly labelled Sub Section values and will not accidentally
+    interpret K.P., rank, document number or OCR noise as a subsection.
+    """
+    return extract_explicit_subsection_reference(text)
 
 
 def extract_associated_variant(text: str) -> str:
@@ -898,22 +1219,6 @@ def extract_variants_by_type(text: str, variant_type: str) -> str:
         return ""
 
     return normalise_spaces(match.group(1)).strip("() ,;:-")[:500]
-
-
-def is_variant_composition_page(page_text: str) -> bool:
-    upper = safe_text(page_text).upper()
-
-    markers = [
-        "VARIANT COMPOSITION",
-        "VARIANTS COMPOSITION",
-        "COMPOSITION OF VARIANTS",
-        "PARTICIPATING VARIANT",
-        "ANTICIPATED VARIANT",
-        "RANK OF FIRST PARTICIPATING",
-        "RANK OF FIRST ANTICIPATED",
-    ]
-
-    return any(marker in upper for marker in markers)
 
 
 def infer_event_name(text: str) -> str:
@@ -1063,20 +1368,82 @@ def calculate_local_abscissa(
 
     return local_abscissa, log
 
+# =============================================================================
+# TRANSMISSION / ANTICIPATION CALCULATION HELPERS
+# =============================================================================
+
+def extract_number_after_label(
+    text: str,
+    label_pattern: str,
+) -> Optional[float]:
+    """
+    Extract one numerical value following a label.
+
+    Example:
+        Entry speed : Ve = 135 km/h
+        Initialisation distance at 22 km/h = 160 m
+    """
+    match = re.search(
+        label_pattern
+        + r"\s*[:=]?\s*"
+        + r"(-?\d+(?:[,.]\d+)?)",
+        normalise_spaces(text),
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return None
+
+    return to_float(match.group(1))
+
+
+def extract_two_numbers_after_label(
+    text: str,
+    label_pattern: str,
+) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Extract invariant / variant value pairs.
+
+    Example:
+        Minimum visibility distance 1,047 m 188 m
+
+    Returns:
+        (1047.0, 188.0)
+    """
+    match = re.search(
+        label_pattern
+        + r"\s*[:=]?\s*"
+        + r"(-?\d+(?:[,.]\d+)?)\s*m?"
+        + r"\s+"
+        + r"(-?\d+(?:[,.]\d+)?)\s*m?",
+        normalise_spaces(text),
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return None, None
+
+    return (
+        to_float(match.group(1)),
+        to_float(match.group(2)),
+    )
+
+
 def extract_singularities_table(pages: List[str]) -> pd.DataFrame:
     """
-    Extract every parsed singularity schedule row.
+    Extract all singularity schedule rows.
 
-    Important:
-    - Absolute K.P. remains preserved in absolute_abscissa_m.
-    - The sub-section start K.P. is used as local zero.
-    - Calculated local abscissa =
-          absolute singularity K.P. - sub-section start K.P.
+    Local Abscissa:
+        Absolute K.P. - Sub-section Start K.P.
+
+    A subsection start is accepted only when the actual schedule row contains
+    the explicit text 'Sub Section'. Context lines are not used to establish
+    a new subsection because they can cause incorrect OCR matches.
     """
     records: List[Dict[str, Any]] = []
 
     for page_number, page_text in enumerate(pages, start=1):
-        if not is_subdivision_page(page_text):
+        if not is_singularity_schedule_page(page_text):
             continue
 
         metadata = page_metadata(page_text)
@@ -1094,7 +1461,9 @@ def extract_singularities_table(pages: List[str]) -> pd.DataFrame:
         for line_index, line in enumerate(lines):
             parsed_row = parse_singularity_row(line)
 
-            # Use nearby text only for supporting information.
+            if parsed_row is None:
+                continue
+
             context_start = max(0, line_index - 2)
             context_end = min(len(lines), line_index + 4)
 
@@ -1102,30 +1471,21 @@ def extract_singularities_table(pages: List[str]) -> pd.DataFrame:
                 " ".join(lines[context_start:context_end])
             )
 
-            explicit_subsection = ""
-
-            if re.search(
-                r"\bSUB\s*-?\s*SECTION\b",
-                line,
-                flags=re.IGNORECASE,
-            ):
-                explicit_subsection = extract_subsection_reference(line)
+            # Only use the actual schedule row to establish a new subsection.
+            explicit_subsection = extract_explicit_subsection_reference(line)
 
             if explicit_subsection:
                 current_subsection = explicit_subsection
 
-            detected_route = extract_route_reference(f"{line} {context}")
+                # The K.P. of a 'Sub Section' schedule row is local zero.
+                current_subsection_start_abscissa = parsed_row["abscissa_m"]
+
+            detected_route = extract_route_reference(
+                f"{line} {context}"
+            )
 
             if detected_route:
                 current_route = detected_route
-
-            if parsed_row is None:
-                continue
-
-            # A schedule row explicitly containing "Sub Section" establishes
-            # the local zero K.P. for the following singularity rows.
-            if explicit_subsection:
-                current_subsection_start_abscissa = parsed_row["abscissa_m"]
 
             local_abscissa, calculation_log = calculate_local_abscissa(
                 absolute_abscissa_m=parsed_row["abscissa_m"],
@@ -1142,6 +1502,8 @@ def extract_singularities_table(pages: List[str]) -> pd.DataFrame:
                 if len(subsection_parts) == 3:
                     sector = subsection_parts[0]
                     section = subsection_parts[1]
+
+            singularity_name = parsed_row["remaining"]
 
             records.append(
                 {
@@ -1161,8 +1523,10 @@ def extract_singularities_table(pages: List[str]) -> pd.DataFrame:
                     ),
                     "calculated_local_abscissa_m": local_abscissa,
                     "singularity_code": parsed_row["singularity_code"],
-                    "singularity_name": parsed_row["remaining"],
-                    "associated_variant": extract_associated_variant(context),
+                    "singularity_name": singularity_name,
+                    "associated_variant": extract_associated_variant(
+                        f"{line} {context}"
+                    ),
                     "calculation_log": calculation_log,
                     "source_evidence": context[:MAX_EVIDENCE_LENGTH],
                 }
@@ -1187,6 +1551,7 @@ def extract_singularities_table(pages: List[str]) -> pd.DataFrame:
             "sector",
             "section",
             "subsection",
+            "pdf_page",
             "absolute_abscissa_m",
         ],
         na_position="last",
@@ -1355,6 +1720,7 @@ def extract_variant_composition_table(pages: List[str]) -> pd.DataFrame:
 def create_organised_source_log(
     singularities: pd.DataFrame,
     variant_composition: pd.DataFrame,
+    transmission_calculations: pd.DataFrame,
 ) -> str:
     lines = [
         "=" * 120,
@@ -1423,7 +1789,359 @@ def create_organised_source_log(
             )
         )
 
+    lines.extend(
+        [
+            "",
+            "=" * 120,
+            "TABLE 3 - TRANSMISSION / ANTICIPATION CALCULATIONS",
+            "=" * 120,
+        ]
+    )
+
+    if transmission_calculations.empty:
+        lines.append("[No transmission calculation records extracted]")
+    else:
+        display_columns = [
+            "pdf_page",
+            "sector",
+            "section",
+            "route_number",
+            "route_name",
+            "direction",
+            "route_branches",
+            "anticipated_branches",
+            "entry_speed_kph",
+            "initialisation_distance_m",
+            "message_elements",
+            "transmission_time_s",
+            "current_computed_invariant_m",
+            "current_computed_variant_m",
+        ]
+
+        available_columns = [
+            column
+            for column in display_columns
+            if column in transmission_calculations.columns
+        ]
+
+        lines.append(
+            transmission_calculations[available_columns].to_string(
+                index=False,
+                max_colwidth=100,
+            )
+        )
+
     return "\n".join(lines)
+
+def extract_transmission_calculation_table(
+    pages: List[str],
+) -> pd.DataFrame:
+    """
+    Extract information from transmission-time and anticipation-distance
+    calculation pages.
+
+    Typical Appendix J page text:
+
+        1 - First route, to Up TCL :
+        09-01-0-0, 09-01-1-0, ...
+
+        - Anticipated branches to be run :
+        09-03-0-0, 09-03-0-2, ...
+
+        Entry speed : Ve = 135 km/h
+        Initialisation distance at 22 km/h = 160 m
+    """
+    records: List[Dict[str, Any]] = []
+
+    for page_number, page_text in enumerate(pages, start=1):
+        if not is_transmission_calculation_page(page_text):
+            continue
+
+        text = normalise_spaces(page_text)
+        metadata = page_metadata(text)
+
+        sector = metadata["sector"]
+        section = metadata["section"]
+
+        sector_section_match = re.search(
+            r"\bSECTOR\s*(\d{1,2})\s*,?\s*SECTION\s*(\d{1,2})",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        if sector_section_match:
+            sector = f"{int(sector_section_match.group(1)):02d}"
+            section = f"{int(sector_section_match.group(2)):02d}"
+
+        route_blocks = re.split(
+            r"(?=\b\d+\s*-\s*"
+            r"(?:FIRST|SECOND|THIRD)\s+ROUTE\b)",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        for route_block in route_blocks:
+            route_match = re.search(
+                r"\b(?P<route_number>\d+)\s*-\s*"
+                r"(?P<route_name>FIRST|SECOND|THIRD)\s+ROUTE"
+                r"(?:\s*,?\s*TO\s*(?P<direction>UP|DN|DOWN)\s+TCL)?"
+                r"\s*[:=]?\s*"
+                r"(?P<route_branches>.*?)"
+                r"(?="
+                r"\s*-\s*ANTICIPATED\s+BRANCHES|"
+                r"\s*ENTRY\s+SPEED|"
+                r"$"
+                r")",
+                route_block,
+                flags=re.IGNORECASE,
+            )
+
+            if not route_match:
+                continue
+
+            raw_direction = safe_text(
+                route_match.group("direction")
+            ).upper()
+
+            if raw_direction == "UP":
+                direction = "Up"
+            elif raw_direction in {"DN", "DOWN"}:
+                direction = "Down"
+            else:
+                direction = ""
+
+            route_branches = ", ".join(
+                extract_branch_references(
+                    route_match.group("route_branches")
+                )
+            )
+
+            anticipated_match = re.search(
+                r"ANTICIPATED\s+BRANCHES\s+TO\s+BE\s+RUN"
+                r"\s*[:=]?\s*"
+                r"(?P<anticipated_branches>.*?)"
+                r"(?="
+                r"\s*ENTRY\s+SPEED|"
+                r"\s*\d+\s*-\s*"
+                r"(?:FIRST|SECOND|THIRD)\s+ROUTE|"
+                r"$"
+                r")",
+                route_block,
+                flags=re.IGNORECASE,
+            )
+
+            anticipated_branches = ""
+
+            if anticipated_match:
+                anticipated_branches = ", ".join(
+                    extract_branch_references(
+                        anticipated_match.group(
+                            "anticipated_branches"
+                        )
+                    )
+                )
+
+            entry_speed_kph = extract_number_after_label(
+                route_block,
+                r"ENTRY\s+SPEED\s*:\s*VE\s*=",
+            )
+
+            initialisation_distance_m = extract_number_after_label(
+                route_block,
+                r"INITIALISATION\s+DISTANCE\s+AT\s+22\s*KM/H\s*=",
+            )
+
+            running_time_s = extract_number_after_label(
+                route_block,
+                r"\bRUNNING\s+TIME",
+            )
+
+            dwell_time_s = extract_number_after_label(
+                route_block,
+                r"\bDWELL\s+TIME",
+            )
+
+            loop_count = extract_number_after_label(
+                route_block,
+                r"LOOPS?\s+(?:NBER|NUMBER)\s*:\s*LN",
+            )
+
+            message_elements = extract_number_after_label(
+                route_block,
+                r"ELTS?\s+(?:NBER|NUMBER)\s*:\s*N",
+            )
+
+            transmission_time_s = extract_number_after_label(
+                route_block,
+                r"\bTRI\s*",
+            )
+
+            visibility_invariant, visibility_variant = (
+                extract_two_numbers_after_label(
+                    route_block,
+                    r"MINIMUM\s+VISIBILITY\s+DISTANCE",
+                )
+            )
+
+            braking_invariant, braking_variant = (
+                extract_two_numbers_after_label(
+                    route_block,
+                    r"SECTION\s+BRAKING\s+DISTANCE",
+                )
+            )
+
+            downstream_invariant, downstream_variant = (
+                extract_two_numbers_after_label(
+                    route_block,
+                    r"DOWNSTREAM\s+REQUEST",
+                )
+            )
+
+            computed_invariant, computed_variant = (
+                extract_two_numbers_after_label(
+                    route_block,
+                    r"CURRENT\s+COMPUTED",
+                )
+            )
+
+            # Total running time. Restrict to the first Total before
+            # "Anticipation distance for section".
+            total_running_time_match = re.search(
+                r"\bTOTAL\s+(-?\d+(?:[,.]\d+)?)\s*S",
+                route_block,
+                flags=re.IGNORECASE,
+            )
+
+            total_running_time_s = None
+
+            if total_running_time_match:
+                total_running_time_s = to_float(
+                    total_running_time_match.group(1)
+                )
+
+            # Anticipation total appears after braking distance.
+            total_anticipation_match = re.search(
+                r"SECTION\s+BRAKING\s+DISTANCE.*?"
+                r"\bTOTAL\s+"
+                r"(-?\d+(?:[,.]\d+)?)\s*M?\s+"
+                r"(-?\d+(?:[,.]\d+)?)\s*M?",
+                route_block,
+                flags=re.IGNORECASE,
+            )
+
+            total_anticipation_invariant_m = None
+            total_anticipation_variant_m = None
+
+            if total_anticipation_match:
+                total_anticipation_invariant_m = to_float(
+                    total_anticipation_match.group(1)
+                )
+
+                total_anticipation_variant_m = to_float(
+                    total_anticipation_match.group(2)
+                )
+
+            comments_match = re.search(
+                r"COMMENTS?\s*:\s*(.+?)"
+                r"(?="
+                r"\s*\d+\s*-\s*"
+                r"(?:FIRST|SECOND|THIRD)\s+ROUTE|"
+                r"$"
+                r")",
+                route_block,
+                flags=re.IGNORECASE,
+            )
+
+            comments = ""
+
+            if comments_match:
+                comments = normalise_spaces(
+                    comments_match.group(1)
+                )
+
+            records.append(
+                {
+                    "pdf_page": page_number,
+                    "sector": sector,
+                    "section": section,
+                    "route_number": safe_text(
+                        route_match.group("route_number")
+                    ),
+                    "route_name": safe_text(
+                        route_match.group("route_name")
+                    ).title(),
+                    "direction": direction,
+                    "route_branches": route_branches,
+                    "anticipated_branches": anticipated_branches,
+                    "entry_speed_kph": entry_speed_kph,
+                    "initialisation_distance_m": (
+                        initialisation_distance_m
+                    ),
+                    "running_time_s": running_time_s,
+                    "dwell_time_s": dwell_time_s,
+                    "total_running_time_s": total_running_time_s,
+                    "loop_count": loop_count,
+                    "message_elements": message_elements,
+                    "transmission_time_s": transmission_time_s,
+                    "minimum_visibility_invariant_m": (
+                        visibility_invariant
+                    ),
+                    "minimum_visibility_variant_m": (
+                        visibility_variant
+                    ),
+                    "braking_distance_invariant_m": braking_invariant,
+                    "braking_distance_variant_m": braking_variant,
+                    "total_anticipation_invariant_m": (
+                        total_anticipation_invariant_m
+                    ),
+                    "total_anticipation_variant_m": (
+                        total_anticipation_variant_m
+                    ),
+                    "downstream_request_invariant_m": (
+                        downstream_invariant
+                    ),
+                    "downstream_request_variant_m": (
+                        downstream_variant
+                    ),
+                    "current_computed_invariant_m": (
+                        computed_invariant
+                    ),
+                    "current_computed_variant_m": (
+                        computed_variant
+                    ),
+                    "comments": comments,
+                    "source_evidence": route_block[:MAX_EVIDENCE_LENGTH],
+                }
+            )
+
+    if not records:
+        return pd.DataFrame(
+            columns=TRANSMISSION_CALCULATION_COLUMNS
+        )
+
+    dataframe = pd.DataFrame(records)
+
+    dataframe = dataframe.drop_duplicates(
+        subset=[
+            "pdf_page",
+            "route_number",
+            "route_name",
+            "route_branches",
+        ]
+    )
+
+    dataframe = dataframe.sort_values(
+        by=[
+            "sector",
+            "section",
+            "pdf_page",
+            "route_number",
+        ],
+        na_position="last",
+    ).reset_index(drop=True)
+
+    return dataframe[TRANSMISSION_CALCULATION_COLUMNS]
+
 # =============================================================================
 # MAIN REGISTER EXTRACTION
 # =============================================================================
@@ -1443,7 +2161,7 @@ def extract_test_register_from_pdf(
 
         progress_bar.progress(int(page_number / total_pages * 100))
 
-        if not is_subdivision_page(page_text):
+        if not is_singularity_schedule_page(page_text):
             continue
 
         metadata = page_metadata(page_text)
@@ -1467,28 +2185,14 @@ def extract_test_register_from_pdf(
                 " ".join(lines[context_start:context_end])
             )
 
-            detected_subsection = extract_subsection_reference(
-                f"{line} {context}"
-            )
+            # A subsection start is valid only where the actual singularity row
+            # explicitly contains 'Sub Section'. Do not use nearby OCR context for this,
+            # otherwise ranks, K.P.s and unrelated values can become false subsections.
+            detected_subsection = extract_explicit_subsection_reference(line)
 
-            # A sub-section start is normally a schedule row containing:
-            # "Sub Section 09-01-1 ..."
-            # The associated absolute k.p. becomes the local zero point.
             if detected_subsection and parsed_row is not None:
-                line_upper = line.upper()
-                context_upper = context.upper()
-
-                if (
-                    "SUB SECTION" in line_upper
-                    or "SUB-SECTION" in line_upper
-                    or "SUB SECTION" in context_upper
-                    or "SUB-SECTION" in context_upper
-                ):
-                    current_subsection = detected_subsection
-                    current_subsection_start_abscissa = parsed_row["abscissa_m"]
-
-            elif detected_subsection and not current_subsection:
                 current_subsection = detected_subsection
+                current_subsection_start_abscissa = parsed_row["abscissa_m"]
 
             if parsed_row is None:
                 continue
@@ -1995,6 +2699,7 @@ def create_export_zip(
     pdf_text_log: str,
     singularities: pd.DataFrame,
     variant_composition: pd.DataFrame,
+    transmission_calculations: pd.DataFrame,
     organised_source_log: str,
     progress_bar: Any,
     progress_text: Any,
@@ -2027,6 +2732,10 @@ def create_export_zip(
         archive.writestr(
             "Variant_Composition.csv",
             variant_composition.to_csv(index=False),
+        )
+        archive.writestr(
+            "Transmission_Anticipation_Calculations.csv",
+            transmission_calculations.to_csv(index=False),
         )
         archive.writestr(
             "ATC_Low_Speed_Test_Register.txt",
@@ -2089,6 +2798,7 @@ def create_excel_bytes(
     project_info: Dict[str, str],
     singularities: Optional[pd.DataFrame] = None,
     variant_composition: Optional[pd.DataFrame] = None,
+    transmission_calculations: Optional[pd.DataFrame] = None,
 ) -> bytes:
     output = io.BytesIO()
 
@@ -2151,6 +2861,13 @@ def create_excel_bytes(
                 index=False,
             )
 
+        if transmission_calculations is not None:
+            transmission_calculations.to_excel(
+                writer,
+                sheet_name="Transmission Calculation",
+                index=False,
+            )
+
         for worksheet in writer.book.worksheets:
             worksheet.freeze_panes = "A2"
             worksheet.auto_filter.ref = worksheet.dimensions
@@ -2196,6 +2913,11 @@ def initialise_test_sheet_state() -> None:
         "test_sheet_variant_composition": pd.DataFrame(
             columns=VARIANT_COMPOSITION_COLUMNS
         ),
+
+        "test_sheet_transmission_calculations": pd.DataFrame(
+            columns=TRANSMISSION_CALCULATION_COLUMNS
+        ),
+
         "test_sheet_organised_source_log": "",
     }
 
@@ -2302,6 +3024,11 @@ def render_test_sheet_generator_app() -> None:
         )
 
         st.session_state["test_sheet_organised_source_log"] = ""
+        st.session_state[
+            "test_sheet_transmission_calculations"
+        ] = pd.DataFrame(
+            columns=TRANSMISSION_CALCULATION_COLUMNS
+        )
         st.session_state["test_sheet_pdf_extraction_summary"] = pd.DataFrame(
             columns=[
                 "pdf_page",
@@ -2385,6 +3112,17 @@ def render_test_sheet_generator_app() -> None:
             st.session_state["test_sheet_variant_composition"] = (
                 variant_composition
             )
+            progress_text.info(
+                "Extracting transmission and anticipation calculation records..."
+            )
+
+            transmission_calculations = (
+                extract_transmission_calculation_table(pages)
+            )
+
+            st.session_state[
+                "test_sheet_transmission_calculations"
+            ] = transmission_calculations
 
             # -----------------------------------------------------------------
             # 4. Create readable text table / audit log.
@@ -2393,6 +3131,7 @@ def render_test_sheet_generator_app() -> None:
                 create_organised_source_log(
                     singularities=singularities,
                     variant_composition=variant_composition,
+                    transmission_calculations=transmission_calculations,
                 )
             )
 
@@ -2422,6 +3161,7 @@ def render_test_sheet_generator_app() -> None:
                 f"PDF pages: {len(pages)} | "
                 f"Singularity rows: {len(singularities)} | "
                 f"Variant Composition records: {len(variant_composition)} | "
+                f"Transmission route records: {len(transmission_calculations)} | "
                 f"Low-Speed test records: {len(register)}"
             )
 
@@ -2488,6 +3228,10 @@ def render_test_sheet_generator_app() -> None:
         "test_sheet_variant_composition",
         pd.DataFrame(columns=VARIANT_COMPOSITION_COLUMNS),
     )
+    transmission_calculations = st.session_state.get(
+        "test_sheet_transmission_calculations",
+        pd.DataFrame(columns=TRANSMISSION_CALCULATION_COLUMNS),
+    )
 
     organised_source_log = st.session_state.get(
         "test_sheet_organised_source_log",
@@ -2515,10 +3259,11 @@ def render_test_sheet_generator_app() -> None:
 
         st.markdown("### Organised Source Tables")
 
-        tab_1, tab_2, tab_3 = st.tabs(
+        tab_1, tab_2, tab_3, tab_4 = st.tabs(
             [
                 "Singularities",
                 "Variant Composition",
+                "Transmission / Anticipation",
                 "Organised TXT Log",
             ]
         )
@@ -2568,6 +3313,31 @@ def render_test_sheet_generator_app() -> None:
             )
 
         with tab_3:
+            st.caption(
+                "Transmission-time and anticipation-distance calculation "
+                "records, including route branches and anticipated branches."
+            )
+
+            st.dataframe(
+                transmission_calculations,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.download_button(
+                "Download Transmission / Anticipation CSV",
+                data=transmission_calculations.to_csv(
+                    index=False
+                ).encode("utf-8"),
+                file_name=clean_filename(
+                    f"{project_info['sheet_prefix']}_"
+                    f"Transmission_Anticipation.csv"
+                ),
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        with tab_4:
             st.text_area(
                 "Organised source extraction log",
                 value=organised_source_log,
@@ -2726,6 +3496,7 @@ def render_test_sheet_generator_app() -> None:
         project_info=project_info,
         singularities=singularities,
         variant_composition=variant_composition,
+        transmission_calculations=transmission_calculations,
     )
 
     full_register_text = create_register_text(
@@ -2796,10 +3567,13 @@ def render_test_sheet_generator_app() -> None:
                             "test_sheet_pdf_text_log",
                             "",
                         ),
+                        singularities=singularities,
+                        variant_composition=variant_composition,
+                        transmission_calculations=transmission_calculations,
+                        organised_source_log=organised_source_log,
                         progress_bar=progress_bar,
                         progress_text=progress_text,
                     )
-
                     st.session_state["test_sheet_export_zip"] = export_zip
 
                 except Exception as exc:
