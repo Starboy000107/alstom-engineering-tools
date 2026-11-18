@@ -13,4 +13,4 @@ pypdf>=4.0.0
 pytesseract>=0.3.10
 Pillow>=10.0.0
 pdfplumber
-marker-pdf
+marker-pdf==1.10.1
