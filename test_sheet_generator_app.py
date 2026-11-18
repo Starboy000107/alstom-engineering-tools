@@ -484,17 +484,23 @@ def normalise_subsection(value: str) -> str:
 
 def marker_is_installed() -> bool:
     """
-    Return True when marker-pdf is installed and importable.
+    Check whether marker-pdf can be imported.
 
-    Importing lazily is important so the whole Streamlit app can still start
-    and show a helpful message if Marker is not installed correctly.
+    Do not silently swallow exceptions. A package can be installed but fail
+    during import because of a missing native library, PyTorch incompatibility,
+    CUDA issue, or another transitive dependency error.
     """
     try:
         from marker.converters.pdf import PdfConverter  # noqa: F401
         from marker.models import create_model_dict  # noqa: F401
         return True
-    except Exception:
-        return False
+
+    except Exception as exc:
+        raise RuntimeError(
+            "marker-pdf could not be imported. It may be absent, or one of "
+            "its dependencies may be unavailable. "
+            f"Import error: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 @st.cache_resource(show_spinner=False)
@@ -802,15 +808,8 @@ def extract_pdf_text_pages(
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
     """
     Marker-PDF-only extraction entry point.
-
-    Marker is mandatory. No Tesseract, OpenCV, PIL image OCR, or native PDF
-    text extraction fallback is permitted.
     """
-    if not marker_is_installed():
-        raise RuntimeError(
-            "marker-pdf is required but is not installed. "
-            "Install it with: pip install marker-pdf"
-        )
+    marker_is_installed()
 
     try:
         return extract_pdf_text_pages_with_marker(pdf_bytes)
@@ -3414,7 +3413,7 @@ def create_pdf_extraction_summary(
         )
 
     return pd.DataFrame(records)
-    
+
 def render_test_sheet_generator_app() -> None:
     initialise_test_sheet_state()
 
