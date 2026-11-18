@@ -2,3 +2,10 @@ libreoffice-calc
 tesseract-ocr
 tesseract-ocr-eng
 poppler-utils
+zlib1g-dev
+libjpeg62-turbo-dev
+libfreetype6-dev
+liblcms2-dev
+libopenjp2-7-dev
+libtiff-dev
+libwebp-dev
