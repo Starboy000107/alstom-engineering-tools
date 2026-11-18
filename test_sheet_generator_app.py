@@ -26,7 +26,7 @@ MAX_EVIDENCE_LENGTH = 3000
 
 # OCR rendering quality.
 # 450 DPI is suitable for small engineering-table text.
-OCR_DPI = 450
+OCR_DPI = 300
 
 # Retained for compatibility. Native PDF text is still used if available.
 OCR_MIN_TEXT_CHARS = 80
